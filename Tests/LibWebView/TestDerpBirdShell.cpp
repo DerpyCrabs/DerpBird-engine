@@ -235,11 +235,20 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
             await wait(()=>!document.querySelector('.proxy-popup'));
             const sourceButton = text => Array.from(document.querySelectorAll('.source-manager button')).find(b=>b.textContent===text);
-            document.querySelector('[aria-label="Styles on this page"]').click();
+            document.querySelector('button[aria-label="Styles on this page"]').click();
             await wait(()=>document.querySelector('.page-source-row input:not(:disabled)'));
+            if(document.querySelector('.page-sources-popup header button'))throw new Error('Redundant popup close button');
+            for (const dismiss of ['Escape', 'outside', 'toggle']) {
+                if(dismiss==='Escape')document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+                else if(dismiss==='outside')document.querySelector('.address').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
+                else document.querySelector('button[aria-label="Styles on this page"]').click();
+                await wait(()=>!document.querySelector('.page-sources-popup'));
+                document.querySelector('button[aria-label="Styles on this page"]').click();
+                await wait(()=>document.querySelector('.page-source-row input:not(:disabled)'));
+            }
             await shot('06-page-styles');
             document.querySelector('.page-source-row input').click();
-            await wait(()=>document.querySelector('.page-source-row small')?.textContent==='Disabled' && !document.querySelector('.page-source-row input').disabled);
+            await wait(()=>document.querySelector('.page-source-row input')?.checked===false && !document.querySelector('.page-source-row input').disabled);
             Array.from(document.querySelectorAll('.page-sources-popup button')).find(b=>b.textContent==='Manage styles').click();
             await wait(()=>document.querySelector('[aria-label="Style name"]:not(:disabled)'));
             const styleName=document.querySelector('[aria-label="Style name"]');styleName.value='Readable website';styleName.dispatchEvent(new Event('input',{bubbles:true}));
@@ -255,7 +264,7 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             await shot('07-style-editor');
             document.querySelector('[aria-label="Close styles"]').click();
             await wait(()=>!document.querySelector('.source-manager'));
-            document.querySelector('[aria-label="Scripts on this page"]').click();
+            document.querySelector('button[aria-label="Scripts on this page"]').click();
             await wait(()=>document.querySelector('.page-source-row input:not(:disabled)'));
             await shot('08-page-scripts');
             document.querySelector('.page-source-row input').click();
