@@ -123,7 +123,7 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
     Core::EventLoop::current().spin_until([&] { return viewports > 0 || crashed; });
     VERIFY(!crashed);
     EXPECT_EQ(snapshots, 1u);
-    view->run_javascript("document.dispatchEvent(new KeyboardEvent('keydown', {key:'t',ctrlKey:true,bubbles:true}))"_string);
+    view->run_javascript("(document.activeElement ?? document).dispatchEvent(new KeyboardEvent('keydown', {key:'t',ctrlKey:true,bubbles:true}))"_string);
     Core::EventLoop::current().spin_until([&] { return creations > 0 || crashed; });
     VERIFY(!crashed);
     EXPECT_EQ(creations, 1u);
@@ -227,19 +227,19 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             document.querySelector('[aria-label="Proxy switcher"]').click();
             await wait(()=>document.querySelectorAll('.proxy-profile-option').length===4);
             await wait(()=>!document.querySelector('.proxy-profile-option[aria-pressed="true"]').disabled);
-            document.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));
+            (document.activeElement ?? document).dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));
             if(document.activeElement!==document.querySelector('.proxy-popup-settings'))throw new Error('Menu End key');
-            document.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}));
+            (document.activeElement ?? document).dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}));
             if(document.activeElement!==document.querySelector('.proxy-profile-option[aria-pressed="true"]'))throw new Error('Menu arrow key');
             await shot('05-profile-menu');
-            document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+            (document.activeElement ?? document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
             await wait(()=>!document.querySelector('.proxy-popup'));
             const sourceButton = text => Array.from(document.querySelectorAll('.source-manager button')).find(b=>b.textContent===text);
             document.querySelector('button[aria-label="Styles on this page"]').click();
             await wait(()=>document.querySelector('.page-source-row input:not(:disabled)'));
             if(document.querySelector('.page-sources-popup header button'))throw new Error('Redundant popup close button');
             for (const dismiss of ['Escape', 'outside', 'toggle']) {
-                if(dismiss==='Escape')document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+                if(dismiss==='Escape')(document.activeElement ?? document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
                 else if(dismiss==='outside')document.querySelector('.address').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
                 else document.querySelector('button[aria-label="Styles on this page"]').click();
                 await wait(()=>!document.querySelector('.page-sources-popup'));
