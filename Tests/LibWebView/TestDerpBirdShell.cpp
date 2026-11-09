@@ -1,5 +1,8 @@
 #include "HeadlessTest.h"
 #include <AK/JsonObject.h>
+#include <AK/JsonArray.h>
+#include <LibCore/Environment.h>
+#include <LibHTTP/Proxy.h>
 #include <AK/LexicalPath.h>
 #include <LibCore/EventLoop.h>
 #include <LibGfx/SystemTheme.h>
@@ -34,12 +37,27 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
     view->on_web_content_crashed = [&](auto) { crashed = true; };
     Core::EventLoop::current().spin_until([&] { return loads > 0 || crashed; });
     VERIFY(!crashed);
+    auto proxy_state = MUST(JsonValue::from_string(R"({"revision":0,"active":"direct","options":{"schemaVersion":2,"+proxy":{"name":"proxy","profileType":"FixedProfile","fallbackProxy":{"scheme":"http","host":"127.0.0.1","port":8080}},"+auto":{"name":"auto","profileType":"SwitchProfile","defaultProfileName":"direct","rules":[]}}})"sv)).as_object();
+    auto& proxy_rules = *proxy_state.get_object("options"sv)->get_object("+auto"sv)->get_array("rules"sv);
+    for (size_t i = 0; i < 846; ++i) {
+        JsonObject condition; condition.set("conditionType"sv, "HostWildcardCondition"sv); condition.set("pattern"sv, MUST(String::formatted("*.site{}.test", i)));
+        JsonObject rule; rule.set("condition"sv, move(condition)); rule.set("profileName"sv, "proxy"sv); proxy_rules.must_append(move(rule));
+    }
+    size_t proxy_writes = 0;
     auto handle_request = [&](JsonValue const& request) -> ErrorOr<JsonValue> {
         auto const& data = request.as_object();
         if (data.get_string("type"sv) == "snapshot"sv) {
             ++snapshots;
             warnln("Shell snapshot {}", snapshots);
             return JsonValue::from_string(R"json({"version":1,"revision":1,"tabs":[],"activeTabId":null,"preferences":{"layout":"vertical","compact":false}})json"sv);
+        }
+        if (data.get_string("type"sv) == "proxy.get"sv) return JsonValue(proxy_state);
+        if (data.get_string("type"sv) == "proxy.replace"sv) {
+            HTTP::ProxyConfiguration configuration;
+            TRY(configuration.set_omega(data.get_object("options"sv).value(), data.get_string("active"sv).value()));
+            proxy_state = data;
+            proxy_state.set("revision"sv, ++proxy_writes);
+            return JsonValue(proxy_state);
         }
         auto command = data.get_object("command"sv);
         if (!command.has_value())
@@ -79,6 +97,64 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
     Core::EventLoop::current().spin_until([&] { return creations > 0 || crashed; });
     VERIFY(!crashed);
     EXPECT_EQ(creations, 1u);
+
+    // Exercise the actual compiled proxy editor in Ladybird, not a DOM emulator.
+    String proxy_result;
+    view->on_console_message = [&](WebView::ConsoleOutput message) {
+        if (auto* log = message.output.get_pointer<WebView::ConsoleLog>(); log && log->arguments.size() == 1 && log->arguments[0].is_string()) {
+            auto text = log->arguments[0].as_string();
+            if (text.bytes_as_string_view().starts_with("PROXY:"sv)) proxy_result = move(text);
+        }
+    };
+    view->start_sending_console_output(true, true);
+    view->run_javascript(R"JS((async()=>{
+        const wait=async f=>{for(let i=0;i<200;i++){if(f())return;await new Promise(r=>setTimeout(r,20));}throw new Error('UI timeout')};
+        const button=t=>Array.from(document.querySelectorAll('.proxy-manager button')).find(b=>b.textContent===t);
+        try {
+            document.querySelector('[aria-label="Proxy switcher"]').click();
+            await wait(()=>document.querySelector('[aria-label="Active proxy profile"]')?.options.length===4);
+            const backup={schemaVersion:2,'-startupProfileName':'direct','-confirmDeletion':false,'+proxy':{name:'proxy',profileType:'FixedProfile',fallbackProxy:{scheme:'http',host:'127.0.0.1',port:8080}},'+auto':{name:'auto',profileType:'SwitchProfile',defaultProfileName:'direct',rules:Array.from({length:846},(_,i)=>({condition:{conditionType:'HostWildcardCondition',pattern:`*.site${i}.test`},profileName:'proxy'}))}};
+            const transfer=new DataTransfer();transfer.items.add(new File([JSON.stringify(backup)],'ZeroOmegaOptions.bak',{type:'application/json'}));
+            const importer=document.querySelector('[aria-label="Import ZeroOmega backup"]');importer.files=transfer.files;importer.dispatchEvent(new Event('change',{bubbles:true}));
+            await wait(()=>document.querySelector('[role="status"]')?.textContent.includes('846 rules'));
+            button('Apply settings').click();
+            await wait(()=>document.querySelector('[role="status"]')?.textContent.includes('applied'));
+            const originalClick=HTMLAnchorElement.prototype.click;
+            let exported;
+            HTMLAnchorElement.prototype.click=function(){fetch(this.href).then(r=>r.json()).then(value=>exported=value)};
+            button('Export ZeroOmega').click();
+            await wait(()=>exported);
+            HTMLAnchorElement.prototype.click=originalClick;
+            if(JSON.stringify(exported)!==JSON.stringify(backup))throw new Error('Backup round trip changed fields');
+            Array.from(document.querySelectorAll('.proxy-manager aside button')).find(b=>b.textContent.startsWith('auto')).click();
+            await wait(()=>document.querySelectorAll('.proxy-rule').length===40);
+            button('Next').click();
+            await wait(()=>document.querySelector('[aria-label="Rule 41 pattern"]'));
+            const search=document.querySelector('[aria-label="Search proxy rules"]');search.value='site845';search.dispatchEvent(new Event('input',{bubbles:true}));
+            await wait(()=>document.querySelectorAll('.proxy-rule').length===1);
+            const input=document.querySelector('[aria-label="Rule 846 pattern"]');input.value='*.edited.test';input.dispatchEvent(new Event('input',{bubbles:true}));
+            button('Apply settings').click();
+            await wait(()=>document.querySelector('[role="status"]')?.textContent.includes('applied'));
+            const active=document.querySelector('[aria-label="Active proxy profile"]');active.value='auto';active.dispatchEvent(new Event('change',{bubbles:true}));
+            await wait(()=>document.querySelector('[aria-label="Active proxy profile"]').value==='auto' && !document.querySelector('[aria-label="Active proxy profile"]').disabled);
+            search.value='';search.dispatchEvent(new Event('input',{bubbles:true}));
+            await wait(()=>document.querySelectorAll('.proxy-rule').length===40);
+            console.log('PROXY:PASS');
+        } catch(error) {console.log('PROXY:FAIL:'+error.message)}
+    })())JS"_string);
+    Core::EventLoop::current().spin_until([&] { return !proxy_result.is_empty() || crashed; });
+    VERIFY(!crashed);
+    EXPECT_EQ(proxy_result, "PROXY:PASS"sv);
+    EXPECT_EQ(proxy_writes, 3u);
+    EXPECT_EQ(proxy_state.get_string("active"sv).value(), "auto"sv);
+    auto const& saved_rules = *proxy_state.get_object("options"sv)->get_object("+auto"sv)->get_array("rules"sv);
+    EXPECT_EQ(saved_rules.at(845).as_object().get_object("condition"sv)->get_string("pattern"sv).value(), "*.edited.test"sv);
+    if (Core::Environment::has("DERPBIRD_PROXY_SCREENSHOT"sv)) {
+        bool captured = false;
+        view->take_screenshot(WebView::ViewImplementation::ScreenshotType::Full)->when_resolved([&](auto const& path) { warnln("Proxy screenshot: {}", path.string()); captured = true; }).when_rejected([&](auto&) { captured = true; FAIL("Proxy screenshot failed"); });
+        Core::EventLoop::current().spin_until([&] { return captured || crashed; });
+        VERIFY(!crashed);
+    }
 
     // A fresh document must reacquire the channel and publish its geometry.
     auto old_viewports = viewports;

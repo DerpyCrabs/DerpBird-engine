@@ -8,6 +8,8 @@
 
 #include <AK/ByteString.h>
 #include <AK/Function.h>
+#include <AK/JsonObject.h>
+#include <AK/HashMap.h>
 #include <AK/Optional.h>
 #include <AK/Vector.h>
 #include <LibIPC/Forward.h>
@@ -38,7 +40,7 @@ struct Proxy {
     ByteString userinfo;
 };
 
-// Proxy environment variables with libcurl precedence.
+// Environment proxies with libcurl precedence and optional ZeroOmega routing.
 class ProxyConfiguration {
 public:
     using EnvironmentLookup = Function<Optional<StringView>(StringView)>;
@@ -56,7 +58,11 @@ public:
 
     Optional<Proxy const&> proxy_for(URL::URL const&) const;
 
-    bool is_empty() const { return !m_http_proxy.has_value() && !m_https_proxy.has_value(); }
+    bool is_empty() const { return m_omega_options.size() == 0 && !m_http_proxy.has_value() && !m_https_proxy.has_value(); }
+
+    ErrorOr<void> set_omega(JsonObject, String active_profile);
+    JsonObject const& omega_options() const { return m_omega_options; }
+    String const& active_profile() const { return m_active_profile; }
 
     Optional<Proxy> const& http_proxy() const { return m_http_proxy; }
     Optional<Proxy> const& https_proxy() const { return m_https_proxy; }
@@ -64,6 +70,10 @@ public:
 
 private:
     bool is_excluded(StringView host) const;
+    Optional<Proxy const&> omega_proxy_for(URL::URL const&, String const&, size_t depth = 0) const;
+    JsonObject m_omega_options;
+    String m_active_profile;
+    HashMap<String, Proxy> m_omega_endpoints;
 
     Optional<Proxy> m_http_proxy;
     Optional<Proxy> m_https_proxy;

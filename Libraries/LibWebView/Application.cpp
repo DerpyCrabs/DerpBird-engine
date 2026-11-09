@@ -706,6 +706,16 @@ ErrorOr<void> Application::initialize(Main::Arguments const& arguments)
     // Test results must not depend on the languages of the machine running the tests.
     auto platform_languages = m_web_content_options.is_test_mode == IsTestMode::Yes ? Vector<String> {} : platform_preferred_languages();
 
+    // Load routing before any RequestServer or restored page can make a request.
+    auto proxy_state = TRY(read_json_file(LexicalPath::join(profile().paths().config, "DerpBirdProxy.json"sv).string()));
+    if (proxy_state.size()) {
+        auto options = proxy_state.get_object("options"sv);
+        auto active = proxy_state.get_string("active"sv);
+        if (!options.has_value() || !active.has_value())
+            return Error::from_string_literal("Invalid saved proxy configuration");
+        TRY(m_request_server_options.proxy_configuration.set_omega(*options, *active));
+    }
+
     m_settings = make<Settings>(Settings::create(LexicalPath::join(profile().paths().config, "Settings.json"sv).string(), move(platform_languages)));
     // A browser that crashed left a report that was recovered before the settings were read.
     if (m_settings->crash_report_sending() == CrashReportSending::NeverSend)
@@ -2330,6 +2340,15 @@ void Application::recover_compositor_process()
         client->replay_compositor_view_state_after_reconnect({});
     for (auto& client : clients)
         client->notify_compositor_process_reconnected({});
+}
+
+void Application::set_proxy_configuration(HTTP::ProxyConfiguration configuration)
+{
+    m_request_server_options.proxy_configuration = move(configuration);
+    m_request_server_manager->for_each_instance([&](auto& instance) {
+        instance.control_client().async_set_proxy_configuration(m_request_server_options.proxy_configuration);
+        return IterationDecision::Continue;
+    });
 }
 
 ErrorOr<void> Application::launch_request_server()

@@ -10,6 +10,7 @@
 #include <LibWebView/WebContentPage.h>
 #include <LibWebView/WebUI.h>
 #include <UI/Qt/DerpBirdImport.h>
+#include <UI/Qt/DerpBirdProxy.h>
 #include <QFileDialog>
 #include <QRegion>
 #include <QBuffer>
@@ -167,6 +168,27 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     m_shell->on_derpbird_request = [this](auto const& data, auto completion) {
         if (data.is_object()) {
             auto type = data.as_object().get_string("type"sv);
+            if (type.has_value() && type->bytes_as_string_view().starts_with("proxy."sv)) {
+                if (m_window.is_private() == WebView::IsPrivate::Yes || Application::profile().is_temporary()) {
+                    completion(Error::from_string_literal("Edit proxy settings in a regular persistent window")); return;
+                }
+                if (type == "proxy.get"sv) {
+                    auto state = DerpBirdProxy::state();
+                    if (state.is_error()) completion(state.release_error());
+                    else completion(JsonValue(state.release_value()));
+                    return;
+                }
+                if (type == "proxy.replace"sv) {
+                    auto result = DerpBirdProxy::replace(data.as_object());
+                    if (!result.is_error()) {
+                        for (auto* widget : QApplication::topLevelWidgets())
+                            if (auto* window = as_if<BrowserWindow>(widget); window && window->derpbird_chrome())
+                                window->derpbird_chrome()->queue_snapshot();
+                    }
+                    completion(AK::move(result)); return;
+                }
+                completion(Error::from_string_literal("Unknown proxy operation")); return;
+            }
             if (type.has_value() && (type->bytes_as_string_view().starts_with("import."sv) || type == "credentials.import-csv"sv)) {
                 if (m_window.is_private() == WebView::IsPrivate::Yes || Application::profile().is_temporary()) {
                     completion(Error::from_string_literal("Import requires a regular persistent profile")); return;
@@ -876,6 +898,8 @@ JsonValue DerpBirdChrome::snapshot()
         log.set("entries"sv, AK::move(entries));
         state.set("blockingLog"sv, AK::move(log));
     }
+    auto const& proxy_profile = Application::request_server_options().proxy_configuration.active_profile();
+    state.set("proxyProfile"sv, proxy_profile.is_empty() ? "system"_string : proxy_profile);
     state.set("version"sv, 1);
     state.set("revision"sv, ++m_revision);
     JsonObject preferences;

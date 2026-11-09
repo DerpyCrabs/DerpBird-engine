@@ -103,6 +103,7 @@ public:
     static AutocompleteService& autocomplete_service() { return *the().m_autocomplete_service; }
 
     static BrowserOptions const& browser_options() { return the().m_browser_options; }
+    void set_proxy_configuration(HTTP::ProxyConfiguration);
     static RequestServerOptions const& request_server_options() { return the().m_request_server_options; }
     static WebContentOptions& web_content_options() { return the().m_web_content_options; }
 

@@ -9,6 +9,10 @@
 #include <AK/IPv6Address.h>
 #include <LibCore/Environment.h>
 #include <LibHTTP/Proxy.h>
+#include <AK/JsonArray.h>
+#include <AK/HashTable.h>
+#include <LibRegex/ECMAScriptRegex.h>
+#include <AK/Utf16String.h>
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
 #include <LibURL/URL.h>
@@ -181,6 +185,8 @@ ProxyConfiguration ProxyConfiguration::from_environment(EnvironmentLookup const&
 
 Optional<Proxy const&> ProxyConfiguration::proxy_for(URL::URL const& url) const
 {
+    if (m_omega_options.size() && m_active_profile != "system"sv)
+        return omega_proxy_for(url, m_active_profile);
     Optional<Proxy> const* proxy = nullptr;
     if (url.scheme().is_one_of("http"sv, "ws"sv))
         proxy = &m_http_proxy;
@@ -289,6 +295,8 @@ bool ProxyConfiguration::is_excluded(StringView host) const
 
 }
 
+#include <LibHTTP/OmegaProxy.h>
+
 namespace IPC {
 
 template<>
@@ -320,6 +328,8 @@ ErrorOr<void> encode(Encoder& encoder, HTTP::ProxyConfiguration const& configura
     TRY(encoder.encode(configuration.http_proxy()));
     TRY(encoder.encode(configuration.https_proxy()));
     TRY(encoder.encode(configuration.no_proxy()));
+    TRY(encoder.encode(JsonValue { configuration.omega_options() }));
+    TRY(encoder.encode(configuration.active_profile()));
     return {};
 }
 
@@ -329,7 +339,12 @@ ErrorOr<HTTP::ProxyConfiguration> decode(Decoder& decoder)
     auto http_proxy = TRY(decoder.decode<Optional<HTTP::Proxy>>());
     auto https_proxy = TRY(decoder.decode<Optional<HTTP::Proxy>>());
     auto no_proxy = TRY(decoder.decode<Vector<ByteString>>());
-    return HTTP::ProxyConfiguration { move(http_proxy), move(https_proxy), move(no_proxy) };
+    HTTP::ProxyConfiguration configuration { move(http_proxy), move(https_proxy), move(no_proxy) };
+    auto options = TRY(decoder.decode<JsonValue>());
+    if (!options.is_object()) return Error::from_string_literal("Invalid proxy options");
+    auto active = TRY(decoder.decode<String>());
+    if (options.as_object().size()) TRY(configuration.set_omega(options.as_object(), move(active)));
+    return configuration;
 }
 
 }
