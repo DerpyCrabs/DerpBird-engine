@@ -2035,6 +2035,13 @@ function derpbirdRegisterProceduralTasks(filterer) {
         hasListeners: () => false,
         addCSS() { throw new TypeError('HTML filters must remove nodes'); },
     });
+    // These nodes belong to an inert response document. Removing them is enough:
+    // clearing a detached <script>.textContent invokes a TrustedScript sink in
+    // the page realm, despite the fact that nothing will execute here.
+    filterer.processNodes = (nodes, action) => {
+        if (action?.[0] !== 'remove') throw new TypeError('Invalid HTML filter action');
+        for (const node of nodes) node.remove();
+    };
     derpbirdRegisterProceduralTasks(filterer);
     vAPI.domFilterer = { proceduralFilterer: filterer };
     for (const serialized of serializedRules) {

@@ -12,6 +12,7 @@
 #include <UI/Qt/DerpBirdImport.h>
 #include <UI/Qt/DerpBirdFilePicker.h>
 #include <UI/Qt/DerpBirdProxy.h>
+#include <UI/Qt/DerpBirdPageSources.h>
 #include <QFileDialog>
 #include <QRegion>
 #include <QBuffer>
@@ -978,6 +979,44 @@ ErrorOr<JsonValue> DerpBirdChrome::request(JsonValue const& data)
     auto type = object.get_string("type"sv);
     if (type == "snapshot"sv)
         return snapshot();
+    if (type == "sources.page"sv || type == "sources.toggle"sv) {
+        auto* tab = m_window.current_tab();
+        if (!tab) return Error::from_string_literal("No active page");
+        auto& styles = *TRY(Application::the().derpbird_style_store());
+        auto& scripts = *TRY(Application::the().derpbird_script_store());
+        if (type == "sources.toggle"sv) {
+            if (m_window.is_private() == WebView::IsPrivate::Yes || m_script_install)
+                return Error::from_string_literal("Change sources in a regular window after installation finishes");
+            if (object.get_string("tabId"sv) != tab_id(*tab) || object.get_string("url"sv) != tab->view().url().serialize())
+                return Error::from_string_literal("The active page changed; reopen the list");
+            auto kind = object.get_string("kind"sv);
+            auto id = object.get_string("id"sv);
+            auto enabled = object.get_bool("enabled"sv);
+            auto revision = object.get_integer<u64>("revision"sv);
+            if (!kind.has_value() || !kind->is_one_of("styles"sv, "scripts"sv) || !id.has_value() || !enabled.has_value() || !revision.has_value())
+                return Error::from_string_literal("Invalid source toggle");
+            bool style = *kind == "styles"sv;
+            if (*revision != (style ? styles.revision() : scripts.revision()))
+                return Error::from_string_literal("Sources changed in another window; refresh the list");
+            auto items = style ? styles.items() : scripts.items();
+            bool found = false;
+            for (auto& raw : items.values()) {
+                if (raw.as_object().get_string("id"sv) != *id) continue;
+                raw.as_object().set("enabled"sv, *enabled);
+                found = true;
+                break;
+            }
+            if (!found) return Error::from_string_literal("Source no longer exists");
+            if (style) {
+                TRY(styles.replace(AK::move(items)));
+                TRY(Application::the().set_derpbird_user_style_sections(styles.enabled_sections()));
+            } else {
+                TRY(scripts.replace(AK::move(items), *revision));
+                TRY(Application::the().set_derpbird_user_scripts(JsonValue { scripts.items() }));
+            }
+        }
+        return JsonValue { TRY(derpbird_page_sources(tab->view().url(), tab_id(*tab), m_window.is_private() == WebView::IsPrivate::Yes, styles, scripts)) };
+    }
     if (type == "styles.list"sv || type == "styles.replace"sv) {
         auto& store = *TRY(Application::the().derpbird_style_store());
         if (type == "styles.replace"sv) {

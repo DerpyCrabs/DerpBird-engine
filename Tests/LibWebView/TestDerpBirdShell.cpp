@@ -42,17 +42,45 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
     VERIFY(!crashed);
     auto proxy_state = MUST(JsonValue::from_string(R"({"revision":0,"active":"direct","options":{"schemaVersion":2}})"sv)).as_object();
     size_t proxy_writes = 0;
+    auto style_snapshot = MUST(JsonValue::from_string(R"({"revision":0,"items":[{"id":"style1","name":"Readable pages","enabled":true,"source":"body { color: #ddd; }","sections":[{"css":"body { color: #ddd; }","conditions":[]}]}]})"sv)).as_object();
+    auto script_snapshot = MUST(JsonValue::from_string(R"({"revision":0,"items":[{"id":"script1","name":"Study timer for this website","enabled":true,"fileAccessGranted":false,"source":"// ==UserScript==\n// @name Study timer for this website\n// @match https://example.test/*\n// ==/UserScript==\nconsole.log('ready');","metadata":{"runAt":"document-idle","grantNone":false,"noFrames":false,"matches":["https://example.test/*"],"includes":[],"excludeMatches":[],"excludes":[],"grants":[],"requires":[],"connects":[],"resources":[]}}]})"sv)).as_object();
+    size_t source_toggles = 0;
+
     auto handle_request = [&](JsonValue const& request) -> ErrorOr<JsonValue> {
         auto const& data = request.as_object();
         if (data.get_string("type"sv) == "snapshot"sv) {
             ++snapshots;
             warnln("Shell snapshot {}", snapshots);
-            return JsonValue::from_string(R"json({"version":1,"revision":1,"tabs":[],"activeTabId":null,"preferences":{"layout":"vertical","compact":false}})json"sv);
+            return JsonValue::from_string(R"json({"version":1,"revision":1,"tabs":[{"id":"test","url":"https://example.test/","title":"Example","loading":false,"canGoBack":false,"canGoForward":false,"pinned":false,"private":false,"audible":false,"muted":false}],"activeTabId":"test","preferences":{"layout":"vertical","compact":false}})json"sv);
         }
         auto type = data.get_string("type"sv).value_or(String {});
         if (type == "import.status"sv) return JsonValue::from_string(R"({"welcome":false,"profiles":[]})"sv);
         if (type.is_one_of("styles.folders"sv, "scripts.folders"sv)) return JsonValue::from_string(R"({"directories":[],"files":[]})"sv);
-        if (type.is_one_of("styles.list"sv, "scripts.list"sv)) return JsonValue::from_string(R"({"revision":0,"items":[]})"sv);
+        if (type == "styles.list"sv) return JsonValue(style_snapshot);
+        if (type == "scripts.list"sv) return JsonValue(script_snapshot);
+        if (type.is_one_of("styles.replace"sv, "scripts.replace"sv)) {
+            auto& state = type == "styles.replace"sv ? style_snapshot : script_snapshot;
+            state.set("items"sv, *data.get_array("items"sv));
+            state.set("revision"sv, state.get_u32("revision"sv).value() + 1);
+            return JsonValue(state);
+        }
+        if (type.is_one_of("sources.page"sv, "sources.toggle"sv)) {
+            if (type == "sources.toggle"sv) {
+                ++source_toggles;
+                auto& state = data.get_string("kind"sv) == "styles"sv ? style_snapshot : script_snapshot;
+                auto items = *state.get_array("items"sv);
+                items.values()[0].as_object().set("enabled"sv, *data.get_bool("enabled"sv));
+                state.set("items"sv, move(items));
+                state.set("revision"sv, state.get_u32("revision"sv).value() + 1);
+            }
+            JsonObject result;
+            result.set("tabId"sv, "test"sv); result.set("url"sv, "https://example.test/"sv);
+            result.set("styleRevision"sv, *style_snapshot.get_u32("revision"sv));
+            result.set("scriptRevision"sv, *script_snapshot.get_u32("revision"sv));
+            result.set("styles"sv, *style_snapshot.get_array("items"sv));
+            result.set("scripts"sv, *script_snapshot.get_array("items"sv));
+            return JsonValue(move(result));
+        }
         if (data.get_string("type"sv) == "proxy.get"sv) return JsonValue(proxy_state);
         if (data.get_string("type"sv) == "proxy.replace"sv) {
             HTTP::ProxyConfiguration configuration;
@@ -206,6 +234,37 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             await shot('05-profile-menu');
             document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
             await wait(()=>!document.querySelector('.proxy-popup'));
+            const sourceButton = text => Array.from(document.querySelectorAll('.source-manager button')).find(b=>b.textContent===text);
+            document.querySelector('[aria-label="Styles on this page"]').click();
+            await wait(()=>document.querySelector('.page-source-row input:not(:disabled)'));
+            await shot('06-page-styles');
+            document.querySelector('.page-source-row input').click();
+            await wait(()=>document.querySelector('.page-source-row small')?.textContent==='Disabled' && !document.querySelector('.page-source-row input').disabled);
+            Array.from(document.querySelectorAll('.page-sources-popup button')).find(b=>b.textContent==='Manage styles').click();
+            await wait(()=>document.querySelector('[aria-label="Style name"]:not(:disabled)'));
+            const styleName=document.querySelector('[aria-label="Style name"]');styleName.value='Readable website';styleName.dispatchEvent(new Event('input',{bubbles:true}));
+            document.querySelector('[aria-label="Close styles"]').click();
+            await wait(()=>document.querySelector('.source-close-confirm'));
+            sourceButton('Keep editing').click();
+            if(document.querySelector('[aria-label="Style name"]').value!=='Readable website')throw new Error('Close discarded a style draft');
+            sourceButton('Discard changes').click();
+            await wait(()=>sourceButton('Save')?.disabled);
+            const manager=document.querySelector('.source-manager').getBoundingClientRect();
+            const code=document.querySelector('[aria-label="CSS style"]').getBoundingClientRect();
+            if(manager.width>1101 || code.height<150 || code.right>manager.right || code.bottom>manager.bottom)throw new Error('Style editor layout');
+            await shot('07-style-editor');
+            document.querySelector('[aria-label="Close styles"]').click();
+            await wait(()=>!document.querySelector('.source-manager'));
+            document.querySelector('[aria-label="Scripts on this page"]').click();
+            await wait(()=>document.querySelector('.page-source-row input:not(:disabled)'));
+            await shot('08-page-scripts');
+            document.querySelector('.page-source-row input').click();
+            await wait(()=>document.querySelector('.page-sources-reload') && !document.querySelector('.page-source-row input').disabled);
+            Array.from(document.querySelectorAll('.page-sources-popup button')).find(b=>b.textContent==='Manage scripts').click();
+            await wait(()=>document.querySelector('[aria-label="Script source"]:not(:disabled)'));
+            await shot('09-script-editor');
+            document.querySelector('[aria-label="Close scripts"]').click();
+            await wait(()=>!document.querySelector('.source-manager'));
             console.log('PROXY:PASS');
         } catch(error) {console.log('PROXY:FAIL:'+error.message)}
     })())JS"_string);
@@ -214,6 +273,7 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
     EXPECT_EQ(proxy_result, "PROXY:PASS"sv);
     if (proxy_result != "PROXY:PASS"sv) return;
     EXPECT_EQ(proxy_writes, 5u);
+    EXPECT_EQ(source_toggles, 2u);
     EXPECT_EQ(proxy_state.get_string("active"sv).value(), "auto"sv);
     EXPECT_EQ(proxy_state.get_object("options"sv)->get_object("+proxy"sv)->get_object("auth"sv)->get_object("all"sv)->get_string("username"sv).value(), "fixture"sv);
     auto const& saved_rules = *proxy_state.get_object("options"sv)->get_object("+auto"sv)->get_array("rules"sv);

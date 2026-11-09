@@ -4,6 +4,7 @@
 #include <AK/RefCounted.h>
 #include <AK/Utf16StringBuilder.h>
 #include <LibJS/Runtime/PrimitiveString.h>
+#include <LibWeb/TrustedTypes/TrustedHTML.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
@@ -53,7 +54,10 @@ private:
         auto world = TRY(DerpBirdScriptWorld::create(*m_document));
         auto& realm = world->realm();
         realm.global_object().define_direct_property("__derpbirdHTMLInput"_utf16_fly_string,
-            JS::PrimitiveString::create(realm.vm(), move(input)), JS::default_attributes);
+            // This is the browser-owned response filter, not a page injection sink.
+            // Keep the page's Trusted Types policy intact for page and userscript code.
+            Bindings::wrap(Bindings::host_defined_wrapper_world(realm), realm,
+                GC::Heap::the().allocate<TrustedTypes::TrustedHTML>(move(input))), JS::default_attributes);
         Utf16StringBuilder script;
         script.append(ContentBlocker::html_filter_runtime());
         script.append_ascii("\n__derpbirdFilterHTML(__derpbirdHTMLInput,"sv);

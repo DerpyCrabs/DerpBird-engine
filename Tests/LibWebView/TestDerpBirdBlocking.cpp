@@ -73,9 +73,11 @@ public:
                     body = "<!doctype html><script>document.documentElement.dataset.inline='ran';</script><img src='/csp-image'>"sv;
                 if (request.starts_with("GET /html-filter"sv))
                     body = "<!doctype html><script>window.advertisementRan=true;</script><script>window.ordinaryRan=true;</script><div class=sponsor>Remove</div><p id=retained>Keep</p>"sv;
-                auto site_policy = request.starts_with("GET /csp-page/site-policy"sv)
+                auto site_policy = request.starts_with("GET /html-filter-trusted-types"sv)
+                    ? "Content-Security-Policy: require-trusted-types-for 'script'; trusted-types 'none'\r\n"sv
+                    : request.starts_with("GET /csp-page/site-policy"sv)
                     ? "Content-Security-Policy: img-src 'none'\r\n"sv : ""sv;
-                if (!site_policy.is_empty())
+                if (request.starts_with("GET /csp-page/site-policy"sv))
                     body = "<!doctype html><script>document.documentElement.dataset.inline='ran';</script><img src='/csp-site-policy-image'>"sv;
                 if (request.starts_with("GET /top-context-frame"sv))
                     body = "<!doctype html><script>const s=document.createElement('script');s.src='/top-context-script';s.onload=()=>parent.postMessage('top-context-allowed','*');s.onerror=()=>parent.postMessage('top-context-blocked','*');document.head.append(s);</script>"sv;
@@ -685,6 +687,9 @@ TEST_CASE(derpbird_blocking_method_prevents_network_requests)
     set_scriptlets("127.0.0.1##^script:has-text(advertisementRan)\n127.0.0.1##^div.sponsor\n"sv);
     navigate("/html-filter"sv);
     check("console.log([!!window.advertisementRan,!!window.ordinaryRan,!!document.querySelector('.sponsor'),!!document.querySelector('#retained'),document.compatMode].join(','))"_string, "false,true,false,true,CSS1Compat"sv);
+    navigate("/html-filter-trusted-types"sv);
+    check("console.log([!!document.querySelector('#retained'),!!document.querySelector('.sponsor'),!!window.advertisementRan,window.ordinaryRan].join(','))"_string, "true,false,false,true"sv);
+    check("try{new DOMParser().parseFromString('<p>page injection</p>','text/html');console.log('allowed')}catch{console.log('blocked')}"_string, "blocked"sv);
     set_scriptlets("127.0.0.1##^script:has-text(advertisementRan)\n127.0.0.1#@#^script:has-text(advertisementRan)\n"sv);
     navigate("/html-filter-exception"sv);
     check("console.log(String(!!window.advertisementRan))"_string, "true"sv);
