@@ -955,9 +955,9 @@ bool DerpBirdChrome::eventFilter(QObject* watched, QEvent* event)
         }
     }
     if (watched == m_shell && event->type() == QEvent::FocusOut && m_shell->page().is_open()) {
-        // Queue the DOM blur before WebContentView defers its system-focus update.
-        // Once system focus is gone, HTML unfocusing steps see an empty focus chain.
-        m_shell->run_javascript("document.getElementById('location')?.blur()"_string);
+        // Release shell interaction state before the deferred system-focus update.
+        // The shell owns DOM focus and popup policy; native code names no controls.
+        m_shell->run_javascript("window.dispatchEvent(new Event('derpbird-shell-deactivate'))"_string);
     }
     return QWidget::eventFilter(watched, event);
 }
@@ -968,7 +968,7 @@ void DerpBirdChrome::focus_address()
     m_shell->setFocus();
     // This constant program only runs in the dedicated shell view.
     m_shell->run_javascript(
-        "document.getElementById('location')?.select()"_string);
+        "window.dispatchEvent(new Event('derpbird-shell-keyboard-focus'));document.getElementById('location')?.select()"_string);
 }
 
 ErrorOr<JsonValue> DerpBirdChrome::request(JsonValue const& data)
