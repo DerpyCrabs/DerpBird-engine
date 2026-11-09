@@ -23,6 +23,7 @@
 namespace Ladybird {
 
 class DerpBirdImport;
+class DerpBirdFilePicker;
 class BrowserWindow;
 class DerpBirdCredentialFill;
 class DerpBirdScriptInstall;
@@ -48,6 +49,7 @@ public:
 
 private:
     QPointer<DerpBirdImport> m_import;
+    DerpBirdFilePicker* m_file_picker { nullptr };
     bool m_password_import { false };
     ErrorOr<void> set_tree_parent(Tab&, Tab*);
     void normalize_tree_order();

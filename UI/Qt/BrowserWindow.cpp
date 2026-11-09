@@ -428,6 +428,9 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
         addAction(create_application_action(*this, application.reload_action()));
         addAction(create_application_action(*this, application.reload_bypassing_cache_action()));
         setWindowFlag(Qt::FramelessWindowHint, false);
+        // Drop the old frameless border inset as well as its decoration flag.
+        // A stale 1-DIP inset shifts the shell onto fractional device pixels.
+        update_window_border();
     }
     setCentralWidget(main_widget);
     setContextMenuPolicy(Qt::PreventContextMenu);

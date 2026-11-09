@@ -24,6 +24,8 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
     auto theme_path = LexicalPath::join(WebView::s_ladybird_resource_root, "themes"sv, "Default.ini"sv);
     auto theme = TRY_OR_FAIL(Gfx::load_system_theme(theme_path.string()));
     auto view = WebView::HeadlessWebView::create(move(theme), Core::Environment::has("DERPBIRD_PROXY_NARROW"sv) ? Web::DevicePixelSize { 1000, 700 } : Web::DevicePixelSize { 2000, 1100 });
+    if (auto scale = Core::Environment::get("DERPBIRD_PROXY_SCALE"sv); scale.has_value())
+        view->set_device_pixel_ratio_for_testing(view->page(), scale->to_number<double>().value());
     view->on_console_message = [](WebView::ConsoleOutput message) {
         if (auto* error = message.output.get_pointer<WebView::ConsoleError>())
             warnln("Shell JavaScript error: {}: {}", error->name, error->message);

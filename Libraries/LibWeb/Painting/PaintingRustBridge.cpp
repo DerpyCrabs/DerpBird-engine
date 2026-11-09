@@ -501,7 +501,9 @@ Optional<DisplayListRecording> start_rust_display_list_recording(Layout::BegunRe
 {
     auto* host = document_host(document);
     auto device_pixels_per_css_pixel = document.page().client().device_pixels_per_css_pixel();
-    auto device_viewport_rect = document.page().css_to_device_rect(document.viewport_rect());
+    // The CSS viewport is quantized to 1/64 px. Keep its partially covered final
+    // device pixel when round-tripping a fractional-scale native viewport.
+    auto device_viewport_rect = document.page().enclosing_device_rect(document.viewport_rect());
     auto wheel_event_region_state = document.paint_state().collect_root_blocking_wheel_event_regions(document);
     Layout::RustFFI::FfiRecordingInputs inputs {};
     Vector<Layout::RustFFI::FfiTextFragmentIndicationRange> text_fragment_indications;

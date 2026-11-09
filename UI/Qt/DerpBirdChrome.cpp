@@ -10,6 +10,7 @@
 #include <LibWebView/WebContentPage.h>
 #include <LibWebView/WebUI.h>
 #include <UI/Qt/DerpBirdImport.h>
+#include <UI/Qt/DerpBirdFilePicker.h>
 #include <UI/Qt/DerpBirdProxy.h>
 #include <QFileDialog>
 #include <QRegion>
@@ -91,6 +92,10 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     m_shell = new WebContentView(this, {}, initial);
     m_shell->set_transparent_background(true);
     m_shell->installEventFilter(this);
+    m_file_picker = new DerpBirdFilePicker(this);
+    m_shell->on_request_file_picker = [this](auto const& types, auto multiple) {
+        m_file_picker->open(types, multiple, [this](auto files) { m_shell->file_picker_closed(AK::move(files)); });
+    };
     connect(m_shell, &WebContentView::ready_to_paint, this, [this] {
         // Apply the input region with the frame that shows the corresponding controls.
         if (m_pending_surface_state.has_value()) {
@@ -521,6 +526,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
         completion(request(data));
     };
     m_shell->on_load_start = [this] {
+        m_file_picker->cancel();
         if (m_source_download) m_source_download->cancel();
         m_credential_proposal.clear();
         m_pending_surface_state.clear();
@@ -529,6 +535,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     };
     connect(m_shell, &WebContentView::crash_overlay_changed, this, [this] {
         if (m_shell->crash_overlay_active()) {
+            m_file_picker->dismiss();
             if (m_source_download) m_source_download->cancel();
             m_pending_surface_state.clear();
             m_surface_state.invalidate();

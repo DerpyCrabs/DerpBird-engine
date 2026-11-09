@@ -1343,6 +1343,20 @@ void WebContentView::update_page_surface(PageSurfaceContent content)
     // fit. A frame can be smaller than the view while it catches up with a resize, and the view paints the rest.
     // Where the frame goes in the view, in device pixels, and the part of the frame that the page surface shows.
     auto bitmap_size = paintable->bitmap_size;
+    // Wayland subsurface coordinates include the parent window decorations.
+    auto margins = parent->frameMargins();
+    auto view_position = mapTo(window(), QPoint { 0, 0 }) + QPoint { margins.left(), margins.top() };
+    // Round both edges in the parent pixel grid, then make them local to this
+    // buffer. Rounding the width alone loses the phase of a fractional origin
+    // (e.g. a 196-DIP sidebar at 160%) and filters the whole frame.
+    auto device_rect = [&](QRectF logical) {
+        auto origin = QPointF(view_position) * m_device_pixel_ratio;
+        auto left = qRound(origin.x() + logical.x() * m_device_pixel_ratio) - qRound(origin.x());
+        auto top = qRound(origin.y() + logical.y() * m_device_pixel_ratio) - qRound(origin.y());
+        auto right = qRound(origin.x() + (logical.x() + logical.width()) * m_device_pixel_ratio) - qRound(origin.x());
+        auto bottom = qRound(origin.y() + (logical.y() + logical.height()) * m_device_pixel_ratio) - qRound(origin.y());
+        return QRectF(left, top, right - left, bottom - top);
+    };
     QRect frame_rect;
     QRectF source;
     QRectF target;
@@ -1357,21 +1371,15 @@ void WebContentView::update_page_surface(PageSurfaceContent content)
         auto view_size = size() * m_device_pixel_ratio;
         frame_rect = { 0, 0, min(min(bitmap_size.width(), m_viewport_size.width()), view_size.width()), min(min(bitmap_size.height(), m_viewport_size.height()), view_size.height()) };
         auto shown = rect_shown_in_window();
-        auto exact_source = QRectF(shown.x() * m_device_pixel_ratio, shown.y() * m_device_pixel_ratio,
-            shown.width() * m_device_pixel_ratio, shown.height() * m_device_pixel_ratio);
+        auto exact_source = device_rect(shown);
         source = exact_source.intersected(QRectF(0, 0, bitmap_size.width(), bitmap_size.height()));
         auto logical_insets = QRectF(m_vertical_tab_overlay_left, m_bookmarks_bar_overlay_height,
             width() - m_vertical_tab_overlay_left - m_vertical_tab_overlay_right, height() - m_bookmarks_bar_overlay_height);
-        source &= QRectF(logical_insets.x() * m_device_pixel_ratio, logical_insets.y() * m_device_pixel_ratio,
-            logical_insets.width() * m_device_pixel_ratio, logical_insets.height() * m_device_pixel_ratio);
+        source &= device_rect(logical_insets);
         target = source;
     }
 
     auto to_logical = [&](qreal device_pixels) { return max(1, qRound(device_pixels / m_device_pixel_ratio)); };
-    // QWidget coordinates exclude Qt's client-side decoration, whereas a Wayland
-    // subsurface is positioned within the complete parent surface.
-    auto margins = parent->frameMargins();
-    auto view_position = mapTo(window(), QPoint { 0, 0 }) + QPoint { margins.left(), margins.top() };
     WaylandPageSurface::Frame frame {
         .shared_image_buffer = *paintable->shared_image_buffer,
         .dmabuf = *dmabuf,
