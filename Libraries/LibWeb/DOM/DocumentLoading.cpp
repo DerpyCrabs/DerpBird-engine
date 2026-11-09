@@ -23,6 +23,7 @@
 #include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/DOM/CustomEvent.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Page/DerpBirdClickToLoad.h>
 #include <LibWeb/DOM/DocumentLoading.h>
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
@@ -35,6 +36,7 @@
 #include <LibWeb/HTML/NavigationParams.h>
 #include <LibWeb/HTML/Parser/HTMLEncodingDetection.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
+#include <LibWeb/Page/DerpBirdHTMLFiltering.h>
 #include <LibWeb/HTML/Parser/IncrementalDocumentParser.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
@@ -131,6 +133,7 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_html_document(HTML::Navi
 
     // 1. Let document be the result of creating and initializing a Document object given "html", "text/html", and navigationParams.
     auto document = TRY(DOM::Document::create_and_initialize(DOM::Document::Type::HTML, "text/html"_utf16_fly_string, navigation_params));
+    if (navigation_params.response->record()->derpbird_click_to_load()) install_derpbird_click_to_load(*document);
 
     // 2. If document's URL is about:blank, then populate with html/head/body given document.
     // FIXME: The additional check for a non-empty body fixes issues with loading javascript urls in iframes, which
@@ -171,6 +174,7 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_html_document(HTML::Navi
     //    causes a load event to be fired.
     else {
         auto container_document = navigation_params.navigable ? navigation_params.navigable->container_document() : nullptr;
+        if (DerpBirdHTMLFiltering::start(document, *navigation_params.response, container_document)) return document;
         auto parser = HTML::IncrementalDocumentParser::create(document, *navigation_params.response, container_document);
         parser->set_allow_declarative_shadow_roots(HTML::HTMLParser::AllowDeclarativeShadowRoots::Yes);
         parser->start();

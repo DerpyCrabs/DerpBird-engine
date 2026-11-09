@@ -1375,6 +1375,7 @@ mod tests {
                 sheets.len(),
                 host.host(),
                 0,
+                0, // Author origin
                 false,
                 std::ptr::null_mut(),
                 prepare,

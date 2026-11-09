@@ -63,6 +63,11 @@ public:
     /// Test for a match without filling capture buffer.
     [[nodiscard]] MatchResult test(Utf16View input, size_t start_pos) const;
 
+    /// Host-only anchored match; consumes a caller-owned VM instruction budget.
+    /// Successful matches populate capture_slot(), like exec().
+    /// Ordinary JavaScript exec/test retain the upstream limits.
+    [[nodiscard]] MatchResult test_anchored_budgeted(Utf16View input, size_t start_pos, u64& remaining) const;
+
     /// Number of numbered capture groups (excluding group 0).
     unsigned int capture_count() const;
 

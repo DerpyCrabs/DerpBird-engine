@@ -49,7 +49,7 @@ CanonicalDocument::CanonicalDocument(Web::HTML::CrossProcessId id, URL::URL crea
     }
 }
 
-CanonicalDocument::~CanonicalDocument() = default;
+CanonicalDocument::~CanonicalDocument() { revoke_derpbird_values(); }
 
 bool CanonicalDocument::is_allowed_to_use(Web::PermissionsPolicy::PolicyControlledFeature feature) const
 {

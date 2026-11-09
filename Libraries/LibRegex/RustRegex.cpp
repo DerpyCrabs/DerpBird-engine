@@ -161,6 +161,18 @@ int CompiledRustRegex::test(Utf16View input, size_t start_pos) const
         start_pos);
 }
 
+int CompiledRustRegex::test_anchored_budgeted(Utf16View input, size_t start_pos, u64& remaining) const
+{
+    auto slots = total_groups() * 2;
+    m_capture_buffer.resize(slots);
+    if (input.has_latin1_storage()) {
+        auto latin1 = input.latin1_span();
+        return rust_regex_test_anchored_budgeted_latin1(m_regex, latin1.data(), latin1.size(), start_pos, &remaining, m_capture_buffer.data(), slots);
+    }
+    auto utf16 = input.utf16_span();
+    return rust_regex_test_anchored_budgeted(m_regex, reinterpret_cast<unsigned short const*>(utf16.data()), utf16.size(), start_pos, &remaining, m_capture_buffer.data(), slots);
+}
+
 int CompiledRustRegex::find_all(Utf16View input, size_t start_pos) const
 {
     // Start with reasonable capacity; keep doubling until it fits.

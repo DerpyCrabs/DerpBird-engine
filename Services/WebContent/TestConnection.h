@@ -23,6 +23,7 @@ class TestConnection final
 public:
     ~TestConnection() override;
 
+    virtual void probe_derpbird_values(Web::PageId, u64, bool, ByteBuffer) override;
     void prepare_to_send();
 
     virtual void die() override;

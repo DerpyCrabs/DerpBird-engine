@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibWeb/Page/DerpBirdInsertionAuthority.h>
 #include <AK/HashFunctions.h>
 #include <AK/Optional.h>
 #include <AK/Traits.h>
@@ -25,10 +26,12 @@ struct ImageStyleValueResourceKey {
     Optional<CrossOriginModifierValue> cross_origin;
     Optional<Utf16FlyString> integrity;
     Optional<ReferrerPolicyModifierValue> referrer_policy;
+    // Retain the token, so its address cannot be recycled while the key lives.
+    RefPtr<DerpBirdInsertionAuthority> derpbird_insertion_authority;
 
     static ImageStyleValueResourceKey create(::URL::URL url, URL const& url_value)
     {
-        ImageStyleValueResourceKey key { .url = move(url), .cross_origin = {}, .integrity = {}, .referrer_policy = {} };
+        ImageStyleValueResourceKey key { .url = move(url), .cross_origin = {}, .integrity = {}, .referrer_policy = {}, .derpbird_insertion_authority = {} };
 
         // NB: The modifier steps run in sequence, so a later modifier of a kind overrides an earlier one.
         for (auto const& modifier : url_value.request_url_modifiers()) {
@@ -62,6 +65,6 @@ struct AK::Traits<Web::CSS::ImageStyleValueResourceKey> : public AK::DefaultTrai
         hash = pair_int_hash(hash, key.cross_origin.has_value() ? to_underlying(*key.cross_origin) + 1 : 0);
         hash = pair_int_hash(hash, key.integrity.has_value() ? key.integrity->hash() : 0);
         hash = pair_int_hash(hash, key.referrer_policy.has_value() ? to_underlying(*key.referrer_policy) + 1 : 0);
-        return hash;
+        return pair_int_hash(hash, ptr_hash(key.derpbird_insertion_authority.ptr()));
     }
 };

@@ -19,6 +19,7 @@
 #include <LibWebView/URL.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/DerpBirdChrome.h>
 #include <UI/Qt/ChromeLayout.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/DevToolsBanner.h>
@@ -341,11 +342,15 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
 
     m_screen_observer = new WindowScreenObserver(*this);
     m_screen_observer->on_device_pixel_ratio_change = [this] {
+        if (m_derpbird_chrome)
+            m_derpbird_chrome->update_display_metadata(m_screen_observer->device_pixel_ratio(), m_screen_observer->display_id(), m_screen_observer->refresh_rate());
         for_each_tab([this](auto& tab) {
             tab.view().set_device_pixel_ratio(m_screen_observer->device_pixel_ratio());
         });
     };
     m_screen_observer->on_display_metadata_change = [this] {
+        if (m_derpbird_chrome)
+            m_derpbird_chrome->update_display_metadata(m_screen_observer->device_pixel_ratio(), m_screen_observer->display_id(), m_screen_observer->refresh_rate());
         for_each_tab([this](auto& tab) {
             tab.view().set_display_metadata(m_screen_observer->display_id(), m_screen_observer->refresh_rate());
         });
@@ -412,6 +417,18 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     m_devtools_banner->hide();
     main_layout->addWidget(m_devtools_banner);
 
+    if (qEnvironmentVariableIsSet("DERPBIRD_UI")) {
+        main_layout->removeWidget(m_tabs_container);
+        m_derpbird_chrome = new DerpBirdChrome(*this);
+        main_layout->insertWidget(0, m_derpbird_chrome, 1);
+        m_tabs_container->hide();
+        // Toolbar actions belong to the hidden native tab container. Register
+        // reload on this visible window when the web chrome replaces it.
+        auto& application = Application::the();
+        addAction(create_application_action(*this, application.reload_action()));
+        addAction(create_application_action(*this, application.reload_bypassing_cache_action()));
+        setWindowFlag(Qt::FramelessWindowHint, false);
+    }
     setCentralWidget(main_widget);
     setContextMenuPolicy(Qt::PreventContextMenu);
 
@@ -752,7 +769,7 @@ void BrowserWindow::restore_tabs(Vector<WebView::RestoredSessionTab> const& tabs
     create_restored_tab(tabs[active_index], 0, false);
     for (size_t i = 0; i < tabs.size(); ++i) {
         if (i != active_index)
-            create_restored_tab(tabs[i], static_cast<int>(i), !tabs[i].pinned);
+            create_restored_tab(tabs[i], static_cast<int>(i), false);
     }
 }
 
@@ -895,6 +912,8 @@ void BrowserWindow::initialize_tab(Tab* tab)
         QObject::connect(tab, &Tab::loaded, this, [this, tab] { initialize_tab_view(tab); }, Qt::SingleShotConnection);
 
     initialize_tab_buttons(tab);
+    if (m_derpbird_chrome)
+        m_derpbird_chrome->observe_tab(*tab);
 }
 
 void BrowserWindow::initialize_tab_view(Tab* tab)
@@ -912,7 +931,19 @@ void BrowserWindow::initialize_tab_view(Tab* tab)
         }
     });
 
-    tab->view().on_new_web_view = [this, tab](auto activate_tab, Web::HTML::WebViewHints hints, WebView::CanonicalTraversable& traversable) {
+    auto group_with_source = [this, tab](Tab& new_tab) {
+        if (m_derpbird_chrome && !tab->is_pinned()) {
+            auto result = m_derpbird_chrome->move_tree_tab(new_tab, *tab, "inside"sv);
+            if (result.is_error())
+                dbgln("Cannot group tab opened from page: {}", result.error());
+        }
+    };
+    tab->view().on_new_tab = [this, tab, group_with_source](Web::HTML::ActivateTab activate_tab) -> WebView::ViewImplementation* {
+        auto& new_tab = create_new_tab(activate_tab, TabLocation::after_tab(*tab));
+        group_with_source(new_tab);
+        return &new_tab.view();
+    };
+    tab->view().on_new_web_view = [this, tab, group_with_source](auto activate_tab, Web::HTML::WebViewHints hints, WebView::CanonicalTraversable& traversable) {
         if (hints.popup) {
             auto cascaded_configuration = Application::the().configuration_for_new_window();
             WindowConfiguration configuration {
@@ -925,12 +956,15 @@ void BrowserWindow::initialize_tab_view(Tab* tab)
             return window.current_tab()->view().handle();
         }
         auto& new_tab = create_new_tab(activate_tab, traversable);
+        group_with_source(new_tab);
         return new_tab.view().handle();
     };
 }
 
 void BrowserWindow::uninitialize_tab(Tab* tab)
 {
+    if (m_derpbird_chrome)
+        m_derpbird_chrome->unobserve_tab(*tab);
     QObject::disconnect(tab, nullptr, this, nullptr);
     if (tab->is_loaded())
         QObject::disconnect(&tab->view(), nullptr, this, nullptr);
@@ -999,6 +1033,10 @@ void BrowserWindow::move_tab_to_window(int index, BrowserWindow& target_window, 
     auto* tab = m_tabs_container->tab(index);
     if (tab->is_loaded())
         tab->view().prepare_for_window_move();
+    if (m_derpbird_chrome) {
+        auto result = m_derpbird_chrome->detach_tree_tab(*tab);
+        if (result.is_error()) return;
+    }
     uninitialize_tab(tab);
     m_tabs_container->take_tab(index);
     if (m_current_tab == tab)
@@ -1116,6 +1154,14 @@ bool BrowserWindow::close_tab(int index, WebView::SessionStore::KeepForReopening
     }
 
     auto* tab = m_tabs_container->tab(index);
+    if (tab == m_current_tab && tab->derpbird_script_parent()) {
+        auto parent_index = tab_index(tab->derpbird_script_parent());
+        if (parent_index >= 0) activate_tab(parent_index);
+    }
+    if (m_derpbird_chrome) {
+        auto detached = m_derpbird_chrome->detach_tree_tab(*tab);
+        if (detached.is_error()) { dbgln("Cannot update tab tree: {}", detached.error()); return false; }
+    }
     m_tabs_container->remove_tab(index);
     if (auto session_tab_id = tab->session_tab_id(); session_tab_id.has_value()) {
         WebView::SessionStore::TabClosed closed {
@@ -1141,6 +1187,14 @@ void BrowserWindow::move_tab(int old_index, int new_index)
     if (!tab)
         return;
 
+    if (m_derpbird_chrome && !m_derpbird_chrome->reordering_tree()) {
+        auto* target = tab_at(new_index);
+        if (target && target != tab) {
+            auto result = m_derpbird_chrome->move_tree_tab(*tab, *target, old_index < new_index ? "after"sv : "before"sv);
+            if (result.is_error()) dbgln("Cannot move tab tree: {}", result.error());
+        }
+        return;
+    }
     auto pinned_count = pinned_tab_count();
     if (tab->is_pinned())
         new_index = clamp(new_index, 0, pinned_count - 1);
@@ -1171,6 +1225,10 @@ void BrowserWindow::pin_tab(Tab& tab, Optional<int> pinned_index)
 
     auto pinned_count = pinned_tab_count();
     auto destination = clamp(pinned_index.value_or(pinned_count), 0, pinned_count);
+    if (m_derpbird_chrome) {
+        auto result = m_derpbird_chrome->detach_tree_tab(tab);
+        if (result.is_error()) return;
+    }
     tab.set_pinned(true);
     if (index != destination)
         m_tabs_container->tab_bar()->moveTab(index, destination);
@@ -1258,8 +1316,8 @@ int BrowserWindow::tab_index(Tab* tab)
 void BrowserWindow::update_window_title(QString const& title)
 {
     char const* format = is_private() == WebView::IsPrivate::Yes
-        ? "%1 - " BROWSER_PRODUCT_NAME " (Private)"
-        : "%1 - " BROWSER_PRODUCT_NAME;
+        ? "%1 - DerpBird (Private)"
+        : "%1 - DerpBird";
     setWindowTitle(QString(format).arg(title));
 }
 
@@ -2009,6 +2067,7 @@ void BrowserWindow::closeEvent(QCloseEvent* event)
     QObject::deleteLater();
 
     QMainWindow::closeEvent(event);
+    m_window_close_accepted = event->isAccepted();
 
     if (event->isAccepted() && m_session_window_id.has_value()) {
         WebView::SessionStore::WindowClosing closing {
@@ -2020,6 +2079,29 @@ void BrowserWindow::closeEvent(QCloseEvent* event)
             dbgln("Unable to record the closing window in the session store: {}", result.error());
         Application::the().update_reopen_recently_closed_actions();
     }
+
+    if (m_window_close_accepted && m_is_private == WebView::IsPrivate::Yes) {
+        // Closed windows can remain alive until deferred deletion, and native
+        // services can retain their session longer still. Do not let that old
+        // session become the next private window's cookies/storage context.
+        auto current = WebView::Application::existing_session(WebView::IsPrivate::Yes);
+        if (current.ptr() == m_session.ptr()) {
+            bool has_open_window = false;
+            for (auto* widget : QApplication::topLevelWidgets()) {
+                auto* other = as_if<BrowserWindow>(widget);
+                if (other && other != this && !other->m_window_close_accepted
+                    && &other->session() == m_session.ptr()) {
+                    has_open_window = true;
+                    break;
+                }
+            }
+            // An explicit private-session restart may already have installed a
+            // new session. The identity check above protects that replacement.
+            if (!has_open_window)
+                WebView::Application::the().reset_private_browsing_session();
+        }
+    }
+
 }
 
 void BrowserWindow::request_close_preflight(Function<void(bool approved)> on_complete)

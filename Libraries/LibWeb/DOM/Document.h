@@ -870,6 +870,7 @@ public:
 
     Utf16String last_modified() const;
 
+    bool derpbird_click_to_load { false };
     [[nodiscard]] GC::Ptr<HTML::Window> window() const { return m_window; }
 
     void set_window(HTML::Window&);
@@ -1864,6 +1865,9 @@ public:
     CSS::StyleScope& style_scope() { return m_style_scope; }
 
     bool content_blocking_enabled() const;
+    Vector<Utf16String> const& derpbird_user_styles();
+    void invalidate_derpbird_user_styles();
+    String derpbird_user_style_status() const;
     Utf16String const& content_blocker_style_sheet();
     void invalidate_content_blocker_style_sheet();
     bool content_blocker_style_sheet_may_need_refresh_for_class_or_id(Utf16FlyString const* id, ReadonlySpan<Utf16FlyString> class_names);
@@ -2515,6 +2519,9 @@ private:
     // The style sheet set generation the `@keyframes` rows were last brought up to date at.
     Optional<u64> m_animation_keyframes_published_generation;
 
+    Optional<Vector<Utf16String>> m_derpbird_user_styles;
+    Vector<String> m_derpbird_skipped_style_ids;
+    u32 m_derpbird_skipped_style_conditions { 0 };
     Optional<Utf16String> m_content_blocker_style_sheet;
     // Class/id tokens already covered by the cached content blocker stylesheet.
     HashTable<Utf16FlyString> m_content_blocker_style_sheet_checked_classes;

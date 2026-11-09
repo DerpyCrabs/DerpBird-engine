@@ -28,6 +28,9 @@ NavigationSourceSnapshot create_navigation_source_snapshot(SourceSnapshotParams 
         .text_directive_user_activation = snapshot.text_directive_user_activation,
         .browsing_context_group_has_multiple_contexts = snapshot.browsing_context_group_has_multiple_contexts,
         .browsing_context_group_has_remote_contexts = snapshot.browsing_context_group_has_remote_contexts,
+        .derpbird_popup_source = snapshot.derpbird_popup_source,
+        .derpbird_popup_top = snapshot.derpbird_popup_top,
+        .derpbird_popunder = snapshot.derpbird_popunder,
     };
 }
 
@@ -38,7 +41,7 @@ GC::Ref<SourceSnapshotParams> create_source_snapshot_params_from_navigation_sour
     if (snapshot.fetch_client.has_value())
         fetch_client = RemoteEnvironmentSettings::create(*snapshot.fetch_client);
 
-    return realm.heap().allocate<SourceSnapshotParams>(
+    auto result = realm.heap().allocate<SourceSnapshotParams>(
         snapshot.has_transient_activation,
         snapshot.sandboxing_flags,
         snapshot.allows_downloading,
@@ -47,6 +50,10 @@ GC::Ref<SourceSnapshotParams> create_source_snapshot_params_from_navigation_sour
         snapshot.text_directive_user_activation,
         snapshot.browsing_context_group_has_multiple_contexts,
         snapshot.browsing_context_group_has_remote_contexts);
+    result->derpbird_popup_source = snapshot.derpbird_popup_source;
+    result->derpbird_popup_top = snapshot.derpbird_popup_top;
+    result->derpbird_popunder = snapshot.derpbird_popunder;
+    return result;
 }
 
 }

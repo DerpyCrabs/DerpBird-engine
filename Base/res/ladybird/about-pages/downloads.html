@@ -87,6 +87,9 @@
                 gap: 4px;
             }
 
+            [hidden] { display: none !important; }
+            .download-pages { display: flex; align-items: center; gap: 12px; margin-block: 16px; }
+
             .download-state progress {
                 appearance: none;
                 width: 150px;
@@ -178,6 +181,11 @@
         <div class="downloads-content">
             <div id="downloads-status" class="downloads-status">Loading downloads…</div>
             <div id="downloads-empty" class="downloads-empty hidden"></div>
+            <nav id="download-pages" class="download-pages" aria-label="Download history pages" hidden>
+                <button id="downloads-previous" class="secondary-button">Previous</button>
+                <span id="downloads-page" aria-live="polite"></span>
+                <button id="downloads-next" class="secondary-button">Next</button>
+            </nav>
             <div id="downloads-list" class="downloads-list"></div>
         </div>
 
@@ -198,6 +206,20 @@
                 { divisor: 1000 ** 4, suffix: "TB" },
             ];
 
+            const pages = document.querySelector("#download-pages");
+            const previousPage = document.querySelector("#downloads-previous");
+            const nextPage = document.querySelector("#downloads-next");
+            const pageLabel = document.querySelector("#downloads-page");
+            const pageSize = 50;
+            let page = 0;
+            let renderPending = false;
+            function scheduleRender() {
+                if (renderPending) return;
+                renderPending = true;
+                requestAnimationFrame(() => { renderPending = false; render(); });
+            }
+            previousPage.addEventListener("click", () => { page = Math.max(0, page - 1); render(); });
+            nextPage.addEventListener("click", () => { page++; render(); });
             let downloads = [];
             const downloadRows = new Map();
 
@@ -448,12 +470,18 @@
                 const pausedCount = downloads.filter(download => download.status === "paused").length;
                 const inactiveCount = downloads.length - activeCount - pausedCount;
 
-                updateDownloadList(sortedDownloads);
+                const pageCount = Math.max(1, Math.ceil(sortedDownloads.length / pageSize));
+                page = Math.min(page, pageCount - 1);
+                pages.hidden = pageCount === 1;
+                previousPage.disabled = page === 0;
+                nextPage.disabled = page === pageCount - 1;
+                pageLabel.textContent = `Page ${page + 1} of ${pageCount}`;
+                updateDownloadList(sortedDownloads.slice(page * pageSize, (page + 1) * pageSize));
                 pruneInactiveDownloadsButton.disabled = inactiveCount === 0;
 
                 const isEmpty = downloads.length === 0;
                 downloadsEmpty.classList.toggle("hidden", !isEmpty);
-                downloadsEmpty.textContent = "Files you download in this session will show up here.";
+                downloadsEmpty.textContent = "Downloaded files will show up here.";
 
                 if (isEmpty) {
                     downloadsStatus.textContent = "No downloads yet.";
@@ -463,7 +491,7 @@
                 } else if (pausedCount > 0) {
                     downloadsStatus.textContent = `${pluralize(pausedCount, "paused download")} · ${pluralize(downloads.length, "item")} total.`;
                 } else {
-                    downloadsStatus.textContent = `${pluralize(downloads.length, "download")} in this session.`;
+                    downloadsStatus.textContent = `${pluralize(downloads.length, "download")}.`;
                 }
             }
 
@@ -471,16 +499,17 @@
                 const index = downloads.findIndex(candidate => candidate.id === download.id);
                 if (index === -1) {
                     downloads.push(download);
+                    page = 0;
                 } else {
                     downloads[index] = download;
                 }
-                render();
+                scheduleRender();
             }
 
             function removeDownload(downloadId) {
                 downloads = downloads.filter(download => download.id !== downloadId);
                 downloadRows.delete(downloadId);
-                render();
+                scheduleRender();
             }
 
             pruneInactiveDownloadsButton.addEventListener("click", () => {

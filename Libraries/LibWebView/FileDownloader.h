@@ -88,7 +88,7 @@ public:
         Yes,
     };
 
-    u64 download_file(IsPrivate, URL::URL const&, LexicalPath, MayReplaceDestination = MayReplaceDestination::No);
+    u64 download_file(IsPrivate, URL::URL const&, LexicalPath, MayReplaceDestination = MayReplaceDestination::No, RefPtr<HTTP::HeaderList> request_headers = {});
     using ResponseFinished = Function<void(u64 decoded_body_size, Requests::RequestTimingInfo const*,
         Optional<StringView> error)>;
     u64 adopt_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ReadonlyBytes initial_data = {}, ResponseFinished = {});
@@ -96,6 +96,7 @@ public:
     bool has_active_downloads() const;
     bool has_unresumable_downloads() const;
     void set_cancel_callback(u64 id, Function<void()>);
+    void enable_producer_pause(u64 id);
     void append_download_data(u64 id, ReadonlyBytes);
     void finish_download(u64 id);
     void cancel_unresumable_downloads();

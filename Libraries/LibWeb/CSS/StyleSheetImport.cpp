@@ -241,9 +241,10 @@ void StyleSheetImport::fetch()
         },
         .style_resource_base_url = {},
         .parent_style_sheet_origin_clean = {},
+        .derpbird_insertion_authority = {},
     };
     (void)fetch_a_style_resource(URL { href() }, rule_or_declaration, Fetch::Infrastructure::Request::Destination::Style, CorsMode::NoCors,
-        [strong_this = NonnullRefPtr { *this }, parent_style_sheet = NonnullRefPtr { parent_style_sheet }, document = m_document, load_event_delayer = DOM::DocumentLoadEventDelayer(*m_document, DOM::DocumentLoadEventDelayerReason::StyleSheetRequest)](auto response, auto maybe_byte_stream) mutable {
+        [strong_this = NonnullRefPtr { *this }, parent_style_sheet = NonnullRefPtr { parent_style_sheet }, insertion_authority = parent_style_sheet.derpbird_insertion_authority(), document = m_document, load_event_delayer = DOM::DocumentLoadEventDelayer(*m_document, DOM::DocumentLoadEventDelayerReason::StyleSheetRequest)](auto response, auto maybe_byte_stream) mutable {
             // AD-HOC: Stop delaying the load event.
             auto finish_loading = [strong_this, document, load_event_delayer = move(load_event_delayer)] {
                 auto imported_sheet = strong_this->m_style_sheet;
@@ -302,8 +303,10 @@ void StyleSheetImport::fetch()
             }
             Parser::Parser::parse_stylesheet_off_thread(
                 Parser::ParsingParams { *document }, decoded_or_error.release_value(),
-                [strong_this, parent_style_sheet, document = GC::make_root(document), url = move(url), is_cors_same_origin = response->is_cors_same_origin(), referrer_policy = ReferrerPolicy::parse_a_referrer_policy_from_a_referrer_policy_header(*response->unsafe_response()->record()), finish_loading = move(finish_loading)](Parser::RustStyleSheetParse parsed) mutable {
+                [strong_this, parent_style_sheet, insertion_authority, document = GC::make_root(document), url = move(url), is_cors_same_origin = response->is_cors_same_origin(), referrer_policy = ReferrerPolicy::parse_a_referrer_policy_from_a_referrer_policy_header(*response->unsafe_response()->record()), finish_loading = move(finish_loading)](Parser::RustStyleSheetParse parsed) mutable {
                     ScopeGuard guard = move(finish_loading);
+                    if (insertion_authority && !insertion_authority->active())
+                        return;
                     // NB: The sheet records its referrer policy as it is created, before its own imports start to load.
                     auto imported_style_sheet = StyleSheetState::create(parsed.native_rules(), document.ptr(), strong_this->m_media_list.retain(), move(url), referrer_policy);
 
@@ -324,6 +327,8 @@ void StyleSheetImport::fetch()
 void StyleSheetImport::set_style_sheet(NonnullRefPtr<StyleSheetState> style_sheet)
 {
     m_style_sheet = style_sheet;
+    if (m_parent_style_sheet)
+        m_style_sheet->set_derpbird_insertion_authority(m_parent_style_sheet->derpbird_insertion_authority());
     m_style_sheet->set_parent_css_style_sheet(m_parent_style_sheet.ptr());
     if (m_media)
         m_media->set_associated_style_sheet(style_sheet);
@@ -346,7 +351,7 @@ void StyleSheetImport::set_style_sheet(NonnullRefPtr<StyleSheetState> style_shee
     // The rules the import brings in arrive now, at the position the import already holds.
     if (m_parent_style_sheet)
         record_imported_style_sheet_loaded(m_identity, *m_parent_style_sheet);
-    m_style_sheet->invalidate_owners();
+    m_style_sheet->invalidate_owners(false);
 }
 
 // https://drafts.csswg.org/cssom/#dom-cssimportrule-media

@@ -146,7 +146,7 @@ TEST_CASE(entries_with_previous_vary_keys_are_dropped_on_migration)
     EXPECT_EQ(index.estimate_cache_size_accessed_since(UnixDateTime::earliest()).total, 0u);
 }
 
-TEST_CASE(stored_responses_outlive_the_files_beside_them_on_migration)
+TEST_CASE(legacy_responses_without_canonical_provenance_are_retired_on_migration)
 {
     Test::TemporaryDirectory const directory { "TestCacheIndex"sv };
     auto database = TRY_OR_FAIL(Database::Database::create(directory.path().string(), "INDEX"sv));
@@ -164,13 +164,13 @@ TEST_CASE(stored_responses_outlive_the_files_beside_them_on_migration)
 
     EXPECT_EQ(TRY_OR_FAIL(HTTP::CacheIndex::migrate_schema(*database)), Database::MigrationOutcome::Success);
 
-    EXPECT(FileSystem::exists(entry_file.string()));
+    EXPECT(!FileSystem::exists(entry_file.string()));
     EXPECT(!FileSystem::exists(bytecode_file.string()));
     EXPECT(!FileSystem::exists(partial_bytecode_file.string()));
 
     auto index = MUST(HTTP::CacheIndex::create(*database, directory.path()));
-    EXPECT(index.has_entry(1, 0));
-    EXPECT_EQ(index.estimate_cache_size_accessed_since(UnixDateTime::earliest()).total, 10u);
+    EXPECT(!index.has_entry(1, 0));
+    EXPECT_EQ(index.estimate_cache_size_accessed_since(UnixDateTime::earliest()).total, 0u);
 }
 
 TEST_CASE(full_range_cache_keys_round_trip)

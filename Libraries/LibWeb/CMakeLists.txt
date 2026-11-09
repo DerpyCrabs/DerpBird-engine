@@ -710,6 +710,11 @@ set(SOURCES
     Page/ElementResizeAction.cpp
     Page/EventHandler.cpp
     Page/MiddleButtonScrollHandler.cpp
+    Page/DerpBirdCredentialFields.cpp
+    Page/DerpBirdPageScript.cpp
+    Page/DerpBirdProceduralStyles.cpp
+    Page/DerpBirdInsertionAuthority.cpp
+    Page/DerpBirdWebRequestRegistration.cpp
     Page/Page.cpp
     Page/PageCursor.cpp
     Page/PageHoverLink.cpp

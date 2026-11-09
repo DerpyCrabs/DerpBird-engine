@@ -66,11 +66,23 @@ public:
 
     void request_file(Web::PageId page_id, Web::FileRequest);
 
+    virtual void acknowledge_derpbird_web_requests(Web::PageId, Web::HTML::CrossProcessId, String, u64, bool) override;
+    virtual void set_derpbird_web_requests(Web::PageId, JsonValue) override;
+    virtual void receive_derpbird_web_request_event(Web::PageId, Web::HTML::CrossProcessId, String, u64, JsonValue) override;
+    virtual void set_derpbird_user_scripts(JsonValue snapshot) override;
+    virtual void invoke_derpbird_context_script(Web::PageId, Web::HTML::CrossProcessId, String, String) override;
+
     PageHost& page_host() { return *m_page_host; }
     PageHost const& page_host() const { return *m_page_host; }
     Web::Compositor::CompositorConnection* compositor_process_connection() const;
     void did_destroy_compositor_context(Web::CompositorContextId);
 
+    virtual void did_receive_derpbird_value_event(Web::PageId, Web::HTML::CrossProcessId, u64, ByteBuffer) override;
+    virtual void request_derpbird_credential_fields(Web::PageId, Web::HTML::CrossProcessId, u64) override;
+    virtual void fill_derpbird_credential_fields(Web::PageId, Web::HTML::CrossProcessId, u64, u64, String, String, String) override;
+    virtual void capture_derpbird_credential_fields(Web::PageId, Web::HTML::CrossProcessId, u64, u64, String) override;
+    virtual void cancel_derpbird_credential_fields(Web::PageId, Web::HTML::CrossProcessId, u64) override;
+    virtual void did_receive_derpbird_values(Web::PageId, Web::HTML::CrossProcessId, u64, ByteBuffer, Optional<String>) override;
     Function<void(IPC::TransportHandle const&, Optional<int> client_id, Optional<Utf16String> const& top_level_site)> on_request_server_connection;
 
     // Asks the Browser to spawn this process's MediaServer if it has none, and to connect a client to it.
@@ -176,6 +188,7 @@ private:
     virtual void pinch_event_in_hosted_root(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::PinchEvent) override;
     virtual void debug_request(Web::PageId page_id, ByteString, ByteString) override;
     virtual void get_source(Web::PageId page_id) override;
+    virtual void derpbird_filter_selector(Web::PageId page_id, Web::UniqueNodeID node_id) override;
     virtual void inspect_dom_tree(Web::PageId page_id) override;
     virtual void inspect_storage(Web::PageId page_id, Web::StorageAPI::StorageEndpointType storage_endpoint, u64 request_id) override;
     // Web::StorageAPI::StorageAreaMirrorClient: the mirrors' link to the browser process, which owns the storage.
@@ -247,11 +260,13 @@ private:
     virtual void clone_dom_node(Web::PageId page_id, Web::UniqueNodeID node_id) override;
     virtual void remove_dom_node(Web::PageId page_id, Web::UniqueNodeID node_id) override;
 
+    virtual void set_derpbird_user_styles(Web::PageId page_id, JsonValue sections) override;
     virtual void set_content_blocking_policy(Web::PageId page_id, bool enabled, Vector<String> disabled_sites) override;
     virtual void set_content_blockers(Core::AnonymousBuffer patterns) override;
 
     virtual void set_force_dark_settings(Web::PageId page_id, bool enabled, HashMap<String, bool> per_host) override;
     virtual void set_autoplay_settings(Web::PageId page_id, Web::HTML::AutoplayPolicy policy, Vector<Utf16String> allowlist) override;
+    virtual void set_transparent_background(Web::PageId, bool) override;
     virtual void set_preferred_color_scheme(Web::PageId page_id, Web::CSS::PreferredColorScheme) override;
     virtual void set_preferred_contrast(Web::PageId page_id, Web::CSS::PreferredContrast) override;
     virtual void set_preferred_motion(Web::PageId page_id, Web::CSS::PreferredMotion) override;

@@ -158,6 +158,7 @@ void WaylandPageSurface::destroy_subsurface()
     m_parent = nullptr;
     m_parent_surface = nullptr;
     m_position.clear();
+    m_above = nullptr;
     hide();
     hide_overlay();
 }
@@ -177,11 +178,12 @@ WaylandPageSurface::Buffer* WaylandPageSurface::buffer_for(Frame const& frame)
     if (fstat(frame.dmabuf.objects[0].fd(), &object_stat) < 0)
         return nullptr;
 
+    auto drm_format = frame.is_opaque ? opaque_drm_format(frame.dmabuf.drm_format) : frame.dmabuf.drm_format;
     for (size_t i = 0; i < m_buffers.size(); ++i) {
         auto& buffer = *m_buffers[i];
         if (buffer.shared_image_buffer != &frame.shared_image_buffer)
             continue;
-        if (buffer.device == object_stat.st_dev && buffer.inode == object_stat.st_ino) {
+        if (buffer.device == object_stat.st_dev && buffer.inode == object_stat.st_ino && buffer.drm_format == drm_format) {
             // NB: A view keeps showing a frame after its backing stores are gone, and it no longer has an ID for it
             //     then. The compositor's release of the buffer is still the release of the backing store it held.
             if (frame.bitmap_id >= 0 || !buffer.is_held_by_compositor) {
@@ -201,7 +203,7 @@ WaylandPageSurface::Buffer* WaylandPageSurface::buffer_for(Frame const& frame)
     buffer->inode = object_stat.st_ino;
     buffer->page_id = frame.page_id;
     buffer->bitmap_id = frame.bitmap_id;
-    buffer->drm_format = opaque_drm_format(frame.dmabuf.drm_format);
+    buffer->drm_format = drm_format;
     buffer->modifier = frame.dmabuf.modifier;
 
     buffer->params = zwp_linux_dmabuf_v1_create_params(m_globals.dmabuf);
@@ -334,13 +336,13 @@ void WaylandPageSurface::buffer_released(void* data, wl_buffer*)
 
 bool WaylandPageSurface::would_change_placement(Frame const& frame) const
 {
-    return m_position != frame.position || m_presented_source != frame.source || m_presented_destination != frame.destination;
+    return m_position != frame.position || m_presented_source != frame.source || m_presented_destination != frame.destination || m_above != frame.above || m_presented_opaque != frame.is_opaque;
 }
 
 WaylandPageSurface::PresentResult WaylandPageSurface::present(QWindow& parent, Frame const& frame)
 {
     // NB: The source has to lie within the buffer, or the compositor disconnects us.
-    auto source = frame.source.intersected(QRect { 0, 0, frame.dmabuf.size.width(), frame.dmabuf.size.height() });
+    auto source = frame.source.intersected(QRectF { 0, 0, static_cast<qreal>(frame.dmabuf.size.width()), static_cast<qreal>(frame.dmabuf.size.height()) });
     if (source.isEmpty() || frame.destination.isEmpty()) {
         hide();
         return PresentResult::Presented;
@@ -364,17 +366,22 @@ WaylandPageSurface::PresentResult WaylandPageSurface::present(QWindow& parent, F
     }
 
     // NB: The position belongs to the browser window's state, and takes effect when it commits next.
-    m_position_needs_parent_commit = m_position != frame.position;
+    m_position_needs_parent_commit = m_position != frame.position || m_above != frame.above;
+    if (m_above != frame.above) {
+        wl_subsurface_place_above(m_subsurface, frame.above ? frame.above : m_parent_surface);
+        m_above = frame.above;
+    }
     if (m_position_needs_parent_commit) {
         wl_subsurface_set_position(m_subsurface, frame.position.x(), frame.position.y());
         m_position = frame.position;
     }
 
-    wp_viewport_set_source(m_viewport, wl_fixed_from_int(source.x()), wl_fixed_from_int(source.y()), wl_fixed_from_int(source.width()), wl_fixed_from_int(source.height()));
+    wp_viewport_set_source(m_viewport, wl_fixed_from_double(source.x()), wl_fixed_from_double(source.y()), wl_fixed_from_double(source.width()), wl_fixed_from_double(source.height()));
     wp_viewport_set_destination(m_viewport, frame.destination.width(), frame.destination.height());
 
     auto* opaque_region = wl_compositor_create_region(m_globals.compositor);
-    wl_region_add(opaque_region, 0, 0, frame.destination.width(), frame.destination.height());
+    if (frame.is_opaque)
+        wl_region_add(opaque_region, 0, 0, frame.destination.width(), frame.destination.height());
     wl_surface_set_opaque_region(m_surface, opaque_region);
     wl_region_destroy(opaque_region);
 
@@ -387,6 +394,7 @@ WaylandPageSurface::PresentResult WaylandPageSurface::present(QWindow& parent, F
     m_presented_buffer = buffer;
     m_presented_source = frame.source;
     m_presented_destination = frame.destination;
+    m_presented_opaque = frame.is_opaque;
     return PresentResult::Presented;
 }
 

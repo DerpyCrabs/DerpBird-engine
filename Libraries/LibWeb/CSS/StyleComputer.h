@@ -230,6 +230,8 @@ public:
         bool needs_mathml_and_svg_user_agent_style_sheets { false };
         bool is_html_document { false };
         StyleSheetState const* user_style_sheet { nullptr };
+        u64 derpbird_user_styles_revision { 0 };
+        u64 derpbird_author_sheet_order_generation { 0 };
         bool operator==(NonAuthorStyleSheetsKey const&) const = default;
     };
     // The key the recorded sheets were collected under, if any were.

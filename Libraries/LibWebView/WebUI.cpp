@@ -12,6 +12,8 @@
 #include <LibWebView/WebUI/BookmarksUI.h>
 #include <LibWebView/WebUI/CrashReportsUI.h>
 #include <LibWebView/WebUI/DownloadsUI.h>
+#include <LibWebView/WebUI/DerpBirdUI.h>
+#include <LibWebView/ViewImplementation.h>
 #include <LibWebView/WebUI/HistoryUI.h>
 #include <LibWebView/WebUI/SettingsUI.h>
 #include <LibWebView/WebUI/VersionUI.h>
@@ -24,6 +26,7 @@ static constexpr auto s_pages = to_array<WebUI::Page>({
     { "bookmarks"sv, "Bookmarks"sv, WebUI::PageType::Dynamic },
     { "crashes"sv, "Crash Reports"sv, WebUI::PageType::Dynamic },
     { "downloads"sv, "Downloads"sv, WebUI::PageType::Dynamic },
+    { "derpbird"sv, "DerpBird"sv, WebUI::PageType::Dynamic },
     { "history"sv, "History"sv, WebUI::PageType::Dynamic },
     { "newtab"sv, "New Tab"sv, WebUI::PageType::Static },
     { "settings"sv, "Settings"sv, WebUI::PageType::Dynamic },
@@ -68,7 +71,12 @@ ErrorOr<RefPtr<WebUI>> WebUI::create(WebContentClient& client, Web::PageId page_
 
     RefPtr<WebUI> web_ui;
 
-    if (page->host == "bookmarks"sv)
+    if (page->host == "derpbird"sv) {
+        auto* content_page = client.page(page_id);
+        if (!content_page || !content_page->view().on_derpbird_request)
+            return nullptr;
+        web_ui = TRY(create_web_ui<DerpBirdUI>(client, page_id, move(host)));
+    } else if (page->host == "bookmarks"sv)
         web_ui = TRY(create_web_ui<BookmarksUI>(client, page_id, move(host)));
     else if (page->host == "crashes"sv)
         web_ui = TRY(create_web_ui<CrashReportsUI>(client, page_id, move(host)));

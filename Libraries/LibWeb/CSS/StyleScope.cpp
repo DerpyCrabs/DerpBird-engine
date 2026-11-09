@@ -29,6 +29,7 @@
 #include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/Page/DerpBirdProceduralStyles.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/ValueParserRustFFI.h>
 
@@ -100,6 +101,11 @@ void StyleScope::initialize_a_css_style_sheet(StyleSheetState& sheet, DOM::Eleme
     sheet.set_title(move(title));
     sheet.set_alternate(alternate == Alternate::Yes);
     sheet.set_origin_clean(origin_clean == OriginClean::Yes);
+
+    if (owner_node && owner_node->derpbird_insertion_authority())
+        sheet.set_derpbird_insertion_authority(owner_node->derpbird_insertion_authority());
+    else if (parent_style_sheet)
+        sheet.set_derpbird_insertion_authority(parent_style_sheet->derpbird_insertion_authority());
 
     // 2. Then run the add a CSS style sheet steps for the newly created CSS style sheet.
     add_a_css_style_sheet(sheet, style_engine_update);
@@ -217,6 +223,10 @@ void StyleScope::visit_edges(GC::Cell::Visitor& visitor)
 {
     visitor.visit(m_node);
     visitor.visit(m_user_style_sheet);
+    for (auto const& sheet : m_derpbird_procedural_style_sheets)
+        visitor.visit(sheet);
+    for (auto const& sheet : m_derpbird_author_style_sheets)
+        visitor.visit(sheet);
     visitor.visit(m_style_sheets);
 }
 
@@ -234,6 +244,8 @@ void StyleScope::build_rule_cache()
 {
     if (!m_rule_cache.has_value()) {
         m_rule_cache = StyleRuleCache {};
+        for (auto const& sheet : derpbird_author_style_sheets())
+            sheet->evaluate_media_queries(document());
         add_rules_to_rule_cache(CascadeOrigin::Author);
 
         // NB: A shadow root's scope holds only its own sheets. What the user and user-agent sheets define is found
@@ -278,17 +290,31 @@ void StyleScope::invalidate_style_cache()
 void StyleScope::invalidate_user_style_sheet()
 {
     m_user_style_sheet = nullptr;
+    m_derpbird_procedural_style_sheets.clear();
+    m_derpbird_author_style_sheets.clear();
+    m_derpbird_user_styles_built = false;
+    ++m_derpbird_user_styles_revision;
     invalidate_style_cache();
     invalidate_counter_style_cache();
 }
 
 void StyleScope::build_user_style_sheet_if_needed()
 {
-    if (m_user_style_sheet)
+    if (m_user_style_sheet && m_derpbird_user_styles_built)
         return;
 
     if (!is<DOM::Document>(*m_node))
         return;
+
+    if (!m_derpbird_user_styles_built) {
+        for (auto const& source : document().derpbird_user_styles())
+            m_derpbird_author_style_sheets.append(parse_css_stylesheet(CSS::Parser::ParsingParams(document()), source.utf16_view()));
+        if (document().content_blocking_enabled()) {
+            for (auto const& source : derpbird_procedural_styles(document()))
+                m_derpbird_procedural_style_sheets.append(parse_css_stylesheet(CSS::Parser::ParsingParams(document()), source.utf16_view()));
+        }
+        m_derpbird_user_styles_built = true;
+    }
 
     auto user_style_source = document().page().user_style();
     auto const& content_blocker_style_source = document().content_blocker_style_sheet();
@@ -407,6 +433,12 @@ void StyleScope::for_each_user_agent_stylesheet(bool include_quirks_mode_stylesh
     }
 }
 
+Vector<RefPtr<StyleSheetState>> const& StyleScope::derpbird_author_style_sheets() const
+{
+    const_cast<StyleScope&>(*this).build_user_style_sheet_if_needed();
+    return m_derpbird_author_style_sheets;
+}
+
 void StyleScope::for_each_stylesheet(CascadeOrigin cascade_origin, Function<void(CSS::StyleSheetState&)> const& callback) const
 {
     if (cascade_origin == CascadeOrigin::UserAgent) {
@@ -419,9 +451,15 @@ void StyleScope::for_each_stylesheet(CascadeOrigin cascade_origin, Function<void
         style_scope.build_user_style_sheet_if_needed();
         if (style_scope.m_user_style_sheet)
             callback(*style_scope.m_user_style_sheet);
+        for (auto const& sheet : style_scope.m_derpbird_procedural_style_sheets)
+            callback(*sheet);
     }
     if (cascade_origin == CascadeOrigin::Author) {
-        for_each_active_css_style_sheet(move(callback));
+        for_each_active_css_style_sheet(callback);
+        // Stylish/Stylus inject author sheets after the site's sheets. Genuine
+        // user sheets and cosmetic blocker sheets retain their user origin.
+        for (auto const& sheet : derpbird_author_style_sheets())
+            callback(*sheet);
     }
 }
 
@@ -472,6 +510,7 @@ void StyleRuleCache::add_rules_from_sheet(StyleSheetState& sheet, CascadeOrigin 
         auto keyframe_set = adopt_ref(*new Animations::KeyframeEffect::KeyFrameSet);
         auto base_url = sheet.style_resource_base_url();
         keyframe_set->style_sheet_resource_context = {
+            .derpbird_authority_id = sheet.derpbird_insertion_authority() ? sheet.derpbird_insertion_authority()->identity() : 0,
             .base_url = base_url.has_value() ? base_url->to_string() : String {},
             .origin_clean = sheet.is_origin_clean(),
         };
@@ -575,26 +614,39 @@ void StyleRuleCache::add_rules_from_sheet(StyleSheetState& sheet, CascadeOrigin 
 
 void StyleScope::publish_cascade_layer_order(StyleSheetState* pending_attachment)
 {
-    Vector<Parser::ValueParserFFI::NativeStyleSheet const*> sheets;
-    // An adopted sheet is announced before ObservableArray stores it. Include that pending
-    // attachment so its layer order crosses the same transaction boundary as its rules.
-    for_each_stylesheet(CascadeOrigin::Author, [&](auto& sheet) {
-        if (&sheet == pending_attachment)
-            pending_attachment = nullptr;
-        if (!sheet.native_media_list().matches())
-            return;
-        if (auto* shared_compiled_style_sheet = sheet.shared_compiled_style_sheet())
-            sheets.append(shared_compiled_style_sheet->contents().native_sheet().handle());
+    // Layer names and order are local to an origin, even when their spellings
+    // coincide. Non-author sheets belong to the document scope.
+    for (auto origin : { CascadeOrigin::Author, CascadeOrigin::User, CascadeOrigin::UserAgent }) {
+        if (origin != CascadeOrigin::Author && !m_node->is_document())
+            continue;
+        Vector<Parser::ValueParserFFI::NativeStyleSheet const*> sheets;
+        auto* pending = origin == CascadeOrigin::Author ? pending_attachment : nullptr;
+        Function<void(StyleSheetState&)> collect = [&](StyleSheetState& sheet) {
+            if (&sheet == pending)
+                pending = nullptr;
+            if (!sheet.native_media_list().matches())
+                return;
+            if (auto* shared = sheet.shared_compiled_style_sheet())
+                sheets.append(shared->contents().native_sheet().handle());
+            else
+                sheets.append(sheet.native_sheet().handle());
+        };
+        if (origin == CascadeOrigin::Author)
+            for_each_active_css_style_sheet(collect);
         else
-            sheets.append(sheet.native_sheet().handle());
-    });
-    if (pending_attachment && !pending_attachment->disabled() && pending_attachment->native_media_list().matches())
-        sheets.append(pending_attachment->native_sheet().handle());
-
-    m_has_published_named_layer_order = Parser::ValueParserFFI::rust_style_sheet_publish_layer_order(
-        sheets.data(), sheets.size(), document().style_computer().style_engine().host(),
-        style_engine_tree_scope().value(), m_has_published_named_layer_order, &document(),
-        [](void* document) { static_cast<DOM::Document*>(document)->flush_deferred_style_change_event(); });
+            for_each_stylesheet(origin, collect);
+        if (pending && !pending->disabled() && pending->native_media_list().matches())
+            sheets.append(pending->native_sheet().handle());
+        if (origin == CascadeOrigin::Author) {
+            for (auto const& sheet : derpbird_author_style_sheets())
+                collect(*sheet);
+        }
+        auto index = static_cast<u8>(origin);
+        m_has_published_named_layer_order[index] = Parser::ValueParserFFI::rust_style_sheet_publish_layer_order(
+            sheets.data(), sheets.size(), document().style_computer().style_engine().host(),
+            style_engine_tree_scope().value(), index, m_has_published_named_layer_order[index], &document(),
+            [](void* document) { static_cast<DOM::Document*>(document)->flush_deferred_style_change_event(); });
+    }
 }
 
 // The `@keyframes` this scope defines, as the rule cache just built resolved them. The style computation resolves an
@@ -737,9 +789,10 @@ void StyleScope::build_counter_style_cache(Layout::BegunRead const& read)
     auto const tree_scope = style_engine_tree_scope();
     // NB: Asking the style engine for the index of a layer waits on it, and the predefined counter styles alone are
     //     over a hundred rules in one layer, so each layer is asked for once.
-    HashMap<u32, u32> layer_indices;
-    auto layer_index = [&](u32 layer) {
-        return layer_indices.ensure(layer, [&] { return StyleEngineFFI::style_engine_layer_index(style_engine.host(), &read, tree_scope, layer); });
+    HashMap<u64, u32> layer_indices;
+    auto layer_index = [&](u32 layer, CascadeOrigin origin) {
+        auto key = (static_cast<u64>(origin) << 32) | layer;
+        return layer_indices.ensure(key, [&] { return StyleEngineFFI::style_engine_layer_index_for_origin(style_engine.host(), &read, tree_scope, layer, static_cast<u8>(origin)); });
     };
     auto collect_counter_style_rules = [&](CSS::CascadeOrigin cascade_origin, CSS::StyleSheetState const& style_sheet) {
         if (!style_sheet.native_media_list().matches())
@@ -753,7 +806,7 @@ void StyleScope::build_counter_style_cache(Layout::BegunRead const& read)
                 .name = Utf16FlyString { rule.name() },
                 .descriptors = rule.descriptors(),
                 .origin = cascade_origin_precedence(cascade_origin),
-                .layer = layer_index(layer),
+                .layer = layer_index(layer, cascade_origin),
             });
         });
     };

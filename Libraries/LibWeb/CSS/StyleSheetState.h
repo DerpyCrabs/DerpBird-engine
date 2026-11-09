@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <LibWeb/Page/DerpBirdInsertionAuthority.h>
 #include <AK/Badge.h>
 #include <AK/Function.h>
 #include <AK/NonnullOwnPtr.h>
@@ -117,7 +118,10 @@ public:
     HashTable<GC::Ptr<DOM::Node>> const& owning_documents_or_shadow_roots() const { return m_owning_documents_or_shadow_roots; }
     void add_owning_document_or_shadow_root(DOM::Node& document_or_shadow_root);
     void remove_owning_document_or_shadow_root(DOM::Node& document_or_shadow_root);
-    void invalidate_owners();
+    void invalidate_owners(bool revoke_insertion_authority = true);
+    void revoke_derpbird_insertion_authority();
+    RefPtr<DerpBirdInsertionAuthority> const& derpbird_insertion_authority() const { return m_derpbird_insertion_authority; }
+    void set_derpbird_insertion_authority(RefPtr<DerpBirdInsertionAuthority>);
     GC::Ptr<DOM::Document> owning_document() const;
     void set_disabled(bool);
     void for_each_owning_style_scope(Function<void(StyleScope&)> const&) const;
@@ -209,6 +213,8 @@ public:
     void set_parent_css_style_sheet(StyleSheetState*);
 
 private:
+    RefPtr<DerpBirdInsertionAuthority> m_derpbird_insertion_authority;
+    u64 m_derpbird_authority_generation { 0 };
     StyleSheetState(RustRuleList, GC::Ptr<DOM::Document>, RustMediaList, Optional<::URL::URL> location, Optional<ReferrerPolicy::ReferrerPolicy> fetched_referrer_policy);
 
     void set_rules(RustRuleList);

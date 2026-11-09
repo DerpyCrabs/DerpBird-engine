@@ -14,6 +14,8 @@
 #include <LibWeb/DOM/HTMLCollection.h>
 #include <LibWeb/Gamepad/EventNames.h>
 #include <LibWeb/HTML/HTMLBodyElement.h>
+#include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/Numbers.h>
@@ -24,6 +26,19 @@
 namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(HTMLBodyElement);
+
+void HTMLBodyElement::inserted()
+{
+    Base::inserted();
+    if (!is_connected())
+        return;
+    auto document = GC::Ref { this->document() };
+    queue_a_microtask(document, GC::create_function(GC::Heap::the(), [document] {
+        if (document->is_fully_active() && document->body())
+            document->page().client().derpbird_document_phase(*document, DerpBirdScriptRunAt::DocumentBody);
+    }));
+}
+
 
 HTMLBodyElement::HTMLBodyElement(DOM::Document& document, DOM::QualifiedName qualified_name)
     : HTMLElement(document, move(qualified_name))

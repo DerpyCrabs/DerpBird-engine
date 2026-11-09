@@ -648,7 +648,7 @@ fn cascade_layer_order<'a>(sheets: impl IntoIterator<Item = &'a NativeStyleSheet
     result
 }
 
-/// Publish the layer order of the host's ordered, active author sheets.
+/// Publish one cascade origin's layer order independently of the other origins.
 ///
 /// # Safety
 /// Sheets must be live, and `host` a live document host, on its document's thread. prepare must
@@ -659,6 +659,7 @@ pub unsafe extern "C" fn rust_style_sheet_publish_layer_order(
     count: usize,
     host: &crate::render_state::DocumentHost,
     tree_scope: u32,
+    origin: u8,
     previously_had_layers: bool,
     context: *mut c_void,
     prepare: unsafe extern "C" fn(*mut c_void),
@@ -674,7 +675,11 @@ pub unsafe extern "C" fn rust_style_sheet_publish_layer_order(
     // must clear the engine's old ranks.
     if has_layers || previously_had_layers {
         unsafe { prepare(context) };
-        host.write_rules(crate::css::style::rule_writes::RuleWrite::LayerOrder { tree_scope, names });
+        host.write_rules(crate::css::style::rule_writes::RuleWrite::LayerOrder {
+            tree_scope,
+            origin,
+            names,
+        });
     }
     has_layers
 }

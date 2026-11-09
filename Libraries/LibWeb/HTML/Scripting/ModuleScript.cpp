@@ -6,6 +6,7 @@
 
 #include <LibGC/Heap.h>
 #include <LibJS/Runtime/ModuleRequest.h>
+#include <LibJS/Runtime/Error.h>
 #include <LibJS/ScriptCompilation.h>
 #include <LibWeb/CSS/StyleSheetState.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
@@ -138,7 +139,7 @@ WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_from_pre_compile
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#creating-a-css-module-script
-WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_a_css_module_script(ByteString const& filename, Utf16View source, EnvironmentSettingsObject& settings)
+WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_a_css_module_script(ByteString const& filename, Utf16View source, EnvironmentSettingsObject& settings, ScriptFetchOptions const& options, URL::URL const& response_url)
 {
     auto& realm = settings.realm();
 
@@ -158,7 +159,16 @@ WebIDL::ExceptionOr<GC::Ptr<ModuleScript>> ModuleScript::create_a_css_module_scr
     // 6. Run the steps to synchronously replace the rules of a CSSStyleSheet on sheet given source.
     //    If this throws an exception, catch it, and set script's parse error to that exception, and return script.
     // NB: A new constructed sheet has the constructed flag and not the disallow modification flag, so this cannot throw.
+    // Resolve relative images/fonts against the fetched module, including
+    // redirects, rather than the importing document's URL.
+    sheet->set_location(response_url);
+    sheet->set_base_url(response_url);
     sheet->replace_rules(source);
+    // replace_rules intentionally revokes old authority for CSSOM callers.
+    // This is a fresh module sheet: assign its authority after initial parsing,
+    // before it can be adopted or any of its resources registered by an owner.
+    sheet->set_derpbird_insertion_authority(options.derpbird_insertion_authority);
+    script->set_fetch_options(options);
 
     // 7. Set script's record to the result of CreateDefaultExportSyntheticModule(sheet).
     script->m_record = CSS::create_css_style_sheet_default_export_module(realm, sheet, filename.view());
@@ -273,6 +283,8 @@ GC::Ptr<WebIDL::Promise> ModuleScript::run(PreventErrorReporting prevent_error_r
     // 1. Let settings be the settings object of script.
     auto& settings = this->settings_object();
     auto& realm = settings.realm();
+    if (auto authority = fetch_options().derpbird_insertion_authority; authority && !authority->active())
+        return WebIDL::create_rejected_promise(realm, JS::TypeError::create(realm, "Userscript module authority was revoked"sv));
 
     // 2. Check if we can run script with realm. If this returns "do not run", then return a promise resolved with undefined.
     if (can_run_script(settings) == RunScriptDecision::DoNotRun) {

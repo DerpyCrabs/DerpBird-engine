@@ -436,6 +436,7 @@ mod tests {
                 url_type: 0,
                 url_modifiers: RetainedRequestUrlModifierList::from_retained_modifiers(Vec::new()),
                 resource_context: ImageResourceContext {
+                    derpbird_authority_id: 0,
                     base_url: RetainedString::from_ascii(base_url.to_owned()),
                     has_base_url: true,
                     has_parent_style_sheet_origin_clean: true,

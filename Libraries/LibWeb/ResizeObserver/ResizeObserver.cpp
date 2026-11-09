@@ -27,8 +27,10 @@ GC_DEFINE_ALLOCATOR(ResizeObserver);
 void invoke_resize_observer_callback(ResizeObserver& observer, ReadonlySpan<GC::Ref<ResizeObserverEntry>> entries)
 {
     auto& callback = observer.callback();
-    auto& callback_realm = callback.callback_context->realm();
+    auto& callback_realm = callback.associated_realm();
     auto& wrapper_world = Bindings::host_defined_wrapper_world(callback_realm);
+    if (wrapper_world.is_detached())
+        return;
 
     auto wrapped_records = MUST(JS::Array::create(callback_realm, 0));
     for (size_t i = 0; i < entries.size(); ++i) {

@@ -284,6 +284,7 @@ pub struct FfiCustomFunctionEntry {
 /// `url()` in its rules resolves against, and whether the sheet is origin-clean.
 #[repr(C)]
 pub struct FfiStyleSheetResourceContextEntry {
+    pub derpbird_authority_id: u64,
     pub source_identity: u64,
     pub base_url: *const u8,
     pub base_url_length: usize,
@@ -1665,9 +1666,11 @@ pub(crate) unsafe fn run_style_update(
     let mut functions = std::mem::take(&mut engine.document_functions);
     // SAFETY: The host lends the custom functions the inputs name for this call.
     unsafe {
-        functions.take_in(&mut computation_inputs, &engine.document_media, |scope, layer| {
-            engine.layer_index(scope, layer)
-        });
+        functions.take_in(
+            &mut computation_inputs,
+            &engine.document_media,
+            |scope, layer, origin| engine.layer_index_for_origin(scope, layer, origin),
+        );
     }
     engine.document_functions = functions;
     engine.custom_property_registrations_changed = engine

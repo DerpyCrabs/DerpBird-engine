@@ -31,6 +31,9 @@ struct ExportedRequest {
     Optional<u32> status_code;
     Optional<String> reason_phrase;
     Vector<HTTP::Header> response_headers;
+    String canonical_host_names;
+    // Live response provenance only; never persisted in the HTTP cache.
+    String policy_ip_addresses;
 
     IPC::File body;
     IPC::File status;

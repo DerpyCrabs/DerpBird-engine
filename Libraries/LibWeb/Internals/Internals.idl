@@ -474,6 +474,7 @@ interface Internals {
     // Flushes pending style work without forcing layout.
     undefined updateStyle();
     undefined setUserStyle(DOMString source);
+    boolean setDerpbirdUserStyles(DOMString source);
     undefined setPreferredColorScheme(DOMString colorScheme);
     // Simulates the window gaining or losing focus (e.g. browser chrome or another window taking focus).
     undefined setPageFocus(boolean hasFocus);

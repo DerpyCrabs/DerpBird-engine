@@ -37,6 +37,7 @@ struct RuleOrDeclaration {
     Variant<StyleDeclaration, Rule> value;
     Optional<::URL::URL> style_resource_base_url;
     Optional<bool> parent_style_sheet_origin_clean;
+    RefPtr<DerpBirdInsertionAuthority> derpbird_insertion_authority;
 };
 
 // https://drafts.csswg.org/css-values-4/#style-resource-base-url

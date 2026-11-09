@@ -253,6 +253,7 @@ pub(crate) struct AbsolutizationContext<'a> {
 
 #[derive(Clone, Copy)]
 pub(crate) struct StyleSheetResourceContext<'a> {
+    pub derpbird_authority_id: u64,
     pub(crate) base_url: &'a [u8],
     pub(crate) origin_clean: bool,
 }
@@ -411,6 +412,9 @@ fn absolutize_image(value: &StyleValueData, context: &AbsolutizationContext) -> 
             url_type: *url_type,
             url_modifiers: url_modifiers.clone(),
             resource_context: crate::css::style_value::ImageResourceContext {
+                derpbird_authority_id: context.style_sheet_resource_context
+                    .map(|context| context.derpbird_authority_id)
+                    .unwrap_or(resource_context.derpbird_authority_id),
                 base_url,
                 has_base_url: true,
                 has_parent_style_sheet_origin_clean,

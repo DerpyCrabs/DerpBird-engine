@@ -1,0 +1,29 @@
+--- a/fontconfig/fontconfig.h.in
++++ b/fontconfig/fontconfig.h.in
+@@ -39,7 +39,7 @@
+ #endif
+ 
+ #ifndef FcPublic
+-#  define FcPublic
++#  define FcPublic @DEFAULT_FCPUBLIC@
+ #endif
+ 
+ typedef unsigned char  FcChar8;
+--- a/fontconfig/meson.build
++++ b/fontconfig/meson.build
+@@ -3,6 +3,15 @@
+ fontconfig_h_conf.set('CACHE_MIN_COMPAT_VERSION', '@0@'.format(cachemincompat))
+ fontconfig_h_conf.set('CACHE_SNAP_VERSION', '@0@'.format(cachesnapversion))
+ fontconfig_h_conf.set('NEXT_CACHE_VERSION', '@0@'.format(nextcacheversion))
++default_FcPublic = ''
++if get_option('default_library') != 'static'
++  if host_machine.system() == 'windows'
++    default_FcPublic = '__declspec(dllimport)'
++  else
++    default_FcPublic = '__attribute__((visibility("default")))'
++  endif
++endif
++fontconfig_h_conf.set('DEFAULT_FCPUBLIC', default_FcPublic)
+ fontconfig_h = configure_file(
+   output: 'fontconfig.h',
+   input: 'fontconfig.h.in',

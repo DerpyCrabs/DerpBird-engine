@@ -129,7 +129,7 @@ enableContentBlocking.addEventListener("change", () => {
 
     // Enable the lists before the content blocker, which then downloads every enabled list.
     if (enableContentBlocking.checked) {
-        for (const identifier of ["easyList", "easyPrivacy"])
+        for (const identifier of ["easyList", "easyPrivacy", "ublock-filters", "ublock-privacy", "ublock-badware", "ublock-unbreak", "ublock-quick-fixes"])
             ladybird.sendMessage("setContentBlockerListEnabled", { identifier, enabled: true });
     }
 

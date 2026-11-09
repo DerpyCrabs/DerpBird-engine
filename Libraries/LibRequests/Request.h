@@ -21,6 +21,7 @@
 #include <LibRequests/NetworkError.h>
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibRequests/RequestTransferLease.h>
+#include <LibURL/URL.h>
 
 namespace Requests {
 
@@ -135,8 +136,26 @@ public:
     // Invoked at most once, when the request drops its delivery callbacks without a finish: a stop() or a transfer.
     Function<void(TeardownReason)> on_teardown;
 
+    // Queried before RequestServer commits response cookies. The selected mask
+    // is retained so response delivery uses the same decision.
+    struct ResponseHeaderPolicy final : RefCounted<ResponseHeaderPolicy> {
+        explicit ResponseHeaderPolicy(Function<u8(HTTP::HeaderList const&, StringView)> callback) : callback(move(callback)) { }
+        Function<u8(HTTP::HeaderList const&, StringView)> callback;
+        Function<bool(Vector<URL::URL> const&, Vector<String> const&)> canonical_url_callback;
+        Function<bool(HTTP::HeaderList const&, StringView)> request_header_callback;
+        bool allow_canonical_urls(Vector<URL::URL> const& aliases, Vector<String> const& addresses) const { return canonical_url_callback && canonical_url_callback(aliases, addresses); }
+        u8 select(HTTP::HeaderList const& headers, StringView addresses) const { return callback ? callback(headers, addresses) : 24; }
+    };
+    void set_response_header_policy(Function<u8(HTTP::HeaderList const&, StringView)> callback) { m_response_policy_context = adopt_ref(*new ResponseHeaderPolicy(move(callback))); }
+    void set_request_header_policy(Function<bool(HTTP::HeaderList const&, StringView)> callback) { VERIFY(m_response_policy_context); m_response_policy_context->request_header_callback = move(callback); }
+    void set_canonical_url_policy(Function<bool(Vector<URL::URL> const&, Vector<String> const&)> callback) { VERIFY(m_response_policy_context); m_response_policy_context->canonical_url_callback = move(callback); }
+    RefPtr<ResponseHeaderPolicy> response_policy_context() const { return m_response_policy_context; }
+    String const& response_policy_ip_addresses() const { return m_response_policy_ip_addresses; }
+    u8 select_response_header_policy(HTTP::HeaderList const& headers, String addresses) { m_response_policy_ip_addresses = move(addresses); m_response_header_policy = m_response_policy_context ? m_response_policy_context->select(headers, m_response_policy_ip_addresses) : 24; return *m_response_header_policy; }
+    Optional<u8> response_header_policy() const { return m_response_header_policy; }
+
     void did_finish(Badge<RequestClient>, u64 total_size, RequestTimingInfo const& timing_info, Optional<NetworkError> const& network_error);
-    void did_receive_headers(Badge<RequestClient>, NonnullRefPtr<HTTP::HeaderList> response_headers, Optional<u32> response_code, Optional<String> const& reason_phrase, CacheState cache_state, ByteString http_version);
+    void did_receive_headers(Badge<RequestClient>, NonnullRefPtr<HTTP::HeaderList> response_headers, Optional<u32> response_code, Optional<String> const& reason_phrase, CacheState cache_state, ByteString http_version, String ip_addresses);
     void did_transfer(Badge<RequestClient>);
 
     RefPtr<Core::Notifier>& write_notifier(Badge<RequestClient>) { return m_write_notifier; }
@@ -145,6 +164,9 @@ public:
     void set_request_cached_body_file(Badge<RequestClient>, int fd, u64 offset, u64 size);
 
 private:
+    RefPtr<ResponseHeaderPolicy> m_response_policy_context;
+    String m_response_policy_ip_addresses;
+    Optional<u8> m_response_header_policy;
     Request(RequestClient&, u64 request_id, Optional<RequestTransferLeaseKey>);
 
     void attach_read_stream();
@@ -213,6 +235,7 @@ private:
     OwnPtr<InternalStreamData> m_internal_stream_data;
     Optional<NetworkError> m_body_delivery_error;
     bool m_body_delivery_paused { false };
+    bool m_response_headers_delivered { false };
     bool m_finished { false };
     ByteString m_http_version;
 };

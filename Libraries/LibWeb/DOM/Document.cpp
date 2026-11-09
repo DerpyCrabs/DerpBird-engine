@@ -239,6 +239,7 @@
 #include <LibWeb/Layout/TreeBuilder.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Loader/ContentBlocker.h>
+#include <LibWeb/Page/DerpBirdPageScript.h>
 #include <LibWeb/Namespace.h>
 #include <LibWeb/NavigationTiming/PerformanceNavigationTiming.h>
 #include <LibWeb/Page/EventHandler.h>
@@ -1172,6 +1173,85 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_ancestor_origins_list);
 }
 
+Vector<Utf16String> const& Document::derpbird_user_styles()
+{
+    if (!m_derpbird_user_styles.has_value()) {
+        m_derpbird_user_styles = Vector<Utf16String> {};
+        if (!is_decoded_svg()) {
+            DerpBirdStyleMatchBudget budget;
+            Utf16StringBuilder assembled;
+            Vector<DerpBirdStyleSection::Wrapper> ancestors;
+            Optional<String> source_id;
+            auto close_to = [&](size_t depth) {
+                while (ancestors.size() > depth) {
+                    assembled.append_ascii("}\n"sv);
+                    ancestors.take_last();
+                }
+            };
+            auto flush = [&] {
+                close_to(0);
+                if (source_id.has_value()) {
+                    m_derpbird_user_styles->append(assembled.to_string());
+                    assembled.clear();
+                    source_id.clear();
+                }
+            };
+            for (auto const& section : page().derpbird_user_styles()) {
+                // Installed styles are contiguous in the native registry. Never
+                // let ancestor identities cross an installation boundary.
+                if (!section.wrappers.has_value() || (source_id.has_value() && *source_id != section.source_id))
+                    flush();
+                auto skipped_before = budget.skipped_conditions;
+                if (section.matches(url(), budget)) {
+                    if (!section.wrappers.has_value()) {
+                        m_derpbird_user_styles->append(section.css);
+                    } else {
+                        source_id = section.source_id;
+                        auto const& wrappers = *section.wrappers;
+                        size_t shared = 0;
+                        while (shared < ancestors.size() && shared < wrappers.size()
+                            && ancestors[shared].id == wrappers[shared].id && ancestors[shared].open == wrappers[shared].open)
+                            ++shared;
+                        close_to(shared);
+                        for (size_t i = shared; i < wrappers.size(); ++i) {
+                            assembled.append(wrappers[i].open.utf16_view());
+                            assembled.append_ascii('\n');
+                            ancestors.append(wrappers[i]);
+                        }
+                        assembled.append(section.css.utf16_view());
+                        assembled.append_ascii('\n');
+                    }
+                }
+                if (budget.skipped_conditions != skipped_before && !section.source_id.is_empty()
+                    && !m_derpbird_skipped_style_ids.contains_slow(section.source_id))
+                    m_derpbird_skipped_style_ids.append(section.source_id);
+            }
+            flush();
+            m_derpbird_skipped_style_conditions = budget.skipped_conditions;
+        }
+    }
+    return *m_derpbird_user_styles;
+}
+
+String Document::derpbird_user_style_status() const
+{
+    JsonObject status;
+    status.set("url"sv, url().serialize());
+    status.set("evaluated"sv, m_derpbird_user_styles.has_value());
+    status.set("skippedConditions"sv, m_derpbird_skipped_style_conditions);
+    JsonArray ids;
+    for (auto const& id : m_derpbird_skipped_style_ids) ids.must_append(id);
+    status.set("styleIds"sv, move(ids));
+    return JsonValue(move(status)).serialized();
+}
+
+void Document::invalidate_derpbird_user_styles()
+{
+    m_derpbird_user_styles.clear();
+    m_derpbird_skipped_style_ids.clear();
+    m_derpbird_skipped_style_conditions = 0;
+}
+
 bool Document::content_blocking_enabled() const
 {
     return page().content_blocking_enabled_for_url(relevant_settings_object().top_level_creation_url);
@@ -2089,6 +2169,8 @@ Color Document::background_color(Layout::BegunRead const& read) const
 
 Color Document::canvas_background_color(Layout::BegunRead const& read) const
 {
+    if (page().client().has_transparent_background())
+        return background_color(read);
     return CSS::SystemColor::canvas(canvas_color_scheme(read)).blend(background_color(read));
 }
 
@@ -2255,6 +2337,34 @@ void Document::set_url(URL::URL const& url)
 
     // 2. Respond to base URL changes given document.
     respond_to_base_url_changes(old_document_url, old_base_url);
+
+    // One event per URL transition, irrespective of how many userscript worlds
+    // subscribed. Queue it after navigation bookkeeping; never run author code
+    // synchronously from set_url(). Revoked worlds remove their observer flag.
+    bool observes_url = false;
+    for (auto observer : m_document_observers)
+        observes_url |= observer->observes_derpbird_url_changes();
+    if (observes_url && is_fully_active()) {
+        HTML::queue_global_task(HTML::Task::Source::DOMManipulation, HTML::relevant_global_object(*this),
+            GC::create_function(heap(), [document = GC::Ref { *this }] {
+                if (!document->is_fully_active()) return;
+                bool subscribed = false;
+                for (auto observer : document->m_document_observers)
+                    subscribed |= observer->observes_derpbird_url_changes();
+                if (!subscribed) return;
+                if (auto window = document->window())
+                    window->dispatch_event(DOM::Event::create(HTML::relevant_global_object(*window), "urlchange"_fly_string));
+            }));
+    }
+
+    // A same-document navigation can enter or leave a user-style scope.
+    // Use the document URL, never a page-controlled <base> URL.
+    if (m_derpbird_user_styles.has_value()) {
+        invalidate_derpbird_user_styles();
+        style_scope().invalidate_user_style_sheet();
+        if (style_computer_if_created())
+            CSS::record_non_author_stylesheets(*this);
+    }
 }
 
 // https://html.spec.whatwg.org/multipage/urls-and-fetching.html#fallback-base-url
@@ -4388,6 +4498,7 @@ void Document::set_focused_area(GC::Ptr<Node> node, InvalidateFocusPseudoClasses
     set_needs_repaint(InvalidateDisplayList::PaintCommands);
 
     update_active_element();
+    page().client().derpbird_credential_focus_changed(*this);
 
     if (navigable() && page().spell_checking_available())
         spell_check_controller().did_focus(m_focused_area);
@@ -6757,6 +6868,7 @@ void Document::destroy()
     // 2. Abort document.
     abort();
 
+    m_page->client().derpbird_document_destroyed(*this);
     m_page->notifications_document_destroyed(*this);
     stop_compositor_animation_timers();
 
@@ -8672,6 +8784,19 @@ void Document::update_for_history_step_application(NonnullRefPtr<HTML::SessionHi
                 WebDriver::BiDi::document_is_ready_for_scripts(*this);
             }
         }
+
+        // Only newly committed HTTP(S) documents, before their first page script.
+        // Policy follows the top-level creation URL, including child frames.
+        if (!is_decoded_svg() && content_blocking_enabled() && !origin().is_opaque()) {
+            auto scriptlets = ContentBlocker::the().scriptlets_for_url(url());
+            if (!scriptlets.is_empty()) {
+                auto result = run_derpbird_page_script(*this, "content-blocker"sv, scriptlets.utf16_view());
+                if (result.is_error() || !result.value())
+                    dbgln("Content blocker scriptlet execution failed");
+            }
+        }
+
+        page().client().derpbird_document_phase(*this, DerpBirdScriptRunAt::DocumentStart);
 
         // 3. If scrollingBlockedInNewDocument is false, try to scroll to the fragment for document.
         if (!scrolling_blocked_in_new_document)

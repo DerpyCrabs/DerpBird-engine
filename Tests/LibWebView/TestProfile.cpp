@@ -26,6 +26,8 @@
 #include <LibWebView/HSTSStore.h>
 #include <LibWebView/HistoryStore.h>
 #include <LibWebView/Profile.h>
+#include <LibWebView/Process.h>
+#include <LibCore/Socket.h>
 #include <LibWebView/Settings.h>
 #include <LibWebView/StorageJar.h>
 
@@ -311,3 +313,18 @@ TEST_CASE(profile_caches_are_isolated)
 
     remove_test_root();
 }
+
+#if defined(AK_OS_LINUX)
+TEST_CASE(long_profile_ipc_routes_are_bounded_stable_and_separate)
+{
+    auto long_path = ByteString::formatted("{}/{}", test_root(), ByteString::repeated('x', 200));
+    auto first = MUST(WebView::Process::paths_for_process("Ladybird"sv, long_path));
+    auto repeated = MUST(WebView::Process::paths_for_process("Ladybird"sv, long_path));
+    auto other = MUST(WebView::Process::paths_for_process("Ladybird"sv, ByteString::formatted("{}-other", long_path)));
+    EXPECT(Core::SocketAddress::local(first.socket_path).to_sockaddr_un().has_value());
+    EXPECT_EQ(first.socket_path, repeated.socket_path);
+    EXPECT_EQ(first.pid_path, repeated.pid_path);
+    EXPECT_NE(first.socket_path, other.socket_path);
+    EXPECT_NE(first.pid_path, other.pid_path);
+}
+#endif

@@ -36,6 +36,7 @@ set(ABOUT_PAGES
     bookmarks.html
     crashes.html
     downloads.html
+    derpbird.html
     history.html
     newtab.html
     settings.html
@@ -47,6 +48,11 @@ set(ABOUT_PAGES
     welcome.js
 )
 list(TRANSFORM ABOUT_PAGES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/about-pages/")
+
+file(GLOB DERPBIRD_ASSETS CONFIGURE_DEPENDS
+    "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/about-pages/derpbird-assets/*.js"
+    "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/about-pages/derpbird-assets/*.css"
+)
 
 set(ABOUT_SETTINGS_RESOURCES
     advanced.js
@@ -178,6 +184,10 @@ function(copy_resources_to_build base_directory bundle_target)
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
 
+    copy_resource_set(ladybird/about-pages/derpbird-assets RESOURCES ${DERPBIRD_ASSETS}
+        DESTINATION ${base_directory} TARGET ${bundle_target}
+    )
+
     copy_resource_set(ladybird/about-pages/settings RESOURCES ${ABOUT_SETTINGS_RESOURCES}
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
@@ -219,6 +229,7 @@ function(install_ladybird_resources destination component)
     install(FILES ${INTERNAL_RESOURCES} DESTINATION "${destination}/ladybird" COMPONENT ${component})
     install(FILES ${SITE_COMPATIBILITY_RESOURCES} DESTINATION "${destination}/ladybird/site-compatibility" COMPONENT ${component})
     install(FILES ${ABOUT_PAGES} DESTINATION "${destination}/ladybird/about-pages" COMPONENT ${component})
+    install(FILES ${DERPBIRD_ASSETS} DESTINATION "${destination}/ladybird/about-pages/derpbird-assets" COMPONENT ${component})
     install(FILES ${ABOUT_SETTINGS_RESOURCES} DESTINATION "${destination}/ladybird/about-pages/settings" COMPONENT ${component})
     install(FILES ${WEB_TEMPLATES} DESTINATION "${destination}/ladybird/templates" COMPONENT ${component})
     if (PDFJS_BUILD_FILES)

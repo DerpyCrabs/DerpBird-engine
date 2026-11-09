@@ -52,6 +52,7 @@
 #include <UI/Qt/SystemAppearance.h>
 #include <UI/Qt/Theme.h>
 #include <UI/Qt/WebContentView.h>
+#include <UI/Qt/SurfacePixelCoverage.h>
 #ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
 #    include <UI/Qt/WaylandPageSurface.h>
 #endif
@@ -171,6 +172,8 @@ WebContentView::WebContentView(QWidget* window, Optional<WebView::CanonicalTrave
     on_page_background_color_change = [this](Gfx::Color) {
         update_iosurface_layer_background_color();
     };
+#else
+    on_page_background_color_change = [this](Gfx::Color) { update(); };
 #endif
 
     QObject::connect(qGuiApp, &QGuiApplication::screenRemoved, this, [this](QScreen*) {
@@ -757,6 +760,24 @@ static bool is_browser_reserved_shortcut(QKeyEvent const& event)
     auto const modifiers = event.modifiers() & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);
     auto const key = event.key();
 
+    // Reload belongs to the browser even while a content input has focus.
+    // Re-dispatching a renderer key event to the parent does not re-run Qt's
+    // shortcut matching, so reserve every chord registered by Menu.cpp.
+    if ((modifiers == Qt::ControlModifier && key == Qt::Key_R)
+        || (modifiers == Qt::NoModifier && key == Qt::Key_F5)
+        || (modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && key == Qt::Key_R))
+        return true;
+#if defined(AK_OS_MACOS)
+    if (modifiers == (Qt::ControlModifier | Qt::AltModifier) && key == Qt::Key_R)
+        return true;
+#else
+    if (modifiers == Qt::ControlModifier && key == Qt::Key_F5)
+        return true;
+#endif
+
+    if (modifiers == Qt::ControlModifier && (key == Qt::Key_H || key == Qt::Key_D))
+        return true;
+
     if (modifiers == Qt::ControlModifier && key == Qt::Key_T)
         return true;
     if (modifiers == (Qt::ControlModifier | Qt::ShiftModifier) && key == Qt::Key_T)
@@ -1167,11 +1188,11 @@ void WebContentView::paintEvent(QPaintEvent*)
     }
 
     if (bitmap) {
-        QImage q_image(bitmap->scanline_u8(0), bitmap->width(), bitmap->height(), bitmap->pitch(), QImage::Format_RGB32);
+        QImage q_image(bitmap->scanline_u8(0), bitmap->width(), bitmap->height(), bitmap->pitch(), QImage::Format_ARGB32_Premultiplied);
         QRect source_rect(0, 0, bitmap_size.width(), bitmap_size.height());
 
         auto background_color = page_background_color();
-        auto fallback_color = QColor(background_color.red(), background_color.green(), background_color.blue());
+        auto fallback_color = QColor(background_color.red(), background_color.green(), background_color.blue(), background_color.alpha());
 
         if (m_scales_frames_to_fit && !bitmap_size.is_empty()) {
             auto destination = rect_fitting_frame(bitmap_size, m_viewport_size);
@@ -1198,10 +1219,11 @@ void WebContentView::paintEvent(QPaintEvent*)
 #    ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
     // NB: Filling the part of the widget under the page's window would only touch memory that nobody sees. During a
     //     resize, that is most of a window-sized buffer at every step.
-    background -= rect_covered_by_page_window();
+    auto device_origin = QPointF(mapTo(window(), QPoint { 0, 0 })) * m_device_pixel_ratio;
+    background -= fully_covered_surface_pixels(rect_covered_by_page_window(), device_origin);
 #    endif
     for (auto const& rect : background)
-        painter.fillRect(rect, QColor(background_color.red(), background_color.green(), background_color.blue()));
+        painter.fillRect(rect, QColor(background_color.red(), background_color.green(), background_color.blue(), background_color.alpha()));
 }
 #endif
 
@@ -1242,7 +1264,7 @@ QImage WebContentView::visible_snapshot() const
         if (width <= 0 || height <= 0)
             return {};
 
-        QImage image(bitmap->scanline_u8(0), bitmap->width(), bitmap->height(), bitmap->pitch(), QImage::Format_RGB32);
+        QImage image(bitmap->scanline_u8(0), bitmap->width(), bitmap->height(), bitmap->pitch(), QImage::Format_ARGB32_Premultiplied);
         return image.copy(0, 0, width, height);
     }
 
@@ -1878,7 +1900,24 @@ bool WebContentView::show_image_over_page(QImage const&, QPoint)
 void WebContentView::hide_image_over_page()
 {
 }
+
 #endif
+
+void WebContentView::set_transparent_background(bool transparent)
+{
+    WebView::ViewImplementation::set_transparent_background(transparent);
+    setAttribute(Qt::WA_OpaquePaintEvent, !transparent);
+}
+
+void WebContentView::set_compositing_above(WebContentView* view)
+{
+    m_compositing_below = view;
+#ifdef LADYBIRD_QT_USE_VULKAN_WINDOW
+    schedule_vulkan_window_update();
+#else
+    update();
+#endif
+}
 
 void WebContentView::set_bookmarks_bar_overlay_height([[maybe_unused]] int height)
 {
@@ -1901,8 +1940,8 @@ void WebContentView::set_zoom_level(double zoom_level)
 
 void WebContentView::update_viewport_size()
 {
-    auto scaled_width = int(width() * m_device_pixel_ratio);
-    auto scaled_height = int(height() * m_device_pixel_ratio);
+    auto scaled_width = static_cast<int>(ceil(width() * m_device_pixel_ratio));
+    auto scaled_height = static_cast<int>(ceil(height() * m_device_pixel_ratio));
     Gfx::IntRect rect(0, 0, scaled_width, scaled_height);
 
     set_viewport_rect(rect);
@@ -1912,6 +1951,7 @@ void WebContentView::update_zoom()
 {
     ViewImplementation::update_zoom();
     update_viewport_size();
+    emit zoom_level_changed();
 }
 
 void WebContentView::showEvent(QShowEvent* event)
@@ -2323,7 +2363,27 @@ Gfx::IntPoint WebContentView::to_widget_position(Gfx::IntPoint content_position)
 
 void WebContentView::show_context_menu(WebView::Menu& menu, Gfx::IntPoint widget_position)
 {
-    execute_context_menu_later(m_context_menu, *this, menu, map_point_to_global_position(widget_position));
+    auto& context_menu = replace_context_menu(m_context_menu, *this, menu);
+    auto clicked_document = derpbird_context_document();
+    auto commands = Application::the().derpbird_script_commands(page(), clicked_document);
+    if (!commands.is_empty()) {
+        context_menu.addSeparator();
+        auto* scripts = context_menu.addMenu(QString::fromUtf8("Пользовательские скрипты"));
+        for (auto const& value : commands.values()) {
+            auto const& command = value.as_object();
+            auto id = command.get_string("id"sv).value();
+            auto label = MUST(String::formatted("{} — {}", command.get_string("script"sv).value(), command.get_string("label"sv).value()));
+            auto* action = scripts->addAction(qstring_from_ak_string(label));
+            action->setToolTip(qstring_from_ak_string(command.get_string("title"sv).value_or(String {})));
+            QObject::connect(action, &QAction::triggered, this, [this, id = AK::move(id), clicked_document] {
+                JsonObject event; event.set("button"sv, 0); event.set("keyboard"sv, false);
+                auto result = Application::the().invoke_derpbird_script_command(page(), id, event, clicked_document);
+                if (result.is_error()) warnln("Userscript menu command: {}", result.error());
+            });
+        }
+    }
+    auto position = map_point_to_global_position(widget_position);
+    QTimer::singleShot(0, &context_menu, [&context_menu, position] { execute_context_menu(context_menu, position); });
 }
 
 #if defined(LADYBIRD_QT_USE_IOSURFACE_LAYER) || defined(LADYBIRD_HAS_WAYLAND_GPU_QUERY)

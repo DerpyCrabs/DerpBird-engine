@@ -3293,6 +3293,7 @@ pub struct FfiRandomBaseValue {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FfiStyleSheetResourceContext {
+    pub derpbird_authority_id: u64,
     pub base_url: *const u8,
     pub base_url_length: usize,
     pub has_value: bool,
@@ -3302,6 +3303,7 @@ pub struct FfiStyleSheetResourceContext {
 impl FfiStyleSheetResourceContext {
     pub(crate) const fn empty() -> Self {
         Self {
+            derpbird_authority_id: 0,
             base_url: std::ptr::null(),
             base_url_length: 0,
             has_value: false,
@@ -4429,6 +4431,7 @@ pub(crate) unsafe fn drive_property_computation(
                         unsafe { ak::slice_from_raw_parts(context.base_url, context.base_url_length) }
                     };
                     crate::css::absolutize::StyleSheetResourceContext {
+                        derpbird_authority_id: context.derpbird_authority_id,
                         base_url,
                         origin_clean: context.origin_clean,
                     }
@@ -7268,6 +7271,7 @@ pub(crate) fn compute_animation_keyframe_longhands(
             let style_sheet_resource_context =
                 if matches!(property.value_source, FfiAnimationSpecifiedValueSource::Value) {
                     FfiStyleSheetResourceContext {
+                        derpbird_authority_id: property.style_sheet_resource_context.derpbird_authority_id,
                         base_url: property.style_sheet_resource_context.base_url,
                         base_url_length: property.style_sheet_resource_context.base_url_length,
                         has_value: property.style_sheet_resource_context.has_value,

@@ -897,6 +897,11 @@ EventResult EventHandler::handle_mouseup(CSSPixelPoint visual_viewport_position,
     // pointer was captured as it fired, even though lostpointercapture has fired by now.
     // NB: If the middle button was used to scroll, suppress click and activation behavior.
     auto click_target = dispatched_pointer_up.pointer_capture_target ? dispatched_pointer_up.pointer_capture_target : target_for_click_event(m_mousedown_target, *node);
+    if (button == UIEvents::MouseButton::Primary && click_target && document->focused_area()
+        && is<HTML::HTMLInputElement>(*document->focused_area())
+        && document->focused_area()->is_shadow_including_inclusive_ancestor_of(*click_target))
+        document->page().client().derpbird_credential_focus_changed(*document);
+
     if (click_target && !middle_button_autoscrolled) {
         // NB: Mouseup listeners may have invalidated layout. Click offsets are relative to the click target,
         //     which may differ from the mouseup target.
@@ -4070,6 +4075,8 @@ void EventHandler::maybe_show_context_menu(GC::Ref<DOM::Node> node, MouseEventCo
     Optional<URL::URL> link_url;
     if (link)
         link_url = document->encoding_parse_url(link->href());
+
+    m_navigable->page().client().page_did_prepare_script_context_menu(m_navigable->id(), document->id());
 
     // NB: An image without a source has nothing for the image menu to act on.
     auto* image_element = as_if<HTML::HTMLImageElement>(*context_menu_node);

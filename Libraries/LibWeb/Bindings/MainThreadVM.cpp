@@ -346,7 +346,12 @@ void initialize_main_thread_vm(HTML::AgentType type)
         // Do note that "implied document" from the spec is handwavy and the spec authors are trying to get rid of it: https://github.com/whatwg/html/issues/4980
         auto* script = active_script();
 
-        HTML::queue_a_microtask(script ? script->settings_object().responsible_document().ptr() : nullptr, GC::create_function(GC::Heap::the(), [&vm, job_settings, job = move(job), script_or_module = move(script_or_module)] {
+        HTML::queue_a_microtask(script ? script->settings_object().responsible_document().ptr() : nullptr, GC::create_function(GC::Heap::the(), [&vm, realm, job_settings, job = move(job), script_or_module = move(script_or_module)] {
+            // Jobs already queued by a userscript must not outlive its world.
+            // Keep the originating realm, not only its principal settings.
+            if (realm && host_defined_wrapper_world(*realm).is_detached())
+                return;
+
             // The dummy execution context has to be kept up here to keep it alive for the duration of the function.
             OwnPtr<JS::ExecutionContext> dummy_execution_context;
 
@@ -656,6 +661,9 @@ void initialize_main_thread_vm(HTML::AgentType type)
                 // 2. If moduleScript is null, then set completion to ThrowCompletion(a new TypeError).
                 if (!module_script) {
                     return JS::throw_completion(JS::TypeError::create(realm, Utf16String::formatted("Loading imported module '{}' failed.", module_request.module_specifier)));
+                }
+                if (auto authority = module_script->fetch_options().derpbird_insertion_authority; authority && !authority->active()) {
+                    return JS::throw_completion(JS::TypeError::create(realm, "Userscript module authority was revoked"sv));
                 }
                 // 3. Otherwise, if moduleScript's parse error is not null, then:
                 else if (!module_script->parse_error().is_null()) {

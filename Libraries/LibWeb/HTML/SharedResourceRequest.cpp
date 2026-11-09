@@ -42,6 +42,16 @@ GC::Ref<SharedResourceRequest> SharedResourceRequest::get_or_create(DOM::Documen
     return get_or_create(document, { url, mode, credentials_mode, {}, ReferrerPolicy::ReferrerPolicy::EmptyString });
 }
 
+GC::Ref<SharedResourceRequest> SharedResourceRequest::create_unshared(DOM::Document& document, URL::URL const& url, CORSSettingAttribute cors_setting)
+{
+    using Request = Fetch::Infrastructure::Request;
+    auto mode = cors_setting == CORSSettingAttribute::NoCORS ? Request::Mode::NoCORS : Request::Mode::CORS;
+    auto credentials_mode = cors_setting == CORSSettingAttribute::Anonymous ? Request::CredentialsMode::SameOrigin : Request::CredentialsMode::Include;
+    auto request = GC::Heap::the().allocate<SharedResourceRequest>(document.page(), Key { url, mode, credentials_mode, {}, ReferrerPolicy::ReferrerPolicy::EmptyString }, document);
+    request->m_can_be_shared = false;
+    return request;
+}
+
 GC::Ref<SharedResourceRequest> SharedResourceRequest::get_or_create(DOM::Document& document, Key key)
 {
     auto& shared_resource_requests = document.shared_resource_requests();
@@ -56,6 +66,11 @@ GC::Ref<SharedResourceRequest> SharedResourceRequest::get_or_create(DOM::Documen
 
 GC::Ref<SharedResourceRequest> SharedResourceRequest::get_or_create(DOM::Document& document, Fetch::Infrastructure::Request const& request)
 {
+    if (request.derpbird_insertion_authority()) {
+        auto isolated = GC::Heap::the().allocate<SharedResourceRequest>(document.page(), Key { request.url(), request.mode(), request.credentials_mode(), request.integrity_metadata(), request.referrer_policy() }, document);
+        isolated->m_can_be_shared = false;
+        return isolated;
+    }
     return get_or_create(document, { request.url(), request.mode(), request.credentials_mode(), request.integrity_metadata(), request.referrer_policy() });
 }
 
@@ -158,6 +173,7 @@ void SharedResourceRequest::set_fetch_controller(GC::Ptr<Fetch::Infrastructure::
 
 void SharedResourceRequest::fetch_resource(NonnullRefPtr<Fetch::Infrastructure::Request> request)
 {
+    m_derpbird_insertion_authority = request->derpbird_insertion_authority();
     auto& realm = HTML::relevant_realm(*m_document);
     VERIFY(needs_fetching());
 
@@ -417,6 +433,11 @@ void SharedResourceRequest::handle_stopped_fetch()
 
 void SharedResourceRequest::handle_successful_resource_load()
 {
+    if (m_derpbird_insertion_authority && !m_derpbird_insertion_authority->active()) {
+        m_image_data = nullptr;
+        handle_failed_fetch();
+        return;
+    }
     end_rendering_pending_operation(this);
     m_state = State::Finished;
     m_load_event_delayer.clear();

@@ -897,12 +897,18 @@ void HTMLParserEndState::advance_to_dom_content_loaded_phase()
         if (Core::StatsLog::the())
             log_document_stats_event(*document, "DOMContentLoaded"sv);
 
+        document->page().client().derpbird_document_phase(*document, DerpBirdScriptRunAt::DocumentEnd);
+
         // 2. Fire an event named DOMContentLoaded at the Document object, with its bubbles attribute initialized to true.
         auto content_loaded_event = DOM::Event::create(
             HTML::EventNames::DOMContentLoaded,
             HighResolutionTime::current_high_resolution_time(relevant_global_object(*document)));
         content_loaded_event->set_bubbles(true);
         document->dispatch_event(content_loaded_event);
+        queue_global_task(HTML::Task::Source::DOMManipulation, relevant_global_object(*document), GC::create_function(GC::Heap::the(), [document] {
+            if (document->is_fully_active())
+                document->page().client().derpbird_document_phase(*document, DerpBirdScriptRunAt::DocumentIdle);
+        }));
 
         // https://wicg.github.io/scroll-to-text-fragment/#invoking-text-directives
         // If the document has no parser, or its parser has stopped parsing, then:

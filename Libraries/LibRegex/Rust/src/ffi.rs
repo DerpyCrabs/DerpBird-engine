@@ -252,6 +252,56 @@ pub unsafe extern "C" fn rust_regex_test(
     test_internal(regex, input, start_pos)
 }
 
+/// Anchored test with a shared instruction budget. Returns 1, 0, or -1.
+/// # Safety
+/// Input must be valid for input_len units; remaining must point to a live u64.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_regex_test_anchored_budgeted(
+    regex: *const RustRegex,
+    input: *const u16,
+    input_len: usize,
+    start_pos: usize,
+    remaining: *mut u64,
+    out: *mut i32,
+    out_len: usize,
+) -> i32 {
+    if regex.is_null() || remaining.is_null() { return 0; }
+    let regex = unsafe { &*regex };
+    let input = if input.is_null() { &[] } else { unsafe { ak::slice_from_raw_parts(input, input_len) } };
+    let remaining = unsafe { &mut *remaining };
+    let out = if out.is_null() { &mut [] } else { unsafe { std::slice::from_raw_parts_mut(out, out_len) } };
+    match regex.0.test_anchored_budgeted(input, start_pos, remaining, out) {
+        crate::vm::VmResult::Match => 1,
+        crate::vm::VmResult::NoMatch => 0,
+        crate::vm::VmResult::LimitExceeded => -1,
+    }
+}
+
+/// Anchored test with a shared instruction budget. Returns 1, 0, or -1.
+/// # Safety
+/// Input must be valid for input_len units; remaining must point to a live u64.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_regex_test_anchored_budgeted_latin1(
+    regex: *const RustRegex,
+    input: *const u8,
+    input_len: usize,
+    start_pos: usize,
+    remaining: *mut u64,
+    out: *mut i32,
+    out_len: usize,
+) -> i32 {
+    if regex.is_null() || remaining.is_null() { return 0; }
+    let regex = unsafe { &*regex };
+    let input = if input.is_null() { &[] } else { unsafe { ak::slice_from_raw_parts(input, input_len) } };
+    let remaining = unsafe { &mut *remaining };
+    let out = if out.is_null() { &mut [] } else { unsafe { std::slice::from_raw_parts_mut(out, out_len) } };
+    match regex.0.test_anchored_budgeted(input, start_pos, remaining, out) {
+        crate::vm::VmResult::Match => 1,
+        crate::vm::VmResult::NoMatch => 0,
+        crate::vm::VmResult::LimitExceeded => -1,
+    }
+}
+
 /// Test whether a regex matches anywhere in Latin-1 input.
 ///
 /// # Safety

@@ -51,6 +51,10 @@ public:
     bool text_directive_user_activation { false };
     bool browsing_context_group_has_multiple_contexts { false };
     bool browsing_context_group_has_remote_contexts { false };
+    Optional<URL::URL> derpbird_popup_source {};
+    Optional<URL::URL> derpbird_popup_top {};
+    bool derpbird_popunder { false };
+
 
 protected:
     virtual void visit_edges(Cell::Visitor&) override;

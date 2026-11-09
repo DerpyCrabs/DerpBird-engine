@@ -1812,10 +1812,12 @@ pub struct ColorBase {
 }
 
 /// Fetch context carried by a computed url() image. This is not part of the CSS value's
-/// identity, so equality deliberately ignores it.
+/// identity, except the native authority boundary, which must not be interned
+/// together with an ordinary page value or another userscript's value.
 #[repr(C)]
 #[derive(Clone)]
 pub struct ImageResourceContext {
+    pub derpbird_authority_id: u64,
     pub(crate) base_url: RetainedString,
     pub(crate) has_base_url: bool,
     pub(crate) has_parent_style_sheet_origin_clean: bool,
@@ -1824,8 +1826,8 @@ pub struct ImageResourceContext {
 }
 
 impl PartialEq for ImageResourceContext {
-    fn eq(&self, _other: &Self) -> bool {
-        true
+    fn eq(&self, other: &Self) -> bool {
+        self.derpbird_authority_id == other.derpbird_authority_id
     }
 }
 
@@ -4460,6 +4462,7 @@ pub unsafe extern "C" fn rust_style_value_create_image(
             url_type,
             url_modifiers: unsafe { RetainedRequestUrlModifierList::from_raw(url_modifiers, url_modifier_count) },
             resource_context: ImageResourceContext {
+                derpbird_authority_id: 0,
                 base_url: RetainedString::from_units(resource_base_url.units().expect("invalid base URL text")),
                 has_base_url: has_resource_base_url,
                 has_parent_style_sheet_origin_clean: false,

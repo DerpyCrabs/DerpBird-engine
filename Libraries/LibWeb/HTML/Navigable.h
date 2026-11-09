@@ -107,6 +107,8 @@ public:
     GC::Ptr<DOM::Node> focused_area_shown_by_focused_navigable_regardless_of_system_focus();
 
     WebIDL::ExceptionOr<void> navigate(NavigateParams);
+    void set_derpbird_popup_source(URL::URL source, URL::URL top) { m_derpbird_popup_source = move(source); m_derpbird_popup_top = move(top); }
+    void set_derpbird_popup_target(GC::Ref<Navigable> target) { m_derpbird_popup_target = target; }
 
     bool allowed_by_sandboxing_to_navigate(Navigable const& target, SourceSnapshotParams const&) const;
 
@@ -121,6 +123,9 @@ protected:
 
 private:
     CrossProcessId m_id;
+    Optional<URL::URL> m_derpbird_popup_source;
+    Optional<URL::URL> m_derpbird_popup_top;
+    GC::Ptr<Navigable> m_derpbird_popup_target;
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#nav-parent
     GC::Ptr<Navigable> m_parent;

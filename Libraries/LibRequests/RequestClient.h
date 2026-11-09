@@ -15,6 +15,7 @@
 #include <LibHTTP/NetworkIsolationKey.h>
 #include <LibIPC/ConnectionToServer.h>
 #include <LibRequests/CacheState.h>
+#include <LibRequests/Request.h>
 #include <LibRequests/ExportedRequest.h>
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibRequests/RequestTransferLease.h>
@@ -50,7 +51,7 @@ public:
     virtual ~RequestClient() override;
 
     // Best-effort index into the resolved address pool.
-    RefPtr<Request> start_request(ByteString const& method, URL::URL const&, Optional<HTTP::HeaderList const&> request_headers = {}, ReadonlyBytes request_body = {}, HTTP::CacheMode = HTTP::CacheMode::Default, HTTP::Cookie::IncludeCredentials = HTTP::Cookie::IncludeCredentials::Yes, TransferLease = TransferLease::No, Optional<u32> address_selection_hint = {}, CacheMissNotification = CacheMissNotification::No, u64 originating_page_id = 0, Optional<HTTP::NetworkIsolationKey> = {});
+    RefPtr<Request> start_request(ByteString const& method, URL::URL const&, Optional<HTTP::HeaderList const&> request_headers = {}, ReadonlyBytes request_body = {}, HTTP::CacheMode = HTTP::CacheMode::Default, HTTP::Cookie::IncludeCredentials = HTTP::Cookie::IncludeCredentials::Yes, TransferLease = TransferLease::No, Optional<u32> address_selection_hint = {}, CacheMissNotification = CacheMissNotification::No, u64 originating_page_id = 0, Optional<HTTP::NetworkIsolationKey> = {}, bool suppress_response_cookies = false, u8 query_response_policy = 0);
     RefPtr<Request> adopt_request(int source_client_id, u64 source_request_id, TransferLease = TransferLease::No);
 
     // Moves a response between RequestServers. The request leaves this client on export; the imported one is a new
@@ -65,7 +66,7 @@ public:
     void resolve_host(ByteString const& host, Function<void(Vector<ByteString>)> on_resolved);
     int request_server_client_id() const { return m_request_server_client_id; }
 
-    RefPtr<WebSocket> websocket_connect(URL::URL const&, Optional<HTTP::NetworkIsolationKey> const&, ByteString const& origin, Vector<ByteString> const& protocols, Vector<ByteString> const& extensions, HTTP::HeaderList const& request_headers);
+    RefPtr<WebSocket> websocket_connect(URL::URL const&, Optional<HTTP::NetworkIsolationKey> const&, ByteString const& origin, Vector<ByteString> const& protocols, Vector<ByteString> const& extensions, HTTP::HeaderList const& request_headers, u8 query_canonical_policy = 0);
 
     // Stores the data in the HTTP cache, and returns it mapped read-only from the cache's file, or nothing when it wasn't stored.
 
@@ -80,11 +81,17 @@ private:
     virtual void request_body_file_available(u64 request_id, IPC::File, u64 offset, u64 size) override;
     virtual void request_cached_body_file_available(u64 request_id, IPC::File, u64 offset, u64 size) override;
     virtual void request_finished(u64 request_id, u64, RequestTimingInfo, Optional<NetworkError>) override;
-    virtual void headers_became_available(u64 request_id, Vector<HTTP::Header>, Optional<u32>, Optional<String>, CacheState, ByteString http_version) override;
+    virtual void query_request_header_policy(u64, u64, bool, Vector<HTTP::Header>, String) override;
+    virtual void query_canonical_url_policy(u64, u64, bool, Vector<URL::URL>, Vector<String>) override;
+    virtual void query_response_header_policy(u64, u64, bool, Vector<HTTP::Header>, String) override;
+    virtual void retain_response_header_policy(u64, u64) override;
+    virtual void release_response_header_policy(u64) override;
+    virtual void headers_became_available(u64 request_id, Vector<HTTP::Header>, Optional<u32>, Optional<String>, CacheState, ByteString http_version, String canonical_host_names, String ip_addresses) override;
     virtual void request_transferred(u64 request_id) override;
     virtual void host_resolved(u64 lookup_id, Vector<ByteString> addresses) override;
 
     virtual void websocket_connected(u64 websocket_id) override;
+    virtual void query_websocket_canonical_policy(u64, u64, Vector<URL::URL>, Vector<String>) override;
     virtual void websocket_received(u64 websocket_id, bool, ByteBuffer) override;
     virtual void websocket_received_shared(u64 websocket_id, bool, Core::AnonymousBuffer) override;
     virtual void websocket_errored(u64 websocket_id, i32) override;
@@ -93,6 +100,7 @@ private:
     virtual void websocket_subprotocol(u64 websocket_id, ByteString subprotocol) override;
 
     HashMap<u64, RefPtr<Request>> m_requests;
+    HashMap<u64, RefPtr<Request::ResponseHeaderPolicy>> m_background_response_policies;
     u64 m_next_request_id { 0 };
     int m_request_server_client_id { -1 };
 

@@ -2426,6 +2426,7 @@ void record_element_animation_effect_descriptions(DOM::Element& element, u8 slot
             continue;
         }
         if (auto const& resource_context = key_frame_set->style_sheet_resource_context; resource_context.has_value()) {
+            row.derpbird_authority_id = resource_context->derpbird_authority_id;
             row.has_resource_context = true;
             row.resource_context_is_origin_clean = resource_context->origin_clean;
             auto bytes = resource_context->base_url.bytes();
@@ -3102,6 +3103,7 @@ void record_style_rule_inserted(CSSRule& rule)
 
 static void record_style_rule_inserted(u64 identity, bool changes_environment, StyleSheetState& source_sheet)
 {
+    source_sheet.revoke_derpbird_insertion_authority();
     auto* sheet = owning_compiled_sheet(&source_sheet);
     if (!sheet || stop_sharing_compiled_style_sheet(*sheet))
         return;
@@ -3199,6 +3201,9 @@ void record_style_rule_declarations_changed(CSSRule& rule)
 
 void record_style_rule_declarations_changed(RustRule const& rule, StyleSheetState& source_sheet)
 {
+    // Revoke before compiling changed url() declarations or scheduling loads,
+    // including the fast CSSOM path that never calls invalidate_owners().
+    source_sheet.revoke_derpbird_insertion_authority();
     auto* sheet = owning_compiled_sheet(&source_sheet);
     if (!sheet || stop_sharing_compiled_style_sheet(*sheet))
         return;
@@ -3336,6 +3341,8 @@ static StyleComputer::NonAuthorStyleSheetsKey non_author_style_sheets_key(DOM::D
         .needs_mathml_and_svg_user_agent_style_sheets = document.needs_mathml_and_svg_user_agent_style_sheets(),
         .is_html_document = document.document_type() == DOM::Document::Type::HTML,
         .user_style_sheet = style_scope.m_user_style_sheet.ptr(),
+        .derpbird_user_styles_revision = style_scope.m_derpbird_user_styles_revision,
+        .derpbird_author_sheet_order_generation = style_scope.derpbird_author_style_sheets().is_empty() ? 0 : document.style_sheet_set_generation(),
     };
 }
 
@@ -3371,7 +3378,25 @@ void record_non_author_stylesheets(DOM::Document& document)
         });
     }
 
+    // Native extension sheets have no DOM owner, but use author precedence.
+    // Track their lifetime alongside the other host-owned sheets.
+    for (auto const& sheet : style_scope.derpbird_author_style_sheets()) {
+        sheets.append(*sheet);
+        origins.append(StyleEngineFFI::FfiCascadeOrigin::Author);
+    }
     auto& recorded = style_computer.non_author_style_sheets();
+    // A new or moved page sheet may have arrived after these sheets. Restore
+    // extension order even when none of the compiled sheets changed identity.
+    ScopeGuard restore_extension_order = [&] {
+        for (auto const& sheet : style_scope.derpbird_author_style_sheets()) {
+            for (auto const& entry : recorded) {
+                if (entry.sheet == sheet) {
+                    StyleEngineFFI::style_engine_attach_sheet(style_computer.style_engine().host(), entry.sheet_id, document_tree_scope, SheetID {});
+                    break;
+                }
+            }
+        }
+    };
     auto recorded_sheets_match = [&] {
         if (recorded.size() != sheets.size())
             return false;
@@ -3413,6 +3438,9 @@ void record_non_author_stylesheets(DOM::Document& document)
             Parser::ValueParserFFI::rust_style_sheet_publish_failing_conditions(sheets[index]->native_sheet().handle(), style_engine.host(), environment.ffi_environment());
             return StyleComputer::NonAuthorStyleSheet { sheets[index], sheet_id };
         }
+        if (origins[index] == StyleEngineFFI::FfiCascadeOrigin::Author)
+            successor = SheetID {};
+        sheets[index]->evaluate_media_queries(document);
         auto sheet_id = style_engine.add_sheet(origins[index]);
         StyleEngineFFI::style_engine_attach_sheet(style_engine.host(), sheet_id, document_tree_scope, successor);
         RuleCompilationContext context { style_engine, sheet_id, 0, document, style_computer };

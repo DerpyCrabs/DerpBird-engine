@@ -39,6 +39,8 @@ struct CacheHeader {
     u32 status_code { 0 };
     u32 reason_phrase_size { 0 };
     u32 reason_phrase_hash { 0 };
+    u32 canonical_names_size { 0 };
+    u32 canonical_names_hash { 0 };
 };
 
 struct CacheFooter {
@@ -98,7 +100,7 @@ public:
     static ErrorOr<NonnullOwnPtr<CacheEntryWriter>> create(DiskCache&, CacheIndex&, u64 cache_key, String url, UnixDateTime request_time, AK::Duration current_time_offset_for_testing);
     virtual ~CacheEntryWriter() override = default;
 
-    ErrorOr<void> write_status_and_reason(u32 status_code, Optional<String> reason_phrase, HeaderList const& request_headers, HeaderList const& response_headers);
+    ErrorOr<void> write_status_and_reason(u32 status_code, Optional<String> reason_phrase, HeaderList const& request_headers, HeaderList const& response_headers, String canonical_names = {});
     ErrorOr<void> write_data(ReadonlyBytes);
     ErrorOr<void> flush(NonnullRefPtr<HeaderList> request_headers);
     ErrorOr<CacheEntryBodyFile> flush_and_take_body_file(NonnullRefPtr<HeaderList> request_headers);
@@ -145,6 +147,7 @@ public:
 
     u32 status_code() const { return m_cache_header.status_code; }
     Optional<String> const& reason_phrase() const { return m_reason_phrase; }
+    String const& canonical_host_names() const { return m_canonical_host_names; }
     HeaderList& response_headers() { return m_response_headers; }
     HeaderList const& response_headers() const { return m_response_headers; }
 
@@ -167,6 +170,7 @@ private:
     Function<void(u64)> m_on_send_error;
     u64 m_bytes_sent { 0 };
 
+    String m_canonical_host_names;
     Optional<String> m_reason_phrase;
     NonnullRefPtr<HeaderList> m_response_headers;
 

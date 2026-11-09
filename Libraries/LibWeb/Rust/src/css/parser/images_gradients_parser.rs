@@ -46,6 +46,7 @@ fn image_resource_context() -> ImageResourceContext {
     // The stylesheet supplies its resource context when the value is computed. Inline images
     // follow their element's document, which can change after parsing in a template document.
     ImageResourceContext {
+        derpbird_authority_id: 0,
         base_url: RetainedString::from_ascii(String::new()),
         has_base_url: false,
         has_parent_style_sheet_origin_clean: false,

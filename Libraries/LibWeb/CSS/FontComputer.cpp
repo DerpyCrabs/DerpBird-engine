@@ -74,6 +74,8 @@ FontLoader::FontLoader(FontComputer& font_computer, RuleOrDeclaration rule_or_de
     , m_rule_or_declaration(rule_or_declaration)
     , m_sources(move(sources))
 {
+    if (auto* rule = m_rule_or_declaration.value.get_pointer<RuleOrDeclaration::Rule>(); rule && rule->parent_style_sheet)
+        m_rule_or_declaration.derpbird_insertion_authority = rule->parent_style_sheet->derpbird_insertion_authority();
     if (on_load)
         m_subscribers.append(*on_load);
 }
@@ -127,6 +129,11 @@ void FontLoader::did_request_for_rendering()
 
 void FontLoader::start_loading_next_source()
 {
+    if (m_rule_or_declaration.derpbird_insertion_authority && !m_rule_or_declaration.derpbird_insertion_authority->active()) {
+        m_sources.clear();
+        font_did_load_or_fail(nullptr);
+        return;
+    }
     // A loader that has settled must not consume another source: its typeface is final, and fetching a
     // further src would replace it after subscribers already saw the settled one. load_font_face()
     // hands back an existing loader for a shared source list, so a second FontFace can reach here after
@@ -227,6 +234,8 @@ void FontLoader::start_loading_next_source()
 
 void FontLoader::font_did_load_or_fail(RefPtr<Gfx::Typeface const> typeface)
 {
+    if (m_rule_or_declaration.derpbird_insertion_authority && !m_rule_or_declaration.derpbird_insertion_authority->active())
+        typeface = nullptr;
     if (typeface)
         m_typeface = typeface.release_nonnull();
     m_has_completed = true;
@@ -710,6 +719,7 @@ GC::Ptr<FontLoader> FontComputer::load_font_face(ReadonlySpan<FontLoader::Source
         },
         .style_resource_base_url = {},
         .parent_style_sheet_origin_clean = {},
+        .derpbird_insertion_authority = {},
     };
 
     // NB: Identical source text can resolve to different URLs in style sheets with different base URLs.

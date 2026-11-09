@@ -1,3 +1,4 @@
+#include <LibWeb/Page/DerpBirdCredentialFields.h>
 /*
  * Copyright (c) 2020-2023, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021-2022, Linus Groh <linusg@serenityos.org>
@@ -473,6 +474,18 @@ void PageClient::set_palette_impl(Gfx::PaletteImpl& impl)
 {
     m_palette_impl = impl;
     page().invalidate_style_for_preference_change();
+    request_frame();
+}
+
+void PageClient::set_transparent_background(bool transparent)
+{
+    if (m_transparent_background == transparent)
+        return;
+    m_transparent_background = transparent;
+    for (auto const& navigable : page().hosted_navigables()) {
+        if (auto document = navigable->active_document(); document && document->document_element())
+            document->document_element()->set_needs_repaint();
+    }
     request_frame();
 }
 
@@ -1269,6 +1282,11 @@ Optional<URL::URL> PageClient::generate_text_fragment_url(u64 generation_id)
         return {};
 
     return Web::HTML::generate_text_fragment_url(*document, **range, document->url());
+}
+
+void PageClient::page_did_prepare_script_context_menu(Web::HTML::CrossProcessId navigable, Web::HTML::CrossProcessId document)
+{
+    client().async_did_prepare_script_context_menu(m_id, navigable, document);
 }
 
 void PageClient::page_did_request_context_menu(Web::HTML::CrossProcessId local_root_id, Web::CSSPixelPoint content_position, Web::ContextMenuForInputEventsTarget for_input_events_target, Optional<Utf16String> misspelled_word, GC::Ptr<Web::DOM::Range> selected_text_range)
@@ -2461,9 +2479,9 @@ void PageClient::received_message_from_web_ui(Utf16String const& name, JS::Value
         m_web_ui->received_message_from_web_ui(name, data);
 }
 
-void PageClient::page_did_block_resource(URL::URL const& url, StringView kind)
+void PageClient::page_did_block_resource(URL::URL const& url, StringView kind, StringView rule)
 {
-    client().async_did_block_resource(id(), url, MUST(String::from_utf8(kind)));
+    client().async_did_block_resource(id(), url, MUST(String::from_utf8(kind)), MUST(String::from_utf8(rule)));
 }
 
 void PageClient::page_did_start_network_request(u64 request_id, URL::URL const& url, ByteString const& method, Vector<HTTP::Header> const& request_headers, ReadonlyBytes request_body, Optional<String> initiator_type, String const& referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::Request::Priority priority)
@@ -2777,6 +2795,62 @@ Web::Compositor::CompositorHost const* PageClient::compositor_host() const
 void PageClient::queue_screenshot_task(Optional<Web::UniqueNodeID> node_id)
 {
     page().queue_screenshot_task(node_id);
+}
+
+void PageClient::publish_derpbird_web_requests(Web::HTML::CrossProcessId document, String const& script, String const& configuration, u64 revision, JsonValue const& rules, bool removed)
+{
+    client().async_publish_derpbird_web_requests(id(), document, script, configuration, revision, rules, removed);
+}
+
+void PageClient::derpbird_web_request_event(Web::HTML::CrossProcessId document, String const& script, u64 revision, JsonValue const& event) const
+{
+    // Event callbacks may be noisy; policy execution never waits for them.
+    if (m_derpbird_web_request_events_this_turn >= 32) return;
+    if (m_derpbird_web_request_events_this_turn++ == 0) {
+        Web::Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(GC::Heap::the(), [weak = GC::Weak<PageClient const> { *this }] {
+            if (weak) weak->m_derpbird_web_request_events_this_turn = 0;
+        }));
+    }
+    client().async_derpbird_web_request_event(id(), document, script, revision, event);
+}
+
+void PageClient::derpbird_document_phase(Web::DOM::Document& document, Web::DerpBirdScriptRunAt phase)
+{
+    m_owner.derpbird_document_phase(id(), document, phase);
+}
+
+void PageClient::derpbird_document_destroyed(Web::DOM::Document& document)
+{
+    m_credential_submission_activations.remove(document.id());
+    m_owner.derpbird_document_destroyed(id(), document);
+}
+
+void PageClient::derpbird_credential_focus_changed(Web::DOM::Document& document)
+{
+    bool available = false;
+    Gfx::IntRect bounds;
+    if (!document.navigable()) return;
+    if (auto* input = as_if<Web::HTML::HTMLInputElement>(document.focused_area().ptr())) {
+        auto fields = Web::DerpBirdCredentialFields::select_from_focus(*input, true);
+        available = !fields.is_error() && fields.value().kind() == Web::DerpBirdCredentialFields::Kind::Login;
+        if (available) {
+            auto rect = document.navigable()->to_page_rect(input->get_bounding_client_rect());
+            bounds = page().css_to_device_rect(rect).to_type<int>();
+        }
+    }
+    client().async_did_focus_derpbird_credential(id(), document.id(), document.navigable()->local_root()->id(), available, bounds);
+}
+
+void PageClient::derpbird_credential_submitted(Web::DOM::Document& document, String const& username, String const& password)
+{
+    if (!document.is_fully_active() || !document.window()->has_transient_activation()) return;
+    auto activation = document.window()->last_activation_timestamp();
+    auto previous = m_credential_submission_activations.find(document.id());
+    if (previous != m_credential_submission_activations.end() && previous->value == activation) return;
+    // At most one secret-bearing IPC per document/user activation. Retire the
+    // entry with the document; script requestSubmit loops cannot flood the UI.
+    m_credential_submission_activations.set(document.id(), activation);
+    client().async_did_submit_derpbird_credential(id(), document.id(), username, password);
 }
 
 }

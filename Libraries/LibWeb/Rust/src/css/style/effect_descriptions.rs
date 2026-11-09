@@ -204,6 +204,7 @@ pub(crate) struct PublishedKeyframe {
 /// The style sheet an effect's keyframes come from, which their URLs resolve against.
 #[derive(Clone)]
 pub(crate) struct PublishedResourceContext {
+    pub(crate) derpbird_authority_id: u64,
     /// Shared with every resolution of the effect's declarations that points into it.
     pub(crate) base_url: Arc<[u8]>,
     pub(crate) origin_clean: bool,
@@ -518,6 +519,7 @@ impl PublishedEffectBuffers<'_> {
                     custom_property_interval_values: (!custom_declarations.is_empty()).then(Default::default),
                     keyframes: Arc::new(PublishedKeyframes {
                         resource_context: effect.has_resource_context.then(|| PublishedResourceContext {
+                            derpbird_authority_id: effect.derpbird_authority_id,
                             base_url: self.base_url_bytes[range(effect.base_url_offset, effect.base_url_length)].into(),
                             origin_clean: effect.resource_context_is_origin_clean,
                         }),
@@ -898,6 +900,7 @@ mod tests {
             generation,
             is_transition: false,
             has_resource_context: false,
+            derpbird_authority_id: 0,
             resource_context_is_origin_clean: false,
             first_keyframe: 0,
             keyframe_count: 0,

@@ -42,6 +42,17 @@ struct WEBVIEW_API DownloadRecord {
     bool may_replace_destination { false };
 };
 
+struct DownloadHistoryRecord {
+    i64 id { 0 };
+    String url;
+    String destination;
+    u8 status { 2 }; // FileDownloader::DownloadStatus: Completed, Canceled, Failed.
+    i64 downloaded_size { 0 };
+    i64 total_size { -1 }; // Unknown size.
+    String error;
+    UnixDateTime created_time;
+};
+
 class WEBVIEW_API DownloadStore {
     AK_MAKE_NONCOPYABLE(DownloadStore);
     AK_MAKE_NONMOVABLE(DownloadStore);
@@ -62,6 +73,8 @@ public:
     Vector<DownloadRecord> resumable_downloads();
 
     i64 maximum_download_id();
+    void save_history(DownloadHistoryRecord const&);
+    Vector<DownloadHistoryRecord> download_history();
 
 private:
     struct Statements {
@@ -69,6 +82,10 @@ private:
         Database::StatementID delete_download { 0 };
         Database::StatementID list_downloads { 0 };
         Database::StatementID maximum_download_id { 0 };
+        Database::StatementID save_history { 0 };
+        Database::StatementID list_history { 0 };
+        Database::StatementID delete_history { 0 };
+        Database::StatementID trim_history { 0 };
     };
 
     DownloadStore() = default;

@@ -26,6 +26,11 @@ struct Element::RareData
     virtual ~RareData() override;
     virtual void visit_edges(Cell::Visitor&) override;
 
+    // Only privileged userscript insertions need this state.
+    bool derpbird_insertion_pending { false };
+    bool derpbird_userscript_insertion_active { false };
+    RefPtr<DerpBirdInsertionAuthority> derpbird_insertion_authority;
+
     mutable Optional<Utf16FlyString> html_uppercased_qualified_name;
     GC::Ptr<CSS::StylePropertyMap> attribute_style_map;
     GC::Ptr<DOMTokenList> class_list;

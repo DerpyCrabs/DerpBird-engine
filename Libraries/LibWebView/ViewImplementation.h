@@ -73,6 +73,7 @@
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/CanonicalTraversable.h>
 #include <LibWebView/ContentBlocking.h>
+#include <AK/CircularQueue.h>
 #include <LibWebView/ExternalURLHandler.h>
 #include <LibWebView/Forward.h>
 #include <LibWebView/HistoryVisitTransition.h>
@@ -139,6 +140,9 @@ class WEBVIEW_API ViewImplementation
     friend class CanonicalTraversable;
 
 public:
+    void set_derpbird_context_document(Web::HTML::CrossProcessId id) { ++m_context_menu_request_id; m_derpbird_context_document = id; }
+    Optional<Web::HTML::CrossProcessId> derpbird_context_document() const { return m_derpbird_context_document; }
+
     virtual ~ViewImplementation();
 
     static void for_each_view(Function<IterationDecision(ViewImplementation&)>);
@@ -339,6 +343,8 @@ public:
     bool can_set_force_dark() const;
     void set_force_dark_enabled(bool);
 
+    void set_transparent_background(bool);
+    bool has_transparent_background() const { return m_transparent_background; }
     void set_preferred_color_scheme(Web::CSS::PreferredColorScheme);
     // Sends the interface theme to the pages showing the browser's own pages, which follow it.
     void update_interface_color_scheme();
@@ -464,8 +470,13 @@ public:
     void list_style_sheets();
     void request_style_sheet_source(Web::CSS::StyleSheetIdentifier const&);
 
-    void did_block_resource(Badge<WebContentPage>, URL::URL const&, StringView kind);
+    void did_block_resource(Badge<WebContentPage>, URL::URL const&, StringView kind, String const& rule);
     void reset_blocked_resources();
+    bool request_logging_enabled() const { return m_request_logging; }
+    void set_request_logging(bool enabled) { m_request_logging = enabled; }
+    void did_start_logged_request(Badge<WebContentPage>, URL::URL const&, StringView kind);
+    auto const& blocking_log() const { return m_blocking_log; }
+    void clear_blocking_log() { m_blocking_log.clear(); }
     void notify_content_blocking_changed();
     ContentBlockingSnapshot content_blocking_snapshot() const;
 
@@ -507,7 +518,8 @@ public:
     void set_input_method_state(Badge<WebContentPage>, InputMethodState);
 
     Web::HTML::MuteState page_mute_state() const { return m_mute_state; }
-    void toggle_page_mute_state();
+    void toggle_page_mute_state(bool from_userscript = false);
+    bool derpbird_muted_by_script() const { return m_derpbird_muted_by_script; }
 
     // The tab plays audio while the AudioServer has recently heard any page of it.
     void update_audibility(Badge<WebContentPage>) { update_audibility(); }
@@ -585,8 +597,16 @@ public:
     u64 add_navigation_listener(NavigationListener);
     void remove_navigation_listener(u64 listener_id);
 
+    // Set only by the trusted DerpBird chrome host, never by content views.
+    using DerpBirdCompletion = Function<void(ErrorOr<JsonValue>)>;
+    Function<void(JsonValue const&, DerpBirdCompletion)> on_derpbird_request;
+    // Native browser recipient only. Never send the password to WebUI.
+    Function<void(CanonicalDocument&, bool, Gfx::IntRect)> on_derpbird_credential_focus;
+    Function<void(CanonicalDocument&, String, String)> on_derpbird_credential_submission;
+
     Function<void()> on_ready_to_paint;
     Function<void(TabPerformanceStats const&)> on_performance_stats;
+    Function<ViewImplementation*(Web::HTML::ActivateTab)> on_new_tab;
     Function<String(Web::HTML::ActivateTab, Web::HTML::WebViewHints, CanonicalTraversable&)> on_new_web_view;
     Function<void()> on_activate_tab;
     Function<void()> on_close;
@@ -617,6 +637,7 @@ public:
     Function<void()> on_request_website_issue_report;
     Function<void()> on_request_screenshot;
     Function<void()> on_request_dismiss_dialog;
+    Function<void(String, String)> on_derpbird_filter_selector;
     Function<void(JsonObject)> on_received_dom_tree;
     Function<void(DOMNodeProperties)> on_received_dom_node_properties;
     HashMap<u64, Function<void(ErrorOr<Vector<DevTools::DevToolsDelegate::StorageItem>>)>> on_received_storage_items;
@@ -925,6 +946,7 @@ protected:
     bool m_scales_frames_to_fit { false };
 
     // NB: The UI holds a shown menu's actions weakly, so the view keeps the last menu until it shows another.
+    Optional<Web::HTML::CrossProcessId> m_derpbird_context_document;
     RefPtr<Menu> m_context_menu;
     u64 m_context_menu_request_id { 0 };
 
@@ -1027,6 +1049,7 @@ protected:
     double m_backup_bitmap_device_pixel_ratio { 1.0 };
     Gfx::Color m_page_background_color { 255, 255, 255 };
     Gfx::Color m_system_canvas_background_color { 255, 255, 255 };
+    bool m_transparent_background { false };
     Web::CSS::PreferredColorScheme m_preferred_color_scheme { Web::CSS::PreferredColorScheme::Auto };
     // The geometry of the window the view sits in, as the UI last reported it. Every page the tab comes to be
     // hosted by is told it, so a page created after the window was last resized or moved answers outerWidth,
@@ -1121,6 +1144,7 @@ protected:
     u64 m_playing_audio_indicator_change_count { 0 };
     Web::ScreenWakeLockState m_screen_wake_lock_state { Web::ScreenWakeLockState::Released };
 
+    bool m_derpbird_muted_by_script { false };
     Web::HTML::MuteState m_mute_state { Web::HTML::MuteState::Unmuted };
 
     CanonicalTraversable* m_top_level_traversable { nullptr };
@@ -1226,6 +1250,10 @@ protected:
     u64 m_next_navigation_listener_id { 1 };
 
     Vector<BlockedResource> m_blocked_resources;
+    void append_request_log(URL::URL const&, StringView kind, String const& rule);
+    bool m_request_logging { false };
+    CircularQueue<BlockingLogEntry, 128> m_blocking_log;
+    u64 m_blocking_log_sequence { 0 };
 
     enum class NodePickerRequestType : u8 {
         Hovered,

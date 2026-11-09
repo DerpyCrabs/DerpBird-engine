@@ -80,6 +80,9 @@ public:
     [[nodiscard]] virtual Vector<URL::URL>& url_list() { return m_url_list; }
     virtual void set_url_list(Vector<URL::URL> url_list) { m_url_list = move(url_list); }
 
+    [[nodiscard]] virtual bool derpbird_click_to_load() const { return m_derpbird_click_to_load; }
+    void set_derpbird_click_to_load(bool value) { m_derpbird_click_to_load = value; }
+
     [[nodiscard]] virtual Status status() const { return m_status; }
     virtual void set_status(Status status) { m_status = status; }
 
@@ -161,6 +164,7 @@ private:
 
     // https://fetch.spec.whatwg.org/#concept-response-status
     // A response has an associated status, which is a status. Unless stated otherwise it is 200.
+    bool m_derpbird_click_to_load { false };
     Status m_status { 200 };
 
     // https://fetch.spec.whatwg.org/#concept-response-status-message
@@ -237,6 +241,7 @@ public:
     [[nodiscard]] virtual Vector<URL::URL>& url_list() override { return m_internal_response->url_list(); }
     virtual void set_url_list(Vector<URL::URL> url_list) override { m_internal_response->set_url_list(move(url_list)); }
 
+    [[nodiscard]] virtual bool derpbird_click_to_load() const override { return m_internal_response->derpbird_click_to_load(); }
     [[nodiscard]] virtual Status status() const override { return m_internal_response->status(); }
     virtual void set_status(Status status) override { m_internal_response->set_status(status); }
 

@@ -21,7 +21,7 @@ class PerformanceObserverEntryList final : public Bindings::GCAllocatedWrappable
     GC_DECLARE_ALLOCATOR(PerformanceObserverEntryList);
 
 public:
-    static GC::Ref<PerformanceObserverEntryList> create(Vector<GC::Ref<PerformanceTimeline::PerformanceEntry>>&&);
+    WEB_API static GC::Ref<PerformanceObserverEntryList> create(Vector<GC::Ref<PerformanceTimeline::PerformanceEntry>>&&);
 
     virtual ~PerformanceObserverEntryList() override;
 

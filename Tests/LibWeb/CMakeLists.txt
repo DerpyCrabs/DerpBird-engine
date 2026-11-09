@@ -13,10 +13,13 @@ ladybird_test_suite(LibWeb)
 set(TEST_SOURCES
     BenchmarkDisplayListRecording.cpp
     TestBlobBytes.cpp
+    TestDerpBirdScriptValues.cpp
     TestContentBlocker.cpp
+    TestDerpBirdContentBlocking.cpp
     TestCSSDecodeBytes.cpp
     TestCSSIDSpeed.cpp
     TestCSSPropertyList.cpp
+    TestDerpBirdScriptWorld.cpp
     TestEventLoop.cpp
     TestFaviconDecoding.cpp
     TestFetchAlgorithms.cpp
@@ -36,6 +39,7 @@ set(TEST_SOURCES
     TestInlineStyle.cpp
     TestLoaderConfig.cpp
     TestMimeSniff.cpp
+    TestDerpBirdScriptMatching.cpp
     TestNumbers.cpp
     TestSecureContexts.cpp
     TestSessionHistoryEntry.cpp
@@ -49,6 +53,7 @@ set(TEST_SOURCES
     TestStructuredSerializeSharedArrayBuffer.cpp
     TestStyleEngineBridge.cpp
     TestWebIDLBuffers.cpp
+    TestDerpBirdScriptTimers.cpp
     TestWindowProxyWorld.cpp
     TestWorldCallback.cpp
     TestWrapperWorld.cpp
@@ -69,7 +74,7 @@ target_sources(TestLibWeb PRIVATE
     ${LADYBIRD_SOURCE_DIR}/Libraries/LibWeb/DOM/IDLEventListener.cpp
     ${LADYBIRD_SOURCE_DIR}/Libraries/LibWeb/WebIDL/CallbackType.cpp
 )
-target_link_libraries(TestLibWeb PRIVATE LibCompositing LibCrypto LibGC LibGfx LibHTTP LibIPC LibJS LibRequests LibThreading LibURL LibWeb LibWebCommon LibWebView)
+target_link_libraries(TestLibWeb PRIVATE LibCompositing LibCrypto LibGC LibGfx LibHTTP LibIPC LibJS LibRegex LibRequests LibThreading LibURL LibWeb LibWebCommon LibWebView)
 
 # The check reads the symbols of the build's objects with nm, which can't see into an LTO build's bitcode objects and
 # isn't the toolchain's symbol reader on Windows.
@@ -87,3 +92,6 @@ endif()
 
 add_subdirectory("AccessibilityBridge")
 add_subdirectory("AccessibilityBridgeMac")
+
+# DerpBird values exercise the real SQLite storage boundary.
+target_link_libraries(TestLibWeb PRIVATE LibDatabase)

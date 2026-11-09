@@ -650,6 +650,20 @@ void WebContentPage::close()
     PictureInPictureManager::the().close_window(*this);
     NotificationManager::the().page_did_close(*this);
     m_is_open = false;
+    if (m_traversable) {
+        bool changed = false;
+        m_traversable->for_each_in_inclusive_subtree([&](CanonicalNavigable& navigable) {
+            if (!navigable.active_session_history_entry() || !navigable.active_session_history_entry()->document_state->document) return IterationDecision::Continue;
+            auto& document = navigable.active_document();
+            if (document.host().ptr() == this && !document.derpbird_web_requests.is_empty()) {
+                document.derpbird_web_requests.clear();
+                document.on_derpbird_web_requests_revoke = nullptr;
+                changed = true;
+            }
+            return IterationDecision::Continue;
+        });
+        if (changed) Application::the().broadcast_derpbird_web_requests(*m_traversable);
+    }
     // NB: Nothing finishes the input this page held, including a page discarded while its process hosts other pages.
     if (m_traversable) {
         if (auto view = m_traversable->view(); view.has_value())
@@ -1285,14 +1299,18 @@ void WebContentPage::did_output_js_console_message(ConsoleOutput console_output)
     }
 }
 
-void WebContentPage::did_block_resource(URL::URL url, String kind)
+void WebContentPage::did_block_resource(URL::URL url, String kind, String rule)
 {
-    view().did_block_resource({}, url, kind);
+    view().did_block_resource({}, url, kind, rule);
 }
 
 void WebContentPage::did_start_network_request(u64 request_id, URL::URL url, ByteString method, Vector<HTTP::Header> request_headers, ByteBuffer request_body, Optional<String> initiator_type, String referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::RequestPriority priority)
 {
     if (displays_tab()) {
+        if (view().request_logging_enabled()) {
+            auto kind = MUST(String::formatted("Request · {}", is_navigation_request ? "Document"sv : initiator_type.has_value() ? initiator_type->bytes_as_string_view() : "Other"sv));
+            view().did_start_logged_request({}, url, kind.bytes_as_string_view());
+        }
         if (view().on_network_request_started)
             view().on_network_request_started(request_id, url, method, request_headers, move(request_body), move(initiator_type), move(referrer_policy), is_navigation_request, priority);
     }
@@ -1730,6 +1748,42 @@ bool WebContentPage::hosts_a_document_with_top_level_origin(URL::Origin const& o
         return hosts ? IterationDecision::Break : IterationDecision::Continue;
     });
     return hosts;
+}
+
+void WebContentPage::did_focus_derpbird_credential(Web::HTML::CrossProcessId document_id, Web::HTML::CrossProcessId local_root_id, bool available, Gfx::IntRect bounds)
+{
+    auto document = hosted_document_with_id(document_id);
+    if (!document || document->browsing_context().has_been_discarded()
+        || document->browsing_context().active_document().ptr() != document.ptr()
+        || document->origin().is_opaque() || !document->creation_url().scheme().is_one_of("http"sv, "https"sv)) return;
+    auto position = view_position(local_root_id, bounds.location());
+    if (!position.has_value()) return;
+    bounds.set_location(position->position);
+    if (view().on_derpbird_credential_focus)
+        view().on_derpbird_credential_focus(*document, available, bounds);
+}
+
+void WebContentPage::did_submit_derpbird_credential(Web::HTML::CrossProcessId document_id, String username, String password)
+{
+    auto document = hosted_document_with_id(document_id);
+    if (!document || document->browsing_context().has_been_discarded()
+        || document->browsing_context().active_document().ptr() != document.ptr()
+        || !has_transient_user_activation() || document->origin().is_opaque()
+        || !document->creation_url().scheme().is_one_of("http"sv, "https"sv)
+        || username.bytes().size() > 1024 || password.is_empty() || password.bytes().size() > 65536) return;
+    // The callback derives origin from this canonical document, never renderer
+    // metadata. It must separately enforce profile/tab policy and confirmation.
+    if (view().on_derpbird_credential_submission)
+        view().on_derpbird_credential_submission(*document, move(username), move(password));
+}
+
+void WebContentPage::did_receive_derpbird_credential_result(Web::HTML::CrossProcessId document_id, u64 request_id, JsonValue result, Optional<String> error)
+{
+    auto document = hosted_document_with_id(document_id);
+    if (!request_id || !document || document->browsing_context().has_been_discarded()
+        || document->browsing_context().active_document().ptr() != document.ptr()) return;
+    if (on_derpbird_credential_result)
+        on_derpbird_credential_result(document_id, request_id, move(result), move(error));
 }
 
 RefPtr<CanonicalDocument> WebContentPage::hosted_document_with_id(Web::HTML::CrossProcessId document_id) const
@@ -2356,6 +2410,12 @@ void WebContentPage::did_request_close_of_traversable(Web::HTML::CrossProcessId 
     endpoint->async_close_traversable_from_script(navigable_id);
 }
 
+void WebContentPage::did_derpbird_filter_selector(String url, String selector)
+{
+    if (displays_tab() && view().on_derpbird_filter_selector)
+        view().on_derpbird_filter_selector(move(url), move(selector));
+}
+
 void WebContentPage::did_inspect_dom_tree(String dom_tree)
 {
     if (displays_tab()) {
@@ -2961,6 +3021,13 @@ void WebContentPage::did_change_title(Utf16String title)
 
         view().set_title({}, title);
     }
+}
+
+void WebContentPage::did_prepare_script_context_menu(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId document_id)
+{
+    auto navigable = hosted_navigable(navigable_id);
+    if (!navigable.has_value() || navigable->active_document().id() != document_id) return;
+    view().set_derpbird_context_document(document_id);
 }
 
 void WebContentPage::did_request_context_menu(Web::HTML::CrossProcessId local_root_id, Gfx::IntPoint content_position, Web::ContextMenuForInputEventsTarget for_input_events_target, Optional<Utf16String> misspelled_word, Optional<u64> text_fragment_generation_id)

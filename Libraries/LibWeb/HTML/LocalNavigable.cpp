@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/Loader/ContentBlocker.h>
 #include <AK/AllOf.h>
 #include <AK/AnyOf.h>
 #include <AK/InsertionSort.h>
@@ -1829,7 +1830,7 @@ Optional<LocalNavigable::NavigationParkedForPopulation> LocalNavigable::take_nav
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#the-rules-for-choosing-a-navigable
-LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View name, TokenizedFeature::NoOpener no_opener, ActivateTab activate_tab, Optional<TokenizedFeature::Map const&> window_features)
+LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View name, TokenizedFeature::NoOpener no_opener, ActivateTab activate_tab, Optional<TokenizedFeature::Map const&> window_features, Optional<URL::URL> popup_url, StringView popup_method)
 {
     // 1. Let chosen be null.
     GC::Ptr<Navigable> chosen;
@@ -1870,6 +1871,15 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View nam
     //    agent's configuration and abilities — it is determined by the rules given for the first applicable option
     //    from the following list:
     if (!chosen) {
+        // Filter before creating a traversable. Existing named targets and
+        // _self/_parent/_top navigations are not new-window requests.
+        if (popup_url.has_value() && active_document()->content_blocking_enabled()) {
+            auto decision = ContentBlocker::the().check(*popup_url, active_document()->url(), ContentBlocker::ResourceType::Popup, popup_method, active_document_top_level_creation_url());
+            if (decision.blocked) {
+                page().client().page_did_block_resource(*popup_url, "Popup"sv, decision.matched_rule);
+                return { nullptr, window_type };
+            }
+        }
         // NB: The UI process runs the "create a new top-level traversable" branch below for the traversable it creates,
         //     and returns windowType. The renderer runs it too, for its page of the traversable.
         auto request_new_web_view = [&] {
@@ -1950,6 +1960,8 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View nam
 
             // 10. Set chosen's is created by web content to true.
             as<LocalTraversableNavigable>(*chosen).set_is_created_by_web_content(true);
+            chosen->set_derpbird_popup_source(active_document()->url(), active_document_top_level_creation_url().value_or(active_document()->url()));
+            top_level_traversable()->set_derpbird_popup_target(*chosen);
         }
 
         // --> If the user agent has been configured such that in this instance it will choose currentNavigable
@@ -2584,6 +2596,14 @@ static void create_navigation_params_by_fetching(
     //    traversable for user prompts: navigable's top-level traversable
     auto request = Fetch::Infrastructure::Request::create();
     request->set_url(entry.url);
+    request->derpbird_subframe_navigation = !navigable->is_top_level_traversable();
+    request->derpbird_popup_source = source_snapshot_params->derpbird_popup_source;
+    request->derpbird_popup_top = source_snapshot_params->derpbird_popup_top;
+    request->derpbird_popunder = source_snapshot_params->derpbird_popunder;
+    auto approved_url = move(navigable->derpbird_click_to_load_url);
+    navigable->derpbird_click_to_load_url.clear();
+    if (approved_url == entry.url && active_document.derpbird_click_to_load)
+        request->derpbird_approved_navigation_url = move(approved_url);
     if (source_snapshot_params->fetch_client.has_value()) {
         auto const& fetch_client = *source_snapshot_params->fetch_client;
         request->set_client(Fetch::Fetching::request_client(fetch_client));

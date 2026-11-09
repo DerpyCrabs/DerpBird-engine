@@ -23,6 +23,10 @@
 #include <LibIPC/SingleServer.h>
 #include <LibMain/Main.h>
 
+#ifdef USE_FONTCONFIG
+#    include <LibGfx/Font/GlobalFontConfig.h>
+#endif
+
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
 {
     AK::set_rich_debug_enabled(true);
@@ -99,6 +103,13 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     Core::ResourceImplementation::install(make<Core::ResourceImplementationFile>(TRY(String::from_utf8(resource_root))));
     if (force_fontconfig)
         Compositor::set_font_rasterizer(Compositor::FontRasterizer::FreeType);
+
+#ifdef USE_FONTCONFIG
+    // Load system and user font-rendering rules while their configuration files
+    // are still accessible. Rasterization uses this in-memory configuration after
+    // Landlock restricts the compositor's filesystem access.
+    (void)Gfx::GlobalFontConfig::the();
+#endif
 
 #if defined(AK_OS_LINUX)
     // NB: The GPU driver starts threads, and Landlock does not confine a thread that already runs. Seccomp covers every

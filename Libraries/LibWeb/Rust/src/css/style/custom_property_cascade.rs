@@ -136,7 +136,7 @@ impl DocumentFunctionSnapshot {
         &mut self,
         inputs: &mut bridge::FfiDocumentStyleComputationInputs,
         media: &DocumentMediaSnapshot,
-        layer_index: impl Fn(TreeScopeID, CascadeLayerID) -> u32,
+        layer_index: impl Fn(TreeScopeID, CascadeLayerID, u8) -> u32,
     ) {
         self.definitions.clear();
         self.visibilities.clear();
@@ -170,7 +170,15 @@ impl DocumentFunctionSnapshot {
             };
             let precedence = (
                 entry.origin,
-                layer_index(TreeScopeID(entry.tree_scope), CascadeLayerID(entry.layer)),
+                layer_index(
+                    TreeScopeID(entry.tree_scope),
+                    CascadeLayerID(entry.layer),
+                    match entry.origin {
+                        0 => CascadeOrigin::UserAgent as u8,
+                        1 => CascadeOrigin::User as u8,
+                        _ => CascadeOrigin::Author as u8,
+                    },
+                ),
             );
             let key = (entry.scope, function.signature.name.units());
             if winners.get(&key).is_none_or(|&(winner, _)| winner <= precedence) {
@@ -1370,7 +1378,7 @@ mod tests {
             ..Default::default()
         };
         let mut snapshot = DocumentFunctionSnapshot::default();
-        unsafe { snapshot.take_in(&mut inputs, &DocumentMediaSnapshot::default(), |_, layer| layer.0) };
+        unsafe { snapshot.take_in(&mut inputs, &DocumentMediaSnapshot::default(), |_, layer, _| layer.0) };
         assert_eq!(inputs, bridge::FfiDocumentStyleComputationInputs::default());
         let reached = |tree_scope| {
             snapshot

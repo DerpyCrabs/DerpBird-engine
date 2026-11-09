@@ -32,8 +32,9 @@ static void register_source(ClassicScript& script, ScriptRegistry::IsInlineSourc
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#creating-a-classic-script
-GC::Ref<ClassicScript> ClassicScript::create(ByteString filename, Utf16View source, EnvironmentSettingsObject& settings, URL::URL base_url, size_t source_line_number, MutedErrors muted_errors, ScriptRegistry::IsInlineSource is_inline_source)
+GC::Ref<ClassicScript> ClassicScript::create(ByteString filename, Utf16View source, EnvironmentSettingsObject& settings, URL::URL base_url, size_t source_line_number, MutedErrors muted_errors, ScriptRegistry::IsInlineSource is_inline_source, GC::Ptr<JS::Realm> execution_realm)
 {
+    auto& realm = execution_realm ? *execution_realm : settings.realm();
     // 1. If muted errors is true, then set baseURL to about:blank.
     if (muted_errors == MutedErrors::Yes)
         base_url = URL::about_blank();
@@ -61,7 +62,7 @@ GC::Ref<ClassicScript> ClassicScript::create(ByteString filename, Utf16View sour
 
     // 10. Let result be ParseScript(source, settings's realm, script).
     auto parse_timer = Core::ElapsedTimer::start_new();
-    auto result = JS::Script::parse(source, settings.realm(), script->filename(), script->display_filename(), script.ptr(), source_line_number);
+    auto result = JS::Script::parse(source, realm, script->filename(), script->display_filename(), script.ptr(), source_line_number);
     dbgln_if(HTML_SCRIPT_DEBUG, "ClassicScript: Parsed {} in {}ms", script->filename(), parse_timer.elapsed_milliseconds());
 
     // 11. If result is a list of errors, then:
@@ -70,7 +71,7 @@ GC::Ref<ClassicScript> ClassicScript::create(ByteString filename, Utf16View sour
         dbgln_if(HTML_SCRIPT_DEBUG, "ClassicScript: Failed to parse: {}", parse_error.to_utf16_string());
 
         // 1. Set script's parse error and its error to rethrow to result[0].
-        script->set_parse_error(JS::SyntaxError::create(settings.realm(), parse_error.to_utf16_string()), parse_error.position);
+        script->set_parse_error(JS::SyntaxError::create(realm, parse_error.to_utf16_string()), parse_error.position);
         script->set_error_to_rethrow(script->parse_error());
 
         // 2. Return script.

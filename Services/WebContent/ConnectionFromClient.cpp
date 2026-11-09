@@ -141,6 +141,49 @@ void ConnectionFromClient::did_destroy_compositor_context(Web::CompositorContext
     async_did_destroy_compositor_context(context_id);
 }
 
+void ConnectionFromClient::did_receive_derpbird_value_event(Web::PageId page_id, Web::HTML::CrossProcessId document_id, u64 event_id, ByteBuffer payload)
+{
+    bool accepted = event_id && m_page_host->receive_derpbird_value_event(page_id, document_id, payload.bytes());
+    async_did_acknowledge_derpbird_value_event(page_id, document_id, event_id, accepted);
+}
+
+void ConnectionFromClient::request_derpbird_credential_fields(Web::PageId page_id, Web::HTML::CrossProcessId document_id, u64 request_id)
+{
+    if (!request_id) return;
+    auto result = m_page_host->select_derpbird_credential(page_id, document_id);
+    if (result.is_error())
+        async_did_receive_derpbird_credential_result(page_id, document_id, request_id, {}, "Credential fields unavailable"_string);
+    else
+        async_did_receive_derpbird_credential_result(page_id, document_id, request_id, result.release_value(), {});
+}
+
+void ConnectionFromClient::fill_derpbird_credential_fields(Web::PageId page_id, Web::HTML::CrossProcessId document_id, u64 request_id, u64 ticket, String origin, String username, String password)
+{
+    if (!request_id) return;
+    auto result = m_page_host->fill_derpbird_credential(page_id, document_id, ticket, origin, username, password);
+    async_did_receive_derpbird_credential_result(page_id, document_id, request_id, {}, result.is_error() ? Optional<String> { "Credential fill rejected"_string } : Optional<String> {});
+}
+
+void ConnectionFromClient::capture_derpbird_credential_fields(Web::PageId page_id, Web::HTML::CrossProcessId document_id, u64 request_id, u64 ticket, String origin)
+{
+    if (!request_id) return;
+    auto result = m_page_host->capture_derpbird_credential(page_id, document_id, ticket, origin);
+    if (result.is_error())
+        async_did_receive_derpbird_credential_result(page_id, document_id, request_id, {}, "Credential capture rejected"_string);
+    else
+        async_did_receive_derpbird_credential_result(page_id, document_id, request_id, result.release_value(), {});
+}
+
+void ConnectionFromClient::cancel_derpbird_credential_fields(Web::PageId page_id, Web::HTML::CrossProcessId document_id, u64 ticket)
+{
+    m_page_host->cancel_derpbird_credential(page_id, document_id, ticket);
+}
+
+void ConnectionFromClient::did_receive_derpbird_values(Web::PageId page_id, Web::HTML::CrossProcessId document_id, u64 request_id, ByteBuffer payload, Optional<String> error)
+{
+    m_page_host->value_requests().complete(page_id, document_id, request_id, move(payload), move(error));
+}
+
 void ConnectionFromClient::die()
 {
     Core::Process::terminate_immediately(0);
@@ -1359,6 +1402,34 @@ void ConnectionFromClient::get_source(Web::PageId page_id)
             async_did_get_highlighted_source(page_id, move(html));
         }
     }
+}
+
+void ConnectionFromClient::derpbird_filter_selector(Web::PageId page_id, Web::UniqueNodeID node_id)
+{
+    auto page = this->page(page_id);
+    auto* node = Web::DOM::Node::from_unique_id(node_id);
+    if (!page.has_value() || !node || !node->is_element()) return;
+    auto document = page->page().local_traversable()->active_document();
+    if (!document || &node->document() != document.ptr()) return;
+    // A full structural selector avoids guessing stable class names or trusting page JS.
+    Vector<String> components;
+    auto element = GC::Ptr { &as<Web::DOM::Element>(*node) };
+    for (size_t depth = 0; element && depth < 64; ++depth) {
+        size_t index = 1;
+        for (auto* previous = element->previous_sibling(); previous; previous = previous->previous_sibling())
+            if (previous->is_element()) ++index;
+        components.append(MUST(String::formatted(":nth-child({})", index)));
+        auto parent = element->parent_element();
+        if (!parent && element->parent() != document.ptr()) return; // Shadow-root selectors require a separate filter form.
+        element = parent;
+    }
+    if (element || components.is_empty()) return;
+    StringBuilder selector;
+    for (size_t i = components.size(); i > 0; --i) {
+        if (i != components.size()) selector.append(" > "sv);
+        selector.append(components[i - 1]);
+    }
+    async_did_derpbird_filter_selector(page_id, document->url().serialize(), MUST(selector.to_string()));
 }
 
 void ConnectionFromClient::inspect_dom_tree(Web::PageId page_id)
@@ -2759,6 +2830,16 @@ void ConnectionFromClient::request_internal_page_info(Web::PageId page_id, WebVi
 
     StringBuilder builder;
 
+    if (type == WebView::PageInfoType::DerpBirdStyleStatus) {
+        if (!page->page().has_local_traversable()) {
+            async_did_get_internal_page_info(page_id, type, {});
+            return;
+        }
+        if (auto doc = page->page().local_traversable()->active_document())
+            builder.append(doc->derpbird_user_style_status());
+    }
+
+
     if (has_flag(type, WebView::PageInfoType::Text)) {
         append_page_text(page->page(), builder);
     }
@@ -3280,6 +3361,14 @@ void ConnectionFromClient::update_input_method_state(Web::PageId page_id)
     async_did_update_input_method_state(page_id, caret_rect, is_enabled, cursor_position, anchor_position, move(text_before_cursor), move(text_after_cursor));
 }
 
+void ConnectionFromClient::set_derpbird_user_styles(Web::PageId page_id, JsonValue sections)
+{
+    if (auto page = m_page_host->page(page_id); page.has_value()) {
+        if (auto result = page->page().set_derpbird_user_styles(sections); result.is_error())
+            warnln("Rejected user style registry: {}", result.error());
+    }
+}
+
 void ConnectionFromClient::set_content_blocking_policy(Web::PageId page_id, bool enabled, Vector<String> disabled_sites)
 {
     if (auto page = this->page(page_id); page.has_value())
@@ -3309,6 +3398,12 @@ void ConnectionFromClient::set_force_dark_settings(Web::PageId page_id, bool ena
 void ConnectionFromClient::set_autoplay_settings(Web::PageId, Web::HTML::AutoplayPolicy policy, Vector<Utf16String> allowlist)
 {
     Web::HTML::AutoplaySettings::the().set_policy(policy, allowlist);
+}
+
+void ConnectionFromClient::set_transparent_background(Web::PageId page_id, bool transparent)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->set_transparent_background(transparent);
 }
 
 void ConnectionFromClient::set_preferred_color_scheme(Web::PageId page_id, Web::CSS::PreferredColorScheme color_scheme)
@@ -3949,6 +4044,36 @@ void ConnectionFromClient::set_picture_in_picture_window_controls_in_use(Web::Pa
 {
     if (auto page = this->page(page_id); page.has_value())
         page->page().set_picture_in_picture_window_controls_in_use(in_use);
+}
+
+void ConnectionFromClient::invoke_derpbird_context_script(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String script_id, String configuration)
+{
+    m_page_host->invoke_derpbird_context_script(page_id, document_id, script_id, configuration);
+}
+
+void ConnectionFromClient::acknowledge_derpbird_web_requests(Web::PageId page_id, Web::HTML::CrossProcessId document, String script, u64 revision, bool accepted)
+{
+    if (page(page_id).has_value()) Web::DerpBirdWebRequestRegistration::acknowledge(document, script, revision, accepted);
+}
+
+void ConnectionFromClient::set_derpbird_web_requests(Web::PageId page_id, JsonValue snapshot)
+{
+    if (auto target = page(page_id); target.has_value()) {
+        auto result = Web::DerpBirdWebRequestRegistration::receive_snapshot(target->page(), snapshot);
+        if (result.is_error()) warnln("Unable to install webRequest snapshot: {}", result.error());
+    }
+}
+
+void ConnectionFromClient::receive_derpbird_web_request_event(Web::PageId page_id, Web::HTML::CrossProcessId document, String script, u64 revision, JsonValue event)
+{
+    if (page(page_id).has_value())
+        Web::DerpBirdWebRequestRegistration::receive_event(document, script, revision, move(event));
+}
+
+void ConnectionFromClient::set_derpbird_user_scripts(JsonValue snapshot)
+{
+    if (auto result = m_page_host->set_derpbird_user_scripts(snapshot); result.is_error())
+        warnln("Rejected userscript registry: {}", result.error());
 }
 
 }

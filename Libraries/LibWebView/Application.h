@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include <AK/ByteBuffer.h>
 #include <AK/ByteString.h>
 #include <AK/Function.h>
@@ -75,6 +77,7 @@ struct PinchEvent;
 }
 
 namespace WebView {
+class DerpBirdFilterIncludes;
 
 struct ApplicationSettingsObserver;
 struct ApplicationPermissionManagerObserver;
@@ -183,6 +186,10 @@ public:
     void bookmarks_changed(Badge<ApplicationBookmarkStoreObserver>);
 
     void background_networking_settings_changed(Badge<ApplicationSettingsObserver>);
+    ErrorOr<void> set_derpbird_user_scripts(JsonValue snapshot);
+    bool publish_derpbird_web_requests(WebContentPage&, CanonicalDocument&, String const&, String const&, u64, JsonValue, bool);
+    JsonValue derpbird_web_request_snapshot(CanonicalTraversable&);
+    void broadcast_derpbird_web_requests(CanonicalTraversable&);
 
     // True unless the user has turned location off, or there's no way to find it.
     bool sites_can_ask_for_location() const;
@@ -197,14 +204,17 @@ public:
     bool content_blocking_enabled() const;
     bool has_content_blocking_rules() const;
     void apply_content_blocking_policy(WebContentPage&);
+    ErrorOr<void> set_derpbird_user_style_sections(JsonValue sections);
     void content_blocker_settings_changed(Badge<ApplicationSettingsObserver>);
 
+    bool content_blocker_reload_in_progress() const { return m_content_blocker_reload_running; }
     bool content_blocker_list_update_in_progress() const;
     void update_content_blocker_lists(Badge<SettingsUI>);
     void download_content_blocker_list_if_needed(Badge<Application, SettingsUI>, StringView identifier);
     ErrorOr<void> import_local_content_blocker_list(String name, String contents);
     void remove_content_blocker_list(Badge<SettingsUI>, StringView identifier);
     Optional<UnixDateTime> content_blocker_list_last_updated_at(StringView identifier) const;
+    JsonObject content_blocker_list_update_status(StringView identifier) const;
 
     struct BookmarkID {
         String id;
@@ -447,6 +457,10 @@ public:
     using CompositorGpuDeviceIdentityCallback = Function<void(Optional<Gfx::GpuDeviceIdentity> const&)>;
     void when_compositor_gpu_device_identity_is_known(CompositorGpuDeviceIdentityCallback);
 
+    Function<void(JsonValue const&)> on_derpbird_scripts_changed;
+    Function<void(ViewImplementation&)> on_derpbird_audio_changed;
+    Function<void(WebContentPage&, CanonicalDocument&, ByteBuffer, Function<void(ErrorOr<ByteBuffer>)>)> on_derpbird_value_request;
+
 protected:
     explicit Application(Optional<ByteString> ladybird_binary_path = {});
 
@@ -497,6 +511,7 @@ private:
     ErrorOr<void> launch_devtools_server();
     // Returns whether the combined rules changed.
     ErrorOr<bool> load_content_blocker_lists();
+    void schedule_content_blocker_reload();
     void apply_content_blocker_settings();
     void rebuild_content_blocker_list_paths();
     ByteString content_blocker_list_path(StringView identifier) const;
@@ -510,6 +525,7 @@ private:
     void did_receive_content_blocker_list_update_data(ReadonlyBytes);
     void stop_current_content_blocker_list_update_and_continue();
     void finish_current_content_blocker_list_update();
+    void record_content_blocker_list_update_error(StringView);
     ErrorOr<NonnullRawPtr<Core::GeolocationProvider>> ensure_geolocation_provider();
     void update_permission_defaults();
     void update_os_location_authorization();
@@ -622,6 +638,7 @@ private:
     static Application* s_the;
 
     Optional<Profile> m_profile;
+    Optional<JsonValue> m_derpbird_user_style_sections;
     OwnPtr<Settings> m_settings;
     OwnPtr<BrowserProcess> m_browser_process;
     bool m_should_exit_after_profile_coordination { false };
@@ -648,6 +665,10 @@ private:
     OwnPtr<FontServiceHost> m_font_service_host;
     JsonValue m_site_compatibility_data;
     Optional<Core::AnonymousBuffer> m_content_blocker_list_buffer;
+    Optional<String> m_content_blocker_input_signature;
+    std::shared_ptr<bool> m_content_blocker_reload_alive { std::make_shared<bool>(true) };
+    bool m_content_blocker_reload_running { false };
+    u64 m_content_blocker_reload_generation { 0 };
     RefPtr<Core::Timer> m_content_blocker_list_update_timer;
     struct PendingContentBlockerListUpdate {
         String identifier;
@@ -656,11 +677,15 @@ private:
         ByteString path;
         ContentBlockerListUpdateTrigger trigger;
         u8 redirect_count { 0 };
+        RefPtr<DerpBirdFilterIncludes> expansion;
+        Optional<URL::URL> include_key;
     };
     Vector<ByteString> m_explicit_content_blocker_list_paths;
     ByteString m_content_blocker_lists_directory;
     Vector<PendingContentBlockerListUpdate> m_pending_content_blocker_list_updates;
     Optional<PendingContentBlockerListUpdate> m_active_content_blocker_list_update;
+    HashMap<String, String> m_content_blocker_list_update_errors;
+    u64 m_content_blocker_list_update_generation { 0 };
     ByteBuffer m_content_blocker_list_update_payload;
     bool m_content_blocker_list_update_response_ok { false };
     RefPtr<Requests::Request> m_content_blocker_list_update_request;
@@ -791,6 +816,7 @@ private:
     OwnPtr<DevTools::FirefoxClient> m_devtools_client;
 
     mutable HashMap<u64, u64> m_navigation_listener_ids;
+    Optional<JsonValue> m_derpbird_user_scripts;
 };
 
 }

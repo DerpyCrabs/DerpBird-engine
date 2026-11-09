@@ -6,6 +6,9 @@
 
 #pragma once
 
+#include <AK/Function.h>
+#include <AK/HashMap.h>
+#include <AK/JsonObject.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/RefCounted.h>
 #include <AK/RefPtr.h>
@@ -102,6 +105,21 @@ public:
     // the UI process.
     Optional<String> const& web_ui_host() const { return m_web_ui_host; }
 
+    HashMap<String, JsonObject> derpbird_web_requests;
+    Function<void()> on_derpbird_web_requests_revoke;
+    Function<void()> on_derpbird_values_revoke;
+    void revoke_derpbird_values()
+    {
+        derpbird_web_requests.clear();
+        if (on_derpbird_web_requests_revoke) {
+            auto callback = move(on_derpbird_web_requests_revoke);
+            callback();
+        }
+        if (on_derpbird_values_revoke) {
+            auto callback = move(on_derpbird_values_revoke);
+            callback();
+        }
+    }
     void make_active();
 
 private:

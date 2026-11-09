@@ -121,12 +121,16 @@ endif()
 
 if (NOT WIN32)
     set(HEADLESS_TEST_SOURCES
+        TestDerpBirdBlocking.cpp
+        TestDerpBirdCredentials.cpp
+        TestDerpBirdShell.cpp
         TestApplicationDestruction.cpp
         TestAutocomplete.cpp
         TestBeforeUnload.cpp
         TestBrowserHistoryTraversal.cpp
         TestCrashOverlay.cpp
         TestCrashReportSubmission.cpp
+        TestDerpBirdStyles.cpp
         TestFavicon.cpp
         TestFileDownloader.cpp
         TestFocusWithoutSystemFocus.cpp
@@ -135,6 +139,7 @@ if (NOT WIN32)
         TestInputMethodState.cpp
         TestInspectDOMTree.cpp
         TestLinkHoverStatus.cpp
+        TestDerpBirdScripts.cpp
         TestNavigationDownloads.cpp
         TestPictureInPictureUserActivation.cpp
         TestPictureInPictureWindowControls.cpp
@@ -212,7 +217,7 @@ endif()
 
 if (NOT WIN32)
     target_sources(TestLibWebView PRIVATE HeadlessTest.cpp)
-    target_link_libraries(TestLibWebView PRIVATE LibCrypto LibDiff LibImageDecoders LibImageDecoderClient LibJS)
+    target_link_libraries(TestLibWebView PRIVATE LibCrypto LibDNS LibDiff LibImageDecoders LibImageDecoderClient LibJS)
     add_dependencies(TestLibWebView ladybird_build_resource_files ${ladybird_helper_processes})
     set_tests_properties(TestLibWebView PROPERTIES TIMEOUT 1800 ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR})
     if (APPLE)

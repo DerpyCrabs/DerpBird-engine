@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibWeb/Page/DerpBirdInsertionAuthority.h>
 #include <AK/Utf16String.h>
 #include <LibGC/Function.h>
 #include <LibGC/Ptr.h>
@@ -36,6 +37,7 @@ public:
     };
 
     [[nodiscard]] static GC::Ref<SharedResourceRequest> get_or_create(DOM::Document&, URL::URL const&, CORSSettingAttribute);
+    [[nodiscard]] static GC::Ref<SharedResourceRequest> create_unshared(DOM::Document&, URL::URL const&, CORSSettingAttribute);
     [[nodiscard]] static GC::Ref<SharedResourceRequest> get_or_create(DOM::Document&, Fetch::Infrastructure::Request const&);
 
     // Creates a request that loads the resource from the body of the response that the document was navigated to,
@@ -125,6 +127,7 @@ private:
 
     Key m_key;
     bool m_can_be_shared { true };
+    RefPtr<DerpBirdInsertionAuthority> m_derpbird_insertion_authority;
     GC::Ptr<DecodedImageData> m_image_data;
     GC::Ptr<Fetch::Infrastructure::FetchController> m_fetch_controller;
     u64 m_cache_touch_serial { 0 };

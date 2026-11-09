@@ -401,6 +401,7 @@ struct AnimatedProperty {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FfiAnimationStyleSheetResourceContext {
+    pub derpbird_authority_id: u64,
     pub base_url: *const u8,
     pub base_url_length: usize,
     pub has_value: bool,
@@ -411,6 +412,7 @@ impl FfiAnimationStyleSheetResourceContext {
     #[cfg(test)]
     const fn empty() -> Self {
         Self {
+            derpbird_authority_id: 0,
             base_url: std::ptr::null(),
             base_url_length: 0,
             has_value: false,
@@ -8908,6 +8910,7 @@ pub(crate) fn resolve_published_animation_declarations(
         let is_transition = effect.is_transition;
         let style_sheet_resource_context = match effect.resource_context() {
             None => FfiAnimationStyleSheetResourceContext {
+                derpbird_authority_id: 0,
                 base_url: std::ptr::null(),
                 base_url_length: 0,
                 has_value: false,
@@ -8916,6 +8919,7 @@ pub(crate) fn resolve_published_animation_declarations(
             Some(resource_context) => {
                 base_urls.push(std::sync::Arc::clone(&resource_context.base_url));
                 FfiAnimationStyleSheetResourceContext {
+                    derpbird_authority_id: resource_context.derpbird_authority_id,
                     base_url: resource_context.base_url.as_ptr(),
                     base_url_length: resource_context.base_url.len(),
                     has_value: true,

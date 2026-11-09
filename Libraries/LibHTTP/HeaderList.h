@@ -24,6 +24,8 @@ public:
     static NonnullRefPtr<HeaderList> create(Vector<Header> = {});
 
     Vector<Header> const& headers() const { return m_headers; }
+    String const& canonical_host_names() const { return m_canonical_host_names; }
+    void set_canonical_host_names(String names) { m_canonical_host_names = move(names); }
 
     [[nodiscard]] bool is_empty() const { return m_headers.is_empty(); }
 
@@ -99,6 +101,7 @@ public:
 private:
     explicit HeaderList(Vector<Header>);
 
+    String m_canonical_host_names;
     Vector<Header> m_headers;
 };
 

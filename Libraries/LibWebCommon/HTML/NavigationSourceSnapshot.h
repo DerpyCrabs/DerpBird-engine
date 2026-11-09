@@ -26,6 +26,10 @@ struct NavigationSourceSnapshot {
     bool text_directive_user_activation { false };
     bool browsing_context_group_has_multiple_contexts { false };
     bool browsing_context_group_has_remote_contexts { false };
+    Optional<URL::URL> derpbird_popup_source {};
+    Optional<URL::URL> derpbird_popup_top {};
+    bool derpbird_popunder { false };
+
 };
 
 WEBCOMMON_API NavigationSourceSnapshot create_navigation_source_snapshot_without_a_source_document();

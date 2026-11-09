@@ -236,3 +236,20 @@ TEST_CASE(force_cache_reuses_stale_must_revalidate_entries)
     EXPECT(cache->open_entry(url, "GET"sv, *request_headers, HTTP::CacheMode::OnlyIfCached).has_value());
     EXPECT(!cache->open_entry(url, "GET"sv, *request_headers, HTTP::CacheMode::Default).has_value());
 }
+
+TEST_CASE(canonical_provenance_survives_memory_cache_without_becoming_a_header)
+{
+    auto cache = HTTP::MemoryCache::create();
+    auto url = parse_url("https://visible.example/canonical"sv);
+    auto request_headers = create_cacheable_request_headers();
+    auto response_headers = create_cacheable_response_headers();
+    response_headers->set_canonical_host_names("tracker.example\n"_string);
+    auto count = response_headers->headers().size();
+    cache->create_entry(url, "GET"sv, *request_headers, UnixDateTime::now(), 200, "OK"sv, *response_headers);
+    cache->finalize_entry(url, "GET"sv, *request_headers, 200, *response_headers, immutable_bytes("body"sv));
+    auto entry = cache->open_entry(url, "GET"sv, *request_headers, HTTP::CacheMode::OnlyIfCached);
+    VERIFY(entry.has_value());
+    EXPECT_EQ(entry->response_headers->canonical_host_names(), "tracker.example\n"sv);
+    EXPECT_EQ(entry->response_headers->headers().size(), count);
+    EXPECT_EQ(entry->response_body.bytes(), "body"sv.bytes());
+}

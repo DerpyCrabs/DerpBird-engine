@@ -162,6 +162,7 @@ WebContentClient::WebContentClient(NonnullOwnPtr<IPC::Transport> transport, IsPr
 
 WebContentClient::~WebContentClient()
 {
+    close_derpbird_value_events();
     // The tree can still hold a page of a process that is gone; it reads as closed from now on.
     for (auto& page : m_pages)
         page.value->close();
@@ -193,6 +194,125 @@ void WebContentClient::gamepad_play_effect(Web::Gamepad::GamepadHandle handle, W
 void WebContentClient::gamepad_stop_effects(Web::Gamepad::GamepadHandle handle)
 {
     GamepadManager::the().stop_effects(*this, handle);
+}
+
+DerpBirdValueEvents& WebContentClient::ensure_derpbird_value_events()
+{
+    if (!m_derpbird_value_events) {
+        m_derpbird_value_events = DerpBirdValueEvents::create([weak = make_weak_ptr<WebContentClient>()](Web::PageId page_id, Web::HTML::CrossProcessId document_id, u64 id, ReadonlyBytes payload) -> ErrorOr<void> {
+            if (!weak || !weak->is_open()) return Error::from_string_literal("Userscript event connection is closed");
+            auto* page = weak->page(page_id);
+            if (!page || !page->is_open()) return Error::from_string_literal("Userscript event page is closed");
+            auto document = page->hosted_document_with_id(document_id);
+            if (!document || document->browsing_context().has_been_discarded()
+                || document->browsing_context().active_document().ptr() != document.ptr())
+                return Error::from_string_literal("Userscript event document is inactive");
+            weak->async_did_receive_derpbird_value_event(page_id, document_id, id, payload);
+            return {};
+        });
+    }
+    return *m_derpbird_value_events;
+}
+
+ErrorOr<NonnullRefPtr<DerpBirdValueEvents::Reservation>> WebContentClient::reserve_derpbird_value_event(Web::PageId page_id, Web::HTML::CrossProcessId document_id, size_t bytes)
+{
+    if (!is_open()) return Error::from_string_literal("Userscript event connection is closed");
+    auto* target = page(page_id);
+    if (!target || !target->is_open()) return Error::from_string_literal("Userscript event page is closed");
+    auto document = target->hosted_document_with_id(document_id);
+    if (!document || document->browsing_context().has_been_discarded()
+        || document->browsing_context().active_document().ptr() != document.ptr())
+        return Error::from_string_literal("Userscript event document is inactive");
+    return ensure_derpbird_value_events().reserve(page_id, document_id, bytes);
+}
+
+ErrorOr<u64> WebContentClient::send_derpbird_value_event(Web::PageId page_id, Web::HTML::CrossProcessId document_id, ByteBuffer payload, DerpBirdValueEvents::Completion completion)
+{
+    if (!is_open()) return Error::from_string_literal("Userscript event connection is closed");
+    return ensure_derpbird_value_events().enqueue(page_id, document_id, move(payload), move(completion));
+}
+
+void WebContentClient::close_derpbird_value_events()
+{
+    if (on_derpbird_values_close) {
+        auto callback = move(on_derpbird_values_close);
+        callback();
+    }
+    if (m_derpbird_value_events) m_derpbird_value_events->close();
+}
+
+void WebContentClient::cancel_derpbird_value_events(Web::PageId page_id, Web::HTML::CrossProcessId document_id)
+{
+    if (m_derpbird_value_events) m_derpbird_value_events->cancel_document(page_id, document_id);
+}
+
+void WebContentClient::did_acknowledge_derpbird_value_event(Web::PageId page_id, Web::HTML::CrossProcessId document_id, u64 id, bool accepted)
+{
+    if (m_derpbird_value_events) m_derpbird_value_events->acknowledge(page_id, document_id, id, accepted);
+}
+
+void WebContentClient::publish_derpbird_web_requests(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String script, String configuration, u64 revision, JsonValue rules, bool removed)
+{
+    auto* target = page(page_id);
+    if (!target) return;
+    if (script.bytes().size() > 128 || configuration.bytes().size() > 64 * 1024 * 1024 || rules.serialized().byte_count() > 65536) {
+        if (!removed) target->async_acknowledge_derpbird_web_requests(document_id, script, revision, false);
+        return;
+    }
+    auto document = target->hosted_document_with_id(document_id);
+    if (!document || document->browsing_context().has_been_discarded()
+        || document->browsing_context().active_document().ptr() != document.ptr()) return;
+    bool accepted = Application::the().publish_derpbird_web_requests(*target, *document, script, configuration, revision, move(rules), removed);
+    if (!removed) target->async_acknowledge_derpbird_web_requests(document_id, script, revision, accepted);
+}
+
+void WebContentClient::derpbird_web_request_event(Web::PageId page_id, Web::HTML::CrossProcessId document_id, String script, u64 revision, JsonValue event)
+{
+    auto* source = page(page_id);
+    if (!source || !event.is_object() || event.serialized().byte_count() > 65536) return;
+    source->traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable& navigable) {
+        if (!navigable.active_session_history_entry() || !navigable.active_session_history_entry()->document_state->document) return IterationDecision::Continue;
+        auto& document = navigable.active_document();
+        if (document.id() != document_id) return IterationDecision::Continue;
+        auto entry = document.derpbird_web_requests.find(script);
+        if (entry == document.derpbird_web_requests.end() || entry->value.get_u64("revision"sv) != revision) return IterationDecision::Break;
+        if (auto const& owner = document.host(); owner && owner->is_open())
+            owner->async_receive_derpbird_web_request_event(document_id, script, revision, event);
+        return IterationDecision::Break;
+    });
+}
+
+void WebContentClient::did_request_derpbird_values(Web::PageId page_id, Web::HTML::CrossProcessId document_id, u64 request_id, ByteBuffer payload)
+{
+    auto reject = [&] { async_did_receive_derpbird_values(page_id, document_id, request_id, {}, "Storage request denied"_string); };
+    auto* target = page(page_id);
+    if (!target || !request_id || payload.size() > 16 * 1024 * 1024) {
+        reject();
+        return;
+    }
+    auto document = target->hosted_document_with_id(document_id);
+    if (!document || document->browsing_context().has_been_discarded()
+        || document->browsing_context().active_document().ptr() != document.ptr()) {
+        reject();
+        return;
+    }
+    auto& handler = Application::the().on_derpbird_value_request;
+    if (!handler) {
+        reject();
+        return;
+    }
+    handler(*target, *document, move(payload), [weak = make_weak_ptr<WebContentClient>(), page_id, document_id, request_id](ErrorOr<ByteBuffer> result) {
+        if (!weak || !weak->is_open()) return;
+        auto* target = weak->page(page_id);
+        if (!target) return;
+        auto document = target->hosted_document_with_id(document_id);
+        if (!document || document->browsing_context().has_been_discarded()
+            || document->browsing_context().active_document().ptr() != document.ptr()) return;
+        if (result.is_error() || result.value().size() > 16 * 1024 * 1024)
+            weak->async_did_receive_derpbird_values(page_id, document_id, request_id, {}, "Storage request failed"_string);
+        else
+            weak->async_did_receive_derpbird_values(page_id, document_id, request_id, result.value().bytes(), {});
+    });
 }
 
 void WebContentClient::die()
@@ -539,6 +659,7 @@ void WebContentClient::did_lose_process()
 {
     // Removing pages can release the last reference to this client.
     RefPtr self = this;
+    close_derpbird_value_events();
     // A close request the client made before the loss; one its lost pages' release makes now is not one.
     auto requested_close = m_requested_close;
 

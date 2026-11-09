@@ -2113,6 +2113,14 @@ void Page::set_user_style(Utf16String source)
     invalidate_user_style();
 }
 
+ErrorOr<void> Page::set_derpbird_user_styles(JsonValue const& value)
+{
+    auto sections = TRY(DerpBirdStyleSection::decode(value));
+    m_derpbird_user_styles = move(sections);
+    invalidate_user_style();
+    return {};
+}
+
 void Page::invalidate_user_style()
 {
     if (!has_top_level_traversable())
@@ -2123,6 +2131,7 @@ void Page::invalidate_user_style()
     //     match in shadow trees as in the document, and the animations naming its @keyframes, which the document's
     //     scope publishes, are planned again, so no element of a shadow tree restyles for it otherwise.
     auto invalidate_document = [](DOM::Document& document) {
+        document.invalidate_derpbird_user_styles();
         document.invalidate_content_blocker_style_sheet();
         document.style_scope().invalidate_user_style_sheet();
         if (document.style_computer_if_created())

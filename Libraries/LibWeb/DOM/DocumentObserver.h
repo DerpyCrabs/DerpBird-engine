@@ -41,6 +41,9 @@ public:
 
     [[nodiscard]] GC::Ptr<GC::Function<void(bool)>> document_page_showing_observer() const { return m_document_page_showing_observer; }
 
+    bool observes_derpbird_url_changes() const { return m_observes_derpbird_url_changes; }
+    void set_observes_derpbird_url_changes(bool value) { m_observes_derpbird_url_changes = value; }
+
     GC::Ref<Document> document() { return m_document; }
     void set_document(GC::Ref<Document>);
 
@@ -54,6 +57,7 @@ private:
     virtual void visit_edges(GC::Cell::Visitor&) override;
     virtual void finalize() override;
 
+    bool m_observes_derpbird_url_changes { false };
     GC::Ref<Document> m_document;
     GC::Ptr<GC::Function<void()>> m_document_became_active;
     GC::Ptr<GC::Function<void()>> m_document_became_inactive;

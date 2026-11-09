@@ -160,6 +160,7 @@ void StyleSheetState::forget_font_feature_values()
 
 void StyleSheetState::set_rules(RustRuleList rules)
 {
+    revoke_derpbird_insertion_authority();
     // https://drafts.csswg.org/css-font-loading/#font-face-css-connection
     // If a @font-face rule is removed from the document, its corresponding FontFace object is no longer CSS-connected.
     // The connection is not restorable by any means (but adding the @font-face back to the stylesheet will create a
@@ -273,6 +274,7 @@ Optional<RustRule> StyleSheetState::parse_rule(Utf16View rule) const
 
 void StyleSheetState::rule_inserted(RustRule const& rule)
 {
+    revoke_derpbird_insertion_authority();
     recalculate_rule_caches();
     record_style_rule_inserted(rule, *this);
 
@@ -476,8 +478,31 @@ StyleRuleCache const& StyleSheetState::rule_cache()
     return *m_rule_cache;
 }
 
-void StyleSheetState::invalidate_owners()
+void StyleSheetState::revoke_derpbird_insertion_authority()
 {
+    ++m_derpbird_authority_generation;
+    if (!m_derpbird_insertion_authority) return;
+    m_derpbird_insertion_authority = nullptr;
+    for (auto node : m_owning_documents_or_shadow_roots)
+        node->document().note_style_sheet_set_change();
+}
+
+void StyleSheetState::set_derpbird_insertion_authority(RefPtr<DerpBirdInsertionAuthority> authority)
+{
+    for (auto node : m_owning_documents_or_shadow_roots)
+        node->document().note_style_sheet_set_change();
+    auto generation = ++m_derpbird_authority_generation;
+    m_derpbird_insertion_authority = nullptr;
+    if (!authority) return;
+    m_derpbird_insertion_authority = DerpBirdInsertionAuthority::create([owner = make_weak_ptr(), generation, authority = move(authority)] {
+        return owner && owner->m_derpbird_authority_generation == generation && authority->active();
+    });
+}
+
+void StyleSheetState::invalidate_owners(bool revoke_insertion_authority)
+{
+    if (revoke_insertion_authority)
+        revoke_derpbird_insertion_authority();
     auto previously_matched = m_native_sheet.media_state();
     m_native_sheet.reset_media_state();
     m_rule_cache = nullptr;

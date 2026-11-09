@@ -377,6 +377,7 @@ static void set_up_classic_script_request(Fetch::Infrastructure::Request& reques
     // Set request's cryptographic nonce metadata to options's cryptographic nonce, its integrity metadata to options's
     // integrity metadata, its parser metadata to options's parser metadata, its referrer policy to options's referrer
     // policy, its render-blocking to options's render-blocking, and its priority to options's fetch priority.
+    request.set_derpbird_insertion_authority(options.derpbird_insertion_authority);
     request.set_cryptographic_nonce_metadata(options.cryptographic_nonce);
     request.set_integrity_metadata(options.integrity_metadata);
     request.set_parser_metadata(options.parser_metadata);
@@ -392,6 +393,7 @@ void set_up_module_script_request(Fetch::Infrastructure::Request& request, Scrip
     // integrity metadata, its parser metadata to options's parser metadata, its credentials mode to options's credentials
     // mode, its referrer policy to options's referrer policy, its render-blocking to options's render-blocking, and its
     // priority to options's fetch priority.
+    request.set_derpbird_insertion_authority(options.derpbird_insertion_authority);
     request.set_cryptographic_nonce_metadata(options.cryptographic_nonce);
     request.set_integrity_metadata(options.integrity_metadata);
     request.set_parser_metadata(options.parser_metadata);
@@ -771,10 +773,16 @@ void fetch_single_module_script(JS::Realm& realm,
 
     // 4. Let moduleMap be settingsObject's module map.
     auto& module_map = settings_object.module_map();
+    auto authority = options.derpbird_insertion_authority;
+    if (authority && !authority->active()) {
+        on_complete->function()(nullptr);
+        return;
+    }
+    auto authority_id = authority ? authority->identity() : 0;
 
     // 5. If moduleMap[(url, moduleType)] is a module script, run onComplete given
     //    moduleMap[(url, moduleType)], and return.
-    auto entry = module_map.get(url, module_type);
+    auto entry = module_map.get(url, module_type, authority_id);
     if (entry.has_value() && entry->has<GC::Ref<ModuleScript>>()) {
         on_complete->function()(entry->get<GC::Ref<ModuleScript>>());
         return;
@@ -782,16 +790,16 @@ void fetch_single_module_script(JS::Realm& realm,
 
     // 6. If moduleMap[(url, moduleType)] is a list, append onComplete to moduleMap[(url, moduleType)], and return.
     if (entry.has_value() && entry->has<ModuleMap::CallbackList>()) {
-        module_map.append(url, module_type, GC::create_function(GC::Heap::the(), [on_complete](GC::Ptr<ModuleScript> module_script) {
-            on_complete->function()(module_script);
-        }));
+        module_map.append(url, module_type, GC::create_function(GC::Heap::the(), [on_complete, authority](GC::Ptr<ModuleScript> module_script) {
+            on_complete->function()(authority && !authority->active() ? nullptr : module_script);
+        }), authority_id);
         return;
     }
 
     // 7. Set moduleMap[(url, moduleType)] to « onComplete ».
     GC::RootVector<ModuleMap::CallbackFunction> callbacks;
-    callbacks.append(GC::create_function(GC::Heap::the(), [on_complete](GC::Ptr<ModuleScript> module_script) { on_complete->function()(module_script); }));
-    module_map.set(url, module_type, move(callbacks));
+    callbacks.append(GC::create_function(GC::Heap::the(), [on_complete, authority](GC::Ptr<ModuleScript> module_script) { on_complete->function()(authority && !authority->active() ? nullptr : module_script); }));
+    module_map.set(url, module_type, move(callbacks), authority_id);
 
     // 8. Let request be a new request whose URL is url, mode is "cors", referrer is referrer, and client is fetchClient.
     auto request = Fetch::Infrastructure::Request::create();
@@ -816,19 +824,19 @@ void fetch_single_module_script(JS::Realm& realm,
     // 13. If performFetch was given, run performFetch with request, isTopLevel, and with processResponseConsumeBody as defined below.
     //     Otherwise, fetch request with processResponseConsumeBody set to processResponseConsumeBody as defined below.
     //     In both cases, let processResponseConsumeBody given response response and null, failure, or a byte sequence bodyBytes be the following algorithm:
-    auto process_response_consume_body = [request, &module_map, url, module_type, &settings_object, options = options](GC::Ref<Fetch::Infrastructure::ResponseView> response, Fetch::Infrastructure::FetchAlgorithms::BodyBytes body_bytes) mutable {
+    auto process_response_consume_body = [request, &module_map, url, module_type, &settings_object, options = options, authority, authority_id](GC::Ref<Fetch::Infrastructure::ResponseView> response, Fetch::Infrastructure::FetchAlgorithms::BodyBytes body_bytes) mutable {
         auto internal_response = response->unsafe_response();
 
         // 1. If any of the following are true:
         //    - bodyBytes is null or failure; or
         //    - response's status is not an ok status,
-        if (body_bytes.has<Empty>() || body_bytes.has<Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag>() || !Fetch::Infrastructure::is_ok_status(response->status())) {
+        if ((authority && !authority->active()) || body_bytes.has<Empty>() || body_bytes.has<Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag>() || !Fetch::Infrastructure::is_ok_status(response->status())) {
             // then:
             // 1. Let callbacks be moduleMap[(url, moduleType)].
             // 2. Remove moduleMap[(url, moduleType)].
             // 3. For each callback of callbacks: run callback given null.
             // 4. Return.
-            module_map.complete_fetch(url, module_type, nullptr);
+            module_map.complete_fetch(url, module_type, nullptr, authority_id);
             return;
         }
 
@@ -883,13 +891,17 @@ void fetch_single_module_script(JS::Realm& realm,
                 compile_off_thread(settings_object, move(source_code), JS::ProgramType::Module, 0, move(cache_key),
                     [url = move(url), url_string = move(url_string), response_url = move(response_url),
                         module_type_string = move(module_type_string),
-                        options, settings_root = move(settings_root)](auto result, auto source_code) mutable {
+                        options, authority, authority_id, settings_root = move(settings_root)](auto result, auto source_code) mutable {
+                        if (authority && !authority->active()) {
+                            settings_root->module_map().complete_fetch(url, module_type_string, nullptr, authority_id);
+                            return;
+                        }
                         auto module_script = result.compiled
                             ? ModuleScript::create_from_pre_compiled(url_string, source_code, *settings_root, move(response_url), move(result.compiled)).release_value_but_fixme_should_propagate_errors()
                             : ModuleScript::create_from_pre_parsed(url_string, source_code, *settings_root, move(response_url), move(result.parsed)).release_value_but_fixme_should_propagate_errors();
                         if (module_script)
                             module_script->set_fetch_options(options);
-                        settings_root->module_map().complete_fetch(url, module_type_string, module_script);
+                        settings_root->module_map().complete_fetch(url, module_type_string, module_script, authority_id);
                     });
                 return;
             }
@@ -897,7 +909,7 @@ void fetch_single_module_script(JS::Realm& realm,
             // 4. If the MIME type essence of mimeType is "text/css" and moduleType is "css", then set moduleScript to
             //    the result of creating a CSS module script given sourceText and settingsObject.
             if (mime_type.has_value() && mime_type->essence() == "text/css"sv && module_type == "css"sv) {
-                module_script = ModuleScript::create_a_css_module_script(url.to_byte_string(), source_text.utf16_view(), settings_object).release_value_but_fixme_should_propagate_errors();
+                module_script = ModuleScript::create_a_css_module_script(url.to_byte_string(), source_text.utf16_view(), settings_object, options, response->url().value_or(url)).release_value_but_fixme_should_propagate_errors();
             }
 
             // 5. If mimeType is a JSON MIME type and moduleType is "json", then set moduleScript to the result of
@@ -911,14 +923,15 @@ void fetch_single_module_script(JS::Realm& realm,
         // 9. If moduleScript is null, then remove moduleMap[(url, moduleType)]; otherwise set
         //    moduleMap[(url, moduleType)] to moduleScript.
         // 10. For each callback of callbacks: run callback given moduleScript.
-        module_map.complete_fetch(url, module_type, module_script);
+        if (module_script) module_script->set_fetch_options(options);
+        module_map.complete_fetch(url, module_type, module_script, authority_id);
     };
 
     if (perform_fetch != nullptr) {
         auto result = perform_fetch->function()(request, is_top_level, move(process_response_consume_body));
         // NB: The perform fetch hook can abort without running processResponseConsumeBody.
         if (result.is_exception())
-            module_map.complete_fetch(url, module_type, nullptr);
+            module_map.complete_fetch(url, module_type, nullptr, authority_id);
     } else {
         Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::ConsumeForCallback };
         fetch_algorithms_input.process_response_consume_body = move(process_response_consume_body);

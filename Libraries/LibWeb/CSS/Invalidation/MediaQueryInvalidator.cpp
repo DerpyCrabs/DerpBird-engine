@@ -43,26 +43,28 @@ void evaluate_media_rules_and_publish_conditions(DOM::Document& document)
     };
     document.style_scope().for_each_active_css_style_sheet(evaluate_author_sheet);
 
-    for (auto origin : { CascadeOrigin::UserAgent, CascadeOrigin::User }) {
-        document.style_scope().for_each_stylesheet(origin, [&](CSS::StyleSheetState& style_sheet) {
-            auto changed = style_sheet.evaluate_media_queries(document);
-            record_stylesheet_rule_conditions(style_sheet, document);
+    Function<void(StyleSheetState&)> evaluate_host_sheet = [&](StyleSheetState& style_sheet) {
+        auto changed = style_sheet.evaluate_media_queries(document);
+        record_stylesheet_rule_conditions(style_sheet, document);
 
-            for (auto const& entry : document.style_computer().non_author_style_sheets()) {
-                if (entry.sheet.ptr() == &style_sheet) {
-                    StyleEngineFFI::style_engine_set_sheet_conditions_hold(document.style_computer().style_engine().host(),
-                        entry.sheet_id, !style_sheet.disabled() && style_sheet.native_media_list().matches());
-                    break;
-                }
+        for (auto const& entry : document.style_computer().non_author_style_sheets()) {
+            if (entry.sheet.ptr() == &style_sheet) {
+                StyleEngineFFI::style_engine_set_sheet_conditions_hold(document.style_computer().style_engine().host(),
+                    entry.sheet_id, !style_sheet.disabled() && style_sheet.native_media_list().matches());
+                break;
             }
+        }
 
-            if (!changed)
-                return;
-            document.style_scope().invalidate_style_cache();
-            document.style_scope().invalidate_counter_style_cache();
-            style_sheet.reload_fonts_after_media_query_change();
-        });
-    }
+        if (!changed)
+            return;
+        document.style_scope().invalidate_style_cache();
+        document.style_scope().invalidate_counter_style_cache();
+        style_sheet.reload_fonts_after_media_query_change();
+    };
+    for (auto origin : { CascadeOrigin::UserAgent, CascadeOrigin::User })
+        document.style_scope().for_each_stylesheet(origin, evaluate_host_sheet);
+    for (auto const& sheet : document.style_scope().derpbird_author_style_sheets())
+        evaluate_host_sheet(*sheet);
 
     document.for_each_shadow_root([&](auto& shadow_root) {
         shadow_root.style_scope().for_each_active_css_style_sheet(evaluate_author_sheet);

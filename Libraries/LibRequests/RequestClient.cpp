@@ -36,6 +36,7 @@ void RequestClient::die()
     auto websockets = move(m_websockets);
 
     m_requests.clear();
+    m_background_response_policies.clear();
     m_websockets.clear();
 
     auto host_lookups = move(m_host_lookups);
@@ -61,7 +62,7 @@ void RequestClient::die()
     }
 }
 
-RefPtr<Request> RequestClient::start_request(ByteString const& method, URL::URL const& url, Optional<HTTP::HeaderList const&> request_headers, ReadonlyBytes request_body, HTTP::CacheMode cache_mode, HTTP::Cookie::IncludeCredentials include_credentials, TransferLease transfer_lease, Optional<u32> address_selection_hint, CacheMissNotification cache_miss_notification, u64 originating_page_id, Optional<HTTP::NetworkIsolationKey> network_isolation_key)
+RefPtr<Request> RequestClient::start_request(ByteString const& method, URL::URL const& url, Optional<HTTP::HeaderList const&> request_headers, ReadonlyBytes request_body, HTTP::CacheMode cache_mode, HTTP::Cookie::IncludeCredentials include_credentials, TransferLease transfer_lease, Optional<u32> address_selection_hint, CacheMissNotification cache_miss_notification, u64 originating_page_id, Optional<HTTP::NetworkIsolationKey> network_isolation_key, bool suppress_response_cookies, u8 query_response_policy)
 {
     auto request_id = m_next_request_id++;
     auto headers = request_headers.map([](auto const& headers) { return headers.headers().span(); }).value_or({});
@@ -69,7 +70,7 @@ RefPtr<Request> RequestClient::start_request(ByteString const& method, URL::URL 
     auto transfer_lease_key = transfer_lease == TransferLease::Yes
         ? Optional<RequestTransferLeaseKey> { { m_request_server_client_id, request_id } }
         : Optional<RequestTransferLeaseKey> {};
-    IPCProxy::async_start_request(request_id, method, url, headers, request_body, cache_mode, move(network_isolation_key), include_credentials, transfer_lease_key.has_value(), address_selection_hint, cache_miss_notification == CacheMissNotification::Yes, Core::System::getpid(), originating_page_id);
+    IPCProxy::async_start_request(request_id, method, url, headers, request_body, cache_mode, move(network_isolation_key), include_credentials, transfer_lease_key.has_value(), address_selection_hint, cache_miss_notification == CacheMissNotification::Yes, Core::System::getpid(), originating_page_id, suppress_response_cookies, query_response_policy);
     auto request = Request::create_from_id({}, *this, request_id, move(transfer_lease_key));
     m_requests.set(request_id, request);
     return request;
@@ -224,12 +225,62 @@ void RequestClient::request_finished(u64 request_id, u64 total_size, RequestTimi
         m_requests.remove(request_id);
 }
 
-void RequestClient::headers_became_available(u64 request_id, Vector<HTTP::Header> response_headers, Optional<u32> status_code, Optional<String> reason_phrase, CacheState cache_state, ByteString http_version)
+void RequestClient::retain_response_header_policy(u64 parent_request_id, u64 background_request_id)
+{
+    if (m_background_response_policies.size() >= 1024) return;
+    RefPtr<Request> request = m_requests.get(parent_request_id).value_or(nullptr);
+    if (request && request->response_policy_context())
+        m_background_response_policies.set(background_request_id, request->response_policy_context());
+}
+
+void RequestClient::release_response_header_policy(u64 background_request_id)
+{
+    m_background_response_policies.remove(background_request_id);
+}
+
+void RequestClient::query_request_header_policy(u64 request_id, u64 generation, bool background, Vector<HTTP::Header> request_headers, String ip_addresses)
+{
+    RefPtr<Request::ResponseHeaderPolicy> context;
+    if (background) context = m_background_response_policies.get(request_id).value_or(nullptr);
+    else if (auto request = m_requests.get(request_id); request.has_value() && *request)
+        context = (*request)->response_policy_context();
+    auto headers = HTTP::HeaderList::create(move(request_headers));
+    bool allowed = context && context->request_header_callback && context->request_header_callback(*headers, ip_addresses);
+    IPCProxy::async_resolve_request_header_policy(request_id, generation, allowed, background);
+}
+
+void RequestClient::query_canonical_url_policy(u64 request_id, u64 generation, bool background, Vector<URL::URL> aliases, Vector<String> addresses)
+{
+    RefPtr<Request::ResponseHeaderPolicy> context;
+    if (background) context = m_background_response_policies.get(request_id).value_or(nullptr);
+    else if (auto request = m_requests.get(request_id); request.has_value() && *request)
+        context = (*request)->response_policy_context();
+    bool allowed = context && aliases.size() <= 16 && addresses.size() <= 256 && context->allow_canonical_urls(aliases, addresses);
+    IPCProxy::async_resolve_canonical_url_policy(request_id, generation, allowed, background);
+}
+
+void RequestClient::query_response_header_policy(u64 request_id, u64 generation, bool background, Vector<HTTP::Header> response_headers, String ip_addresses)
+{
+    auto headers = HTTP::HeaderList::create(move(response_headers));
+    u8 mask = 24;
+    if (background) {
+        auto context = m_background_response_policies.get(request_id);
+        if (context.has_value() && *context) mask = (*context)->select(*headers, ip_addresses);
+    } else {
+        RefPtr<Request> request = m_requests.get(request_id).value_or(nullptr);
+        if (request) mask = request->select_response_header_policy(*headers, move(ip_addresses));
+    }
+    IPCProxy::async_resolve_response_header_policy(request_id, generation, mask & 24, background);
+}
+
+void RequestClient::headers_became_available(u64 request_id, Vector<HTTP::Header> response_headers, Optional<u32> status_code, Optional<String> reason_phrase, CacheState cache_state, ByteString http_version, String canonical_host_names, String ip_addresses)
 {
     RefPtr<Request> request = m_requests.get(request_id).value_or(nullptr);
-    if (request)
-        request->did_receive_headers({}, HTTP::HeaderList::create(move(response_headers)), status_code, reason_phrase, cache_state, move(http_version));
-    else
+    if (request) {
+        auto headers = HTTP::HeaderList::create(move(response_headers));
+        headers->set_canonical_host_names(move(canonical_host_names));
+        request->did_receive_headers({}, move(headers), status_code, reason_phrase, cache_state, move(http_version), move(ip_addresses));
+    } else
         warnln("Received headers for non-existent request {}", request_id);
 }
 
@@ -242,13 +293,23 @@ void RequestClient::request_transferred(u64 request_id)
     (*request)->did_transfer({});
 }
 
-RefPtr<WebSocket> RequestClient::websocket_connect(URL::URL const& url, Optional<HTTP::NetworkIsolationKey> const& network_isolation_key, ByteString const& origin, Vector<ByteString> const& protocols, Vector<ByteString> const& extensions, HTTP::HeaderList const& request_headers)
+RefPtr<WebSocket> RequestClient::websocket_connect(URL::URL const& url, Optional<HTTP::NetworkIsolationKey> const& network_isolation_key, ByteString const& origin, Vector<ByteString> const& protocols, Vector<ByteString> const& extensions, HTTP::HeaderList const& request_headers, u8 query_canonical_policy)
 {
     auto websocket_id = m_next_websocket_id++;
-    IPCProxy::async_websocket_connect(websocket_id, url, network_isolation_key, origin, protocols, extensions, request_headers.headers());
+    IPCProxy::async_websocket_connect(websocket_id, url, network_isolation_key, origin, protocols, extensions, request_headers.headers(), query_canonical_policy);
     auto connection = WebSocket::create_from_id({}, *this, websocket_id);
     m_websockets.set(websocket_id, connection);
     return connection;
+}
+
+void RequestClient::query_websocket_canonical_policy(u64 websocket_id, u64 generation, Vector<URL::URL> aliases, Vector<String> addresses)
+{
+    bool allowed = false;
+    if (auto connection = m_websockets.get(websocket_id); connection.has_value()) {
+        auto& policy = (*connection)->canonical_url_policy;
+        allowed = aliases.size() <= 16 && addresses.size() <= 256 && policy && policy(aliases, addresses);
+    }
+    IPCProxy::async_resolve_websocket_canonical_policy(websocket_id, generation, allowed);
 }
 
 void RequestClient::websocket_connected(u64 websocket_id)

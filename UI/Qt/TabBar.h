@@ -296,6 +296,8 @@ public:
 
     LadybirdButton& ladybird_button() const { return *m_ladybird_button; }
 
+    QWidget* detach_page_stack(QWidget* parent);
+
     TabBar* tab_bar() const { return m_tab_bar; }
 
     // Whether a tab dragged to a position, in the given widget, lands in the tab strip rather than leaving it.
@@ -429,6 +431,7 @@ private:
     void size_hidden_pages_like_the_current_one();
 
     QStackedWidget* m_stacked_widget { nullptr };
+    bool m_page_stack_detached { false };
     QToolButton* m_new_tab_button { nullptr };
     QToolButton* m_all_tabs_button { nullptr };
     AllTabsPopover* m_all_tabs_popover { nullptr };

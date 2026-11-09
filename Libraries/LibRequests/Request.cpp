@@ -93,7 +93,7 @@ void Request::set_body_delivery_paused(bool paused)
 {
     m_body_delivery_paused = paused;
     if (m_internal_stream_data && m_internal_stream_data->read_notifier)
-        m_internal_stream_data->read_notifier->set_enabled(!m_body_delivery_paused);
+        m_internal_stream_data->read_notifier->set_enabled(m_response_headers_delivered && !m_body_delivery_paused);
     if (!m_body_delivery_paused)
         schedule_file_backed_delivery();
 }
@@ -151,7 +151,7 @@ bool Request::has_undelivered_file_backed_bytes() const
 // Delivers under the same pause and byte allowance as the read stream.
 void Request::deliver_file_backed_payload()
 {
-    if (m_mode != Mode::Unbuffered || !has_file_backed_response_body())
+    if (!m_response_headers_delivered || m_mode != Mode::Unbuffered || !has_file_backed_response_body())
         return;
 
     NonnullRefPtr protector { *this };
@@ -184,7 +184,7 @@ void Request::deliver_file_backed_payload()
 
 void Request::schedule_file_backed_delivery()
 {
-    if (!has_undelivered_file_backed_bytes() || m_internal_stream_data->file_backed_delivery_scheduled)
+    if (!m_response_headers_delivered || !has_undelivered_file_backed_bytes() || m_internal_stream_data->file_backed_delivery_scheduled)
         return;
 
     m_internal_stream_data->file_backed_delivery_scheduled = true;
@@ -215,7 +215,7 @@ void Request::attach_read_stream()
     m_fd_is_owned_by_read_stream = true;
     auto notifier = read_stream->notifier();
     notifier->on_activation = move(m_internal_stream_data->read_notifier->on_activation);
-    notifier->set_enabled(!m_body_delivery_paused);
+    notifier->set_enabled(m_response_headers_delivered && !m_body_delivery_paused);
     m_internal_stream_data->read_notifier = notifier;
     m_internal_stream_data->read_stream = move(read_stream);
 }
@@ -259,7 +259,7 @@ void Request::set_request_cached_body_file(Badge<Requests::RequestClient>, int f
         return;
 
     m_internal_stream_data->cached_payload = payload.release_value();
-    if (m_internal_stream_data->on_cached_body_available)
+    if (m_response_headers_delivered && m_internal_stream_data->on_cached_body_available)
         m_internal_stream_data->on_cached_body_available(*m_internal_stream_data->cached_payload);
 }
 
@@ -330,11 +330,24 @@ void Request::did_finish(Badge<RequestClient>, u64 total_size, RequestTimingInfo
         on_finish(total_size, timing_info, effective_network_error);
 }
 
-void Request::did_receive_headers(Badge<RequestClient>, NonnullRefPtr<HTTP::HeaderList> response_headers, Optional<u32> response_code, Optional<String> const& reason_phrase, CacheState cache_state, ByteString http_version)
+void Request::did_receive_headers(Badge<RequestClient>, NonnullRefPtr<HTTP::HeaderList> response_headers, Optional<u32> response_code, Optional<String> const& reason_phrase, CacheState cache_state, ByteString http_version, String ip_addresses)
 {
+    NonnullRefPtr protector { *this };
+    m_response_policy_ip_addresses = move(ip_addresses);
     m_http_version = move(http_version);
     if (on_headers_received)
         on_headers_received(move(response_headers), response_code, reason_phrase, cache_state);
+    // The body pipe and header IPC are independent readiness sources. Do not
+    // deliver bytes (including during a nested event loop in the callback)
+    // before response consumers have installed their header-dependent policy.
+    m_response_headers_delivered = true;
+    if (m_mode == Mode::Unknown || !m_internal_stream_data)
+        return;
+    if (m_internal_stream_data->cached_payload.has_value() && m_internal_stream_data->on_cached_body_available)
+        m_internal_stream_data->on_cached_body_available(*m_internal_stream_data->cached_payload);
+    if (m_mode == Mode::Unknown || !m_internal_stream_data)
+        return;
+    set_body_delivery_paused(m_body_delivery_paused);
 }
 
 void Request::did_transfer(Badge<RequestClient>)
@@ -357,6 +370,7 @@ void Request::defer_teardown()
         m_internal_stream_data->read_notifier->set_enabled(false);
     m_mode = Mode::Unknown;
     Core::deferred_invoke([self = NonnullRefPtr(*this)] {
+        self->m_response_policy_context = nullptr;
         self->on_headers_received = nullptr;
         self->on_finish = nullptr;
         self->on_upload_progress = nullptr;
@@ -372,7 +386,7 @@ void Request::set_up_internal_stream_data(DataReceived on_data_available)
     m_internal_stream_data = make<InternalStreamData>();
     m_internal_stream_data->on_data_available = move(on_data_available);
     m_internal_stream_data->read_notifier = Core::Notifier::construct(fd(), Core::Notifier::Type::Read);
-    m_internal_stream_data->read_notifier->set_enabled(!m_body_delivery_paused);
+    m_internal_stream_data->read_notifier->set_enabled(m_response_headers_delivered && !m_body_delivery_paused);
     attach_read_stream();
 
     auto user_on_finish = move(on_finish);
@@ -419,7 +433,7 @@ void Request::set_up_internal_stream_data(DataReceived on_data_available)
         static thread_local u8* buffer = nullptr;
 
         // If the request was stopped while this IPC was in-flight, just bail.
-        if (!m_internal_stream_data || !m_internal_stream_data->read_stream)
+        if (!m_response_headers_delivered || !m_internal_stream_data || !m_internal_stream_data->read_stream)
             return;
 
         NonnullRefPtr protector { *this };

@@ -97,6 +97,7 @@ static RefPtr<Fetch::Infrastructure::Request> fetch_a_style_resource_impl(StyleR
     //    origin is environmentSettings’s origin, credentials mode is "same-origin", use-url-credentials flag is set,
     //    client is environmentSettings, and whose referrer is "client".
     auto request = Fetch::Infrastructure::Request::create();
+    request->set_derpbird_insertion_authority(css_rule_or_declaration.derpbird_insertion_authority);
     request->set_url(parsed_url.release_value());
     request->set_destination(destination);
     request->set_mode(cors_mode == CorsMode::Cors ? Fetch::Infrastructure::Request::Mode::CORS : Fetch::Infrastructure::Request::Mode::NoCORS);
@@ -114,6 +115,8 @@ static RefPtr<Fetch::Infrastructure::Request> fetch_a_style_resource_impl(StyleR
     //          referrer, and with the referrer policy of the response that the sheet was fetched from.
     auto context = style_resource_context(css_rule_or_declaration);
     if (context.sheet) {
+        if (!request->derpbird_insertion_authority())
+            request->set_derpbird_insertion_authority(context.sheet->derpbird_insertion_authority());
         if (auto referrer_policy = context.sheet->fetched_referrer_policy(); referrer_policy.has_value()) {
             request->set_referrer(context.url);
             request->set_referrer_policy(*referrer_policy);
@@ -155,7 +158,13 @@ GC::Ptr<Fetch::Infrastructure::FetchController> fetch_a_style_resource(StyleReso
     auto& environment_settings = *css_rule_or_declaration.environment_settings_object;
 
     Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::ConsumeForCallback };
-    fetch_algorithms_input.process_response_consume_body = move(process_response);
+    fetch_algorithms_input.process_response_consume_body = [authority = request->derpbird_insertion_authority(), process_response = move(process_response)](auto response, auto bytes) {
+        // Headers may have passed CSP before source/CSSOM revocation. Recheck
+        // after the body arrives, before consumers decode or publish it.
+        if (authority && !authority->active())
+            bytes = Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag {};
+        process_response(response, move(bytes));
+    };
 
     return Fetch::Fetching::fetch(environment_settings.realm(), *request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
 }

@@ -23,6 +23,7 @@ public:
     [[nodiscard]] Optional<Requests::RequestTransferLeaseKey> const& transfer_lease() const { return m_request->transfer_lease(); }
     [[nodiscard]] ByteString const& http_version() const { return m_request->http_version(); }
 
+    [[nodiscard]] String const& policy_ip_addresses() const { return m_request->response_policy_ip_addresses(); }
     [[nodiscard]] bool has_file_backed_response_body() const;
 
     virtual void resume_body_delivery_up_to(u64 byte_count) override;

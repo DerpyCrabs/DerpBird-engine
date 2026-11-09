@@ -195,6 +195,8 @@ CanonicalBrowsingContext::~CanonicalBrowsingContext()
 
 void CanonicalBrowsingContext::remove()
 {
+    if (auto document = m_active_document.strong_ref())
+        document->revoke_derpbird_values();
     if (m_group)
         m_group->remove(*this);
 }
@@ -206,6 +208,8 @@ NonnullRefPtr<CanonicalDocument> CanonicalBrowsingContext::active_document() con
 
 void CanonicalBrowsingContext::set_active_document(Badge<CanonicalDocument>, CanonicalDocument& document)
 {
+    if (auto previous = m_active_document.strong_ref(); previous && previous.ptr() != &document)
+        previous->revoke_derpbird_values();
     m_active_document = document;
 }
 

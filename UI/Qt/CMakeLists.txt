@@ -20,6 +20,7 @@ add_library(ladybird_impl STATIC
     BookmarkPopover.cpp
     BookmarksBar.cpp
     BrowserWindow.cpp
+    DerpBirdChrome.cpp
     ChromeStyle.cpp
     CrashReportReviewWidget.cpp
     DevToolsBanner.cpp
@@ -68,6 +69,7 @@ if (NOT APPLE AND NOT WIN32 AND NOT ANDROID)
 endif()
 
 target_link_libraries(ladybird_impl PUBLIC Qt::Core Qt::Gui Qt::Widgets)
+target_link_libraries(ladybird_impl PRIVATE LibRegex LibDatabase LibRequests LibHTTP LibImageDecoderClient)
 
 if (TARGET Qt6::Positioning)
     target_sources(ladybird_impl PRIVATE GeolocationProviderQt.cpp GeolocationProviderQt.h)
@@ -237,6 +239,11 @@ endif()
 
 qt_add_executable(ladybird main.cpp ladybird.qrc)
 target_link_libraries(ladybird PRIVATE ladybird_impl)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(DERPBIRD_SECRET REQUIRED IMPORTED_TARGET libsecret-1>=0.19)
+    target_link_libraries(ladybird_impl PRIVATE PkgConfig::DERPBIRD_SECRET)
+endif()
 
 create_ladybird_bundle(ladybird)
 
@@ -258,4 +265,10 @@ qt_deploy_runtime_dependencies(
             -P ${ladybird_deploy_script}
         COMMAND_EXPAND_LISTS
     )
+endif()
+
+if (TARGET SQLite3::SQLite3)
+    target_link_libraries(ladybird_impl PRIVATE SQLite3::SQLite3)
+else()
+    target_link_libraries(ladybird_impl PRIVATE SQLite::SQLite3)
 endif()

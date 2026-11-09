@@ -80,6 +80,7 @@ public:
     void finished_loading_critical_style_subresources(AnyFailed);
 
 private:
+    RefPtr<DerpBirdInsertionAuthority> m_derpbird_stylesheet_authority;
     // https://html.spec.whatwg.org/multipage/semantics.html#link-processing-options
     struct LinkProcessingOptions final : public JS::Cell {
         GC_CELL(LinkProcessingOptions, JS::Cell);
@@ -113,6 +114,7 @@ private:
 
         // cryptographic nonce metadata (default the empty string)
         //     A string
+        RefPtr<DerpBirdInsertionAuthority> derpbird_insertion_authority;
         Utf16String cryptographic_nonce_metadata;
 
         // destination (default the empty string)

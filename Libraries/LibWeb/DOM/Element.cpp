@@ -181,6 +181,54 @@ namespace Web::DOM {
 static_assert(sizeof(Element) == 304);
 #endif
 
+bool Element::derpbird_userscript_insertion_active() const
+{
+    auto* data = element_rare_data();
+    return data && data->derpbird_userscript_insertion_active && data->derpbird_insertion_authority && data->derpbird_insertion_authority->active();
+}
+
+void Element::set_derpbird_userscript_insertion_active(bool active)
+{
+    if (active || element_rare_data())
+        ensure_element_rare_data().derpbird_userscript_insertion_active = active;
+}
+
+RefPtr<DerpBirdInsertionAuthority> Element::derpbird_insertion_authority() const
+{
+    auto* data = element_rare_data();
+    return data ? data->derpbird_insertion_authority : nullptr;
+}
+
+void Element::set_derpbird_insertion_authority(RefPtr<DerpBirdInsertionAuthority> authority)
+{
+    if (authority || element_rare_data())
+        ensure_element_rare_data().derpbird_insertion_authority = move(authority);
+}
+
+bool Element::derpbird_insertion_pending() const
+{
+    auto* data = element_rare_data();
+    return data && data->derpbird_insertion_pending;
+}
+
+void Element::set_derpbird_insertion_pending(bool pending)
+{
+    if (pending || element_rare_data())
+        ensure_element_rare_data().derpbird_insertion_pending = pending;
+}
+
+void Element::finish_derpbird_pending_insertion(bool revoke)
+{
+    auto* data = element_rare_data();
+    if (!data || !data->derpbird_insertion_pending)
+        return;
+    if (revoke && data->derpbird_insertion_authority)
+        data->derpbird_insertion_authority->revoke();
+    data->derpbird_insertion_pending = false;
+    data->derpbird_userscript_insertion_active = false;
+    data->derpbird_insertion_authority = nullptr;
+}
+
 Element::RareData::~RareData() = default;
 
 void Element::RareData::visit_edges(Cell::Visitor& visitor)
@@ -670,7 +718,7 @@ void Element::follow_the_hyperlink(Optional<Utf16String> hyperlink_suffix, HTML:
 
     // 7. Let targetNavigable be the first return value of applying the rules for choosing a navigable given
     //    targetAttributeValue, subject's node navigable, and noopener.
-    auto target_navigable = document().navigable()->choose_a_navigable(target_attribute_value, noopener).navigable;
+    auto target_navigable = document().navigable()->choose_a_navigable(target_attribute_value, noopener, HTML::ActivateTab::Yes, {}, url_record).navigable;
 
     // 8. If targetNavigable is null, then return.
     if (!target_navigable)
@@ -1095,6 +1143,7 @@ void Element::change_attribute_value(GC::Ref<Attr> attribute_node, Utf16String v
 // https://dom.spec.whatwg.org/#handle-attribute-changes
 void Element::handle_attribute_changes(QualifiedName name, Optional<Utf16String> old_value, Optional<Utf16String> new_value)
 {
+    finish_derpbird_pending_insertion(true);
     // NB: Mutations during a recorded editing command must go through the Editing proxy functions.
     if (auto history = document().editing_history_if_exists())
         history->notify_dom_mutation();
@@ -3099,6 +3148,8 @@ void Element::inserted()
 
 void Element::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor, Node& old_root)
 {
+    if (is_subtree_root == IsSubtreeRoot::Yes)
+        finish_derpbird_pending_insertion(true);
     Base::removed_from(is_subtree_root, old_ancestor, old_root);
 
     // https://html.spec.whatwg.org/multipage/dom.html#render-blocking-mechanism
@@ -3152,6 +3203,8 @@ void Element::unregister_anchor_names_before_leaving_tree_scope(Badge<Node>, Nod
 
 void Element::moved_from(IsSubtreeRoot is_subtree_root, GC::Ptr<Node> old_ancestor)
 {
+    if (is_subtree_root == IsSubtreeRoot::Yes)
+        finish_derpbird_pending_insertion(true);
     Base::moved_from(is_subtree_root, old_ancestor);
 
     // The anchor names an element registers are kept in tree order, which a move changes without changing its style.
@@ -3176,6 +3229,7 @@ void Element::moved_from(IsSubtreeRoot is_subtree_root, GC::Ptr<Node> old_ancest
 
 void Element::children_changed(ChildrenChangedMetadata const& metadata)
 {
+    finish_derpbird_pending_insertion(true);
     Node::children_changed(metadata);
 
     // NB: The style update that flew counted the children as they were when it was sealed, and a child whose

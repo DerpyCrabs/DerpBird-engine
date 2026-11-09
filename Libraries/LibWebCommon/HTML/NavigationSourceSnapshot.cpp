@@ -54,6 +54,9 @@ ErrorOr<void> encode(Encoder& encoder, Web::HTML::NavigationSourceSnapshot const
     TRY(encoder.encode(snapshot.text_directive_user_activation));
     TRY(encoder.encode(snapshot.browsing_context_group_has_multiple_contexts));
     TRY(encoder.encode(snapshot.browsing_context_group_has_remote_contexts));
+    TRY(encoder.encode(snapshot.derpbird_popup_source));
+    TRY(encoder.encode(snapshot.derpbird_popup_top));
+    TRY(encoder.encode(snapshot.derpbird_popunder));
     return {};
 }
 
@@ -69,6 +72,9 @@ ErrorOr<Web::HTML::NavigationSourceSnapshot> decode(Decoder& decoder)
         .text_directive_user_activation = TRY(decoder.decode<bool>()),
         .browsing_context_group_has_multiple_contexts = TRY(decoder.decode<bool>()),
         .browsing_context_group_has_remote_contexts = TRY(decoder.decode<bool>()),
+        .derpbird_popup_source = TRY(decoder.decode<Optional<URL::URL>>()),
+        .derpbird_popup_top = TRY(decoder.decode<Optional<URL::URL>>()),
+        .derpbird_popunder = TRY(decoder.decode<bool>()),
     };
 }
 

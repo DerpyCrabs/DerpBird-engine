@@ -17,6 +17,7 @@ enum class PageInfoType {
     StackingContextTree = 1 << 5,
     AccessibilityTree = 1 << 6,
     DisplayList = 1 << 7,
+    DerpBirdStyleStatus = 1 << 8,
 };
 
 AK_ENUM_BITWISE_OPERATORS(PageInfoType);

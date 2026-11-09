@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/Function.h>
 #include <AK/NonnullOwnPtr.h>
 #include <AK/OwnPtr.h>
 #include <AK/RefCounted.h>
@@ -29,6 +30,10 @@ class WEBVIEW_API BrowsingSession
 public:
     static NonnullRefPtr<BrowsingSession> create(IsPrivate);
     ~BrowsingSession();
+
+    // The Qt value provider drains accepted work and destroys private memory
+    // after the last view/content-process reference releases this session.
+    Function<void()> on_derpbird_values_close;
 
     IsPrivate is_private() const { return m_is_private; }
 

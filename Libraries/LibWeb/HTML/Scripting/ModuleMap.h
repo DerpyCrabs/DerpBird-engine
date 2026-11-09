@@ -19,23 +19,27 @@ namespace Web::HTML {
 
 class ModuleLocationTuple {
 public:
-    ModuleLocationTuple(URL::URL url, Utf16View type)
+    ModuleLocationTuple(URL::URL url, Utf16View type, u64 authority_id = 0)
         : m_url(move(url))
         , m_type(Utf16String::from_utf16(type))
+        , m_authority_id(authority_id)
     {
     }
 
     URL::URL const& url() const { return m_url; }
     Utf16String const& type() const { return m_type; }
 
+    u64 authority_id() const { return m_authority_id; }
+
     bool operator==(ModuleLocationTuple const& other) const
     {
-        return other.url() == m_url && other.type() == m_type;
+        return other.url() == m_url && other.type() == m_type && other.authority_id() == m_authority_id;
     }
 
 private:
     URL::URL m_url;
     Utf16String m_type;
+    u64 m_authority_id;
 };
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#module-map
@@ -52,15 +56,16 @@ public:
 
     // A module map is a map keyed by tuples consisting of a URL record and a string. The URL record is the request URL
     // at which the module was fetched, and the string indicates the type of the module (e.g. "javascript-or-wasm").
+    // DerpBird additionally partitions privileged loads by native insertion authority identity.
     // The module map's values are either a module script or a list of algorithms (that are waiting for the fetch to
     // complete).
     using Entry = Variant<GC::Ref<ModuleScript>, CallbackList>;
 
-    Optional<Entry const&> get(URL::URL const& url, Utf16View type) const;
+    Optional<Entry const&> get(URL::URL const& url, Utf16View type, u64 authority_id = 0) const;
 
-    void set(URL::URL const& url, Utf16View type, CallbackList&&);
-    void append(URL::URL const& url, Utf16View type, CallbackFunction);
-    void complete_fetch(URL::URL const& url, Utf16View type, GC::Ptr<ModuleScript>);
+    void set(URL::URL const& url, Utf16View type, CallbackList&&, u64 authority_id = 0);
+    void append(URL::URL const& url, Utf16View type, CallbackFunction, u64 authority_id = 0);
+    void complete_fetch(URL::URL const& url, Utf16View type, GC::Ptr<ModuleScript>, u64 authority_id = 0);
 
 private:
     virtual void visit_edges(JS::Cell::Visitor&) override;
@@ -76,7 +81,7 @@ template<>
 struct Traits<Web::HTML::ModuleLocationTuple> : public DefaultTraits<Web::HTML::ModuleLocationTuple> {
     static unsigned hash(Web::HTML::ModuleLocationTuple const& tuple)
     {
-        return pair_int_hash(tuple.url().to_byte_string().hash(), tuple.type().hash());
+        return pair_int_hash(pair_int_hash(tuple.url().to_byte_string().hash(), tuple.type().hash()), u64_hash(tuple.authority_id()));
     }
 };
 

@@ -72,17 +72,18 @@ static MutationObserverOptions to_dom_options(Bindings::MutationObserverInit con
 static void invoke_mutation_observer_callback(MutationObserver& mutation_observer, Vector<GC::Root<MutationRecord>>& records)
 {
     auto& callback = mutation_observer.callback();
-    GC::Ref<HTML::EnvironmentSettingsObject> settings = callback.callback_context;
-
-    auto wrapped_records = MUST(JS::Array::create(settings->realm(), 0));
-    auto& wrapper_world = Bindings::host_defined_wrapper_world(settings->realm());
+    auto& realm = callback.associated_realm();
+    auto& wrapper_world = Bindings::host_defined_wrapper_world(realm);
+    if (wrapper_world.is_detached())
+        return;
+    auto wrapped_records = MUST(JS::Array::create(realm, 0));
     for (size_t i = 0; i < records.size(); ++i) {
         auto& record = records.at(i);
         auto property_index = JS::PropertyKey { i };
-        MUST(wrapped_records->create_data_property(property_index, Bindings::wrap(wrapper_world, settings->realm(), GC::Ref { *record })));
+        MUST(wrapped_records->create_data_property(property_index, Bindings::wrap(wrapper_world, realm, GC::Ref { *record })));
     }
 
-    auto wrapped_mutation_observer = Bindings::wrap(wrapper_world, settings->realm(), GC::Ref { mutation_observer });
+    auto wrapped_mutation_observer = Bindings::wrap(wrapper_world, realm, GC::Ref { mutation_observer });
     (void)WebIDL::invoke_callback(callback, wrapped_mutation_observer, WebIDL::ExceptionBehavior::Report, { { wrapped_records, wrapped_mutation_observer } });
 }
 

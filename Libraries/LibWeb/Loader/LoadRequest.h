@@ -24,6 +24,14 @@ namespace Web {
 
 class WEB_API LoadRequest {
 public:
+    struct DerpBirdNavigationState : RefCounted<DerpBirdNavigationState> { bool click_to_load { false }; };
+    RefPtr<DerpBirdNavigationState> derpbird_navigation_state;
+    bool derpbird_approved_navigation { false };
+    bool derpbird_subframe_navigation { false };
+    Optional<URL::URL> derpbird_popup_source {};
+    Optional<URL::URL> derpbird_popup_top {};
+    bool derpbird_popunder { false };
+
     explicit LoadRequest(NonnullRefPtr<HTTP::HeaderList> headers)
         : m_headers(move(headers))
     {

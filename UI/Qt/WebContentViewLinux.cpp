@@ -916,7 +916,7 @@ struct WebContentView::VulkanWindowRenderer final : public QVulkanWindowRenderer
                 static_cast<float>(background_color.red()) / 255.0f,
                 static_cast<float>(background_color.green()) / 255.0f,
                 static_cast<float>(background_color.blue()) / 255.0f,
-                1.0f,
+                static_cast<float>(background_color.alpha()) / 255.0f,
             },
         };
         VkClearDepthStencilValue clear_depth_stencil { 1.0f, 0 };
@@ -1066,6 +1066,18 @@ void WebContentView::create_vulkan_window()
     m_vulkan_window->setVulkanInstance(instance);
     if (auto const& gpu = presentation_gpu(); gpu.has_value())
         m_vulkan_window->setPhysicalDeviceIndex(gpu->physical_device_index);
+    // A software Vulkan WSI can block Qt's UI thread indefinitely in present
+    // when a Wayland tab surface is unmapped (observed with lavapipe). Use the
+    // existing bitmap presentation path for CPU devices; hardware keeps Vulkan.
+    auto devices = m_vulkan_window->availablePhysicalDevices();
+    auto device_index = presentation_gpu().has_value() ? presentation_gpu()->physical_device_index : 0;
+    if (QGuiApplication::platformName() == "wayland" && device_index >= 0 && device_index < devices.size()
+        && devices[device_index].deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+        warnln("DerpBird: using bitmap presentation for software Vulkan on Wayland");
+        delete m_vulkan_window;
+        m_vulkan_window = nullptr;
+        return;
+    }
     m_vulkan_window->setDeviceExtensions(vulkan_dmabuf_device_extensions());
     // NB: Without this, QVulkanWindow destroys its device every time the window is unexposed, which on Wayland happens
     //     whenever the compositor is late with a frame callback, as it often is during a resize.
@@ -1332,32 +1344,34 @@ void WebContentView::update_page_surface(PageSurfaceContent content)
     // Where the frame goes in the view, in device pixels, and the part of the frame that the page surface shows.
     auto bitmap_size = paintable->bitmap_size;
     QRect frame_rect;
-    QRect source;
-    QRect target;
+    QRectF source;
+    QRectF target;
     if (m_scales_frames_to_fit) {
         auto fitted = rect_fitting_frame(bitmap_size, m_viewport_size);
         frame_rect = { fitted.x(), fitted.y(), fitted.width(), fitted.height() };
-        source = { 0, 0, bitmap_size.width(), bitmap_size.height() };
+        source = QRectF(0, 0, bitmap_size.width(), bitmap_size.height());
         target = frame_rect;
     } else {
         // NB: The view can already be smaller than the viewport the page has, and the compositor doesn't clip the
         //     page surface to the browser window.
         auto view_size = size() * m_device_pixel_ratio;
         frame_rect = { 0, 0, min(min(bitmap_size.width(), m_viewport_size.width()), view_size.width()), min(min(bitmap_size.height(), m_viewport_size.height()), view_size.height()) };
-        // NB: Hover-expanded chrome paints in the view over strips of the page, which the page surface would cover.
-        auto left = qRound(m_vertical_tab_overlay_left * m_device_pixel_ratio);
-        auto right = qRound(m_vertical_tab_overlay_right * m_device_pixel_ratio);
-        auto top = qRound(m_bookmarks_bar_overlay_height * m_device_pixel_ratio);
-        source = frame_rect.intersected({ left, top, view_size.width() - left - right, view_size.height() - top });
-        // NB: Qt clips the view to the widgets it is in, such as while the page slides along with a toggling sidebar,
-        //     but the compositor clips the page surface to nothing.
         auto shown = rect_shown_in_window();
-        source &= QRect { qRound(shown.x() * m_device_pixel_ratio), qRound(shown.y() * m_device_pixel_ratio), qRound(shown.width() * m_device_pixel_ratio), qRound(shown.height() * m_device_pixel_ratio) };
+        auto exact_source = QRectF(shown.x() * m_device_pixel_ratio, shown.y() * m_device_pixel_ratio,
+            shown.width() * m_device_pixel_ratio, shown.height() * m_device_pixel_ratio);
+        source = exact_source.intersected(QRectF(0, 0, bitmap_size.width(), bitmap_size.height()));
+        auto logical_insets = QRectF(m_vertical_tab_overlay_left, m_bookmarks_bar_overlay_height,
+            width() - m_vertical_tab_overlay_left - m_vertical_tab_overlay_right, height() - m_bookmarks_bar_overlay_height);
+        source &= QRectF(logical_insets.x() * m_device_pixel_ratio, logical_insets.y() * m_device_pixel_ratio,
+            logical_insets.width() * m_device_pixel_ratio, logical_insets.height() * m_device_pixel_ratio);
         target = source;
     }
 
-    auto to_logical = [&](int device_pixels) { return max(1, qRound(device_pixels / m_device_pixel_ratio)); };
-    auto view_position = mapTo(window(), QPoint { 0, 0 });
+    auto to_logical = [&](qreal device_pixels) { return max(1, qRound(device_pixels / m_device_pixel_ratio)); };
+    // QWidget coordinates exclude Qt's client-side decoration, whereas a Wayland
+    // subsurface is positioned within the complete parent surface.
+    auto margins = parent->frameMargins();
+    auto view_position = mapTo(window(), QPoint { 0, 0 }) + QPoint { margins.left(), margins.top() };
     WaylandPageSurface::Frame frame {
         .shared_image_buffer = *paintable->shared_image_buffer,
         .dmabuf = *dmabuf,
@@ -1367,6 +1381,9 @@ void WebContentView::update_page_surface(PageSurfaceContent content)
         .position = view_position + QPoint { qRound(target.x() / m_device_pixel_ratio), qRound(target.y() / m_device_pixel_ratio) },
         .destination = { to_logical(target.width()), to_logical(target.height()) },
         .has_new_content = content == PageSurfaceContent::MayHaveChanged,
+        .is_opaque = !has_transparent_background(),
+        .above = m_compositing_below && m_compositing_below->m_page_surface && m_compositing_below->m_page_surface->is_showing()
+            ? m_compositing_below->m_page_surface->surface() : nullptr,
     };
 
     // NB: The layout of the browser window changes on screen when it commits next, and so does the position of the page
@@ -1376,6 +1393,7 @@ void WebContentView::update_page_surface(PageSurfaceContent content)
         m_page_surface->set_synchronized(true);
 
     m_page_surface->forget_buffers_except(backing_stores());
+    bool was_showing = m_page_surface->is_showing();
     auto result = m_page_surface->present(*parent, frame);
     if (result == WaylandPageSurface::PresentResult::Failed) {
         m_page_surface_failed = true;
@@ -1400,6 +1418,8 @@ void WebContentView::update_page_surface(PageSurfaceContent content)
     m_page_surface_rect = covered_rect;
     if (result == WaylandPageSurface::PresentResult::Presented)
         m_page_surface_position = frame.position;
+    if (was_showing != m_page_surface->is_showing())
+        emit native_surface_changed();
 }
 
 // The part of the view that the widgets it is in do not clip away, in its coordinates.

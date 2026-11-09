@@ -2370,3 +2370,43 @@ TEST_CASE(exhausted_id_close_queues_the_discard_when_the_write_fails)
     store->flush_dirty_state();
     EXPECT_EQ(select_i64(*database, MUST(String::formatted("SELECT COUNT(*) FROM SessionTabs WHERE id = {};", tab))), 0);
 }
+
+TEST_CASE(derpbird_blank_tab_group_survives_normal_close_and_restart)
+{
+    auto database = create_session_database();
+    SessionTabId parent;
+    SessionTabId child;
+    {
+        auto store = TRY_OR_FAIL(SessionStore::create(*database));
+        auto window = TRY_OR_FAIL(store->window_opened());
+        parent = open_tab(*store, window, "about:blank"sv);
+        child = open_tab(*store, window, "about:blank"sv);
+        TRY_OR_FAIL(store->set_tab_tree_parent(child, parent));
+        EXPECT_EQ(TRY_OR_FAIL(store->tab_tree_parent(child)).value(), parent);
+        TRY_OR_FAIL(store->window_closing({ .window_id = window, .active_tab_index = 1, .closed_at = UnixDateTime::now() }));
+        store->mark_clean_exit();
+    }
+    auto restored = TRY_OR_FAIL(SessionStore::create(*database, SessionLaunchPolicy::Everything));
+    auto windows = restored->take_launch_plan();
+    EXPECT_EQ(windows.size(), 1u);
+    if (windows.is_empty()) return;
+    EXPECT_EQ(windows[0].tabs.size(), 2u);
+    EXPECT_EQ(TRY_OR_FAIL(restored->tab_tree_parent(child)).value(), parent);
+    TRY_OR_FAIL(restored->set_tab_tree_parent(child, {}));
+    EXPECT(!TRY_OR_FAIL(restored->tab_tree_parent(child)).has_value());
+}
+
+TEST_CASE(derpbird_private_tab_groups_do_not_leak_between_sessions)
+{
+    auto first = SessionStore::create();
+    auto window = TRY_OR_FAIL(first->window_opened());
+    auto parent = open_tab(*first, window, "about:blank"sv);
+    auto child = open_tab(*first, window, "about:blank"sv);
+    TRY_OR_FAIL(first->set_tab_tree_parent(child, parent));
+    EXPECT_EQ(TRY_OR_FAIL(first->tab_tree_parent(child)).value(), parent);
+    EXPECT(first->set_tab_tree_parent(child, child).is_error());
+    auto second = SessionStore::create();
+    EXPECT(!TRY_OR_FAIL(second->tab_tree_parent(child)).has_value());
+    TRY_OR_FAIL(first->set_tab_tree_parent(child, {}));
+    EXPECT(!TRY_OR_FAIL(first->tab_tree_parent(child)).has_value());
+}

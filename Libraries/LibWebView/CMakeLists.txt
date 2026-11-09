@@ -96,6 +96,7 @@ set(SOURCES
     WebUI.cpp
     WebUI/BookmarksUI.cpp
     WebUI/CrashReportsUI.cpp
+    WebUI/DerpBirdUI.cpp
     WebUI/DownloadsUI.cpp
     WebUI/HistoryUI.cpp
     WebUI/SettingsUI.cpp
@@ -174,7 +175,7 @@ add_custom_target(generate_build_information DEPENDS ${build_information_stamp})
 ladybird_lib(LibWebView webview EXPLICIT_SYMBOL_EXPORT)
 add_dependencies(LibWebView generate_build_information)
 target_link_libraries(LibWebView PUBLIC LibCompositing LibSandbox LibWebCommon)
-target_link_libraries(LibWebView PRIVATE LibCore LibCrypto LibDatabase LibDevTools LibFileSystem LibGfx LibHTTP LibImageDecoderClient LibIPC LibRequests LibMedia LibMediaClient LibUnicode LibURL LibTextCodec LibThreading SDL3::SDL3)
+target_link_libraries(LibWebView PRIVATE LibRegex LibCore LibCrypto LibDatabase LibDevTools LibFileSystem LibGfx LibHTTP LibImageDecoderClient LibIPC LibRequests LibMedia LibMediaClient LibUnicode LibURL LibTextCodec LibThreading SDL3::SDL3)
 
 if (LINUX)
     # The connect broker asks the audio library where the daemon is before connecting a helper to it.

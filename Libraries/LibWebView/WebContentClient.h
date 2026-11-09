@@ -65,6 +65,7 @@
 #include <LibWebView/Forward.h>
 #include <LibWebView/RequestServerSiteBindings.h>
 #include <LibWebView/StorageAreaRegistry.h>
+#include <LibWebView/WebUI/DerpBirdValueEvents.h>
 #include <LibWebView/WebContentPage.h>
 #include <WebContent/WebContentClientEndpoint.h>
 #include <WebContent/WebContentServerEndpoint.h>
@@ -99,6 +100,15 @@ public:
 
     IsPrivate is_private() const { return m_is_private; }
     BrowsingSession& session() const { return *m_session; }
+
+    ErrorOr<NonnullRefPtr<DerpBirdValueEvents::Reservation>> reserve_derpbird_value_event(Web::PageId, Web::HTML::CrossProcessId, size_t);
+    ErrorOr<u64> send_derpbird_value_event(Web::PageId, Web::HTML::CrossProcessId, ByteBuffer, DerpBirdValueEvents::Completion);
+    void cancel_derpbird_value_events(Web::PageId, Web::HTML::CrossProcessId);
+    Function<void()> on_derpbird_values_close;
+    virtual void did_acknowledge_derpbird_value_event(Web::PageId, Web::HTML::CrossProcessId, u64, bool) override;
+    virtual void publish_derpbird_web_requests(Web::PageId, Web::HTML::CrossProcessId, String, String, u64, JsonValue, bool) override;
+    virtual void derpbird_web_request_event(Web::PageId, Web::HTML::CrossProcessId, String, u64, JsonValue) override;
+    virtual void did_request_derpbird_values(Web::PageId, Web::HTML::CrossProcessId, u64, ByteBuffer) override;
 
     RequestServerSiteBindings& request_server_site_bindings() { return m_request_server_site_bindings; }
     void remove_blob_url_entries();
@@ -308,6 +318,10 @@ private:
     Vector<MonotonicTime> m_webrtc_client_launch_times;
 
     static HashTable<WebContentClient*>& clients();
+    void close_derpbird_value_events();
+    DerpBirdValueEvents& ensure_derpbird_value_events();
+    RefPtr<DerpBirdValueEvents> m_derpbird_value_events;
+
 };
 
 template<CallableAs<IterationDecision, WebContentPage&> Callback>

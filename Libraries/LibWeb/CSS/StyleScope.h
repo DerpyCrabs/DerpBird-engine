@@ -127,6 +127,7 @@ public:
     [[nodiscard]] Optional<DepartedAnimationKeyframes> take_published_animation_keyframes();
 
     void for_each_stylesheet(CascadeOrigin, Function<void(CSS::StyleSheetState&)> const&) const;
+    Vector<RefPtr<StyleSheetState>> const& derpbird_author_style_sheets() const;
     // Has the process keep the rules of the default user agent sheet and index them on a thread of their own, before the
     // first document needing them does, once a task after this one runs.
     static void prepare_user_agent_rules(DOM::Document&);
@@ -164,11 +165,15 @@ public:
     Vector<void const*> m_published_position_try_declarations;
 
     RefPtr<StyleSheetState> m_user_style_sheet;
+    Vector<RefPtr<StyleSheetState>> m_derpbird_procedural_style_sheets;
+    Vector<RefPtr<StyleSheetState>> m_derpbird_author_style_sheets;
+    bool m_derpbird_user_styles_built { false };
+    u64 m_derpbird_user_styles_revision { 0 };
 
     bool m_needs_counter_style_cache_update : 1 { true };
     bool m_is_doing_counter_style_cache_update : 1 { false };
     bool m_sheets_define_counter_styles : 1 { false };
-    bool m_has_published_named_layer_order : 1 { false };
+    bool m_has_published_named_layer_order[4] {};
     // Whether the style engine holds this scope's layer order and keyframes as the rule cache resolved them.
     bool m_has_published_rule_cache : 1 { false };
     u64 m_counter_style_environment_identity { 0 };

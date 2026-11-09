@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibWeb/Page/DerpBirdInsertionAuthority.h>
 #include <AK/Array.h>
 #include <AK/Badge.h>
 #include <AK/Concepts.h>
@@ -188,6 +189,16 @@ class WEB_API Element
     GC_DECLARE_ALLOCATOR(Element);
 
 public:
+    // Native-only, transient permission for the insertion performed by a
+    // granted userscript. Never cloned, reflected as an attribute, or persisted.
+    bool derpbird_userscript_insertion_active() const;
+    void set_derpbird_userscript_insertion_active(bool);
+    RefPtr<DerpBirdInsertionAuthority> derpbird_insertion_authority() const;
+    void set_derpbird_insertion_authority(RefPtr<DerpBirdInsertionAuthority>);
+    bool derpbird_insertion_pending() const;
+    void set_derpbird_insertion_pending(bool);
+    void finish_derpbird_pending_insertion(bool revoke);
+
     virtual ~Element() override;
 
     virtual Node& slottable_as_node() override { return *this; }
@@ -1184,7 +1195,7 @@ inline bool Element::has_class(Utf16FlyString const& class_name, CaseSensitivity
 }
 
 bool is_valid_namespace_prefix(Utf16View);
-bool is_valid_attribute_local_name(Utf16View);
+WEB_API bool is_valid_attribute_local_name(Utf16View);
 bool is_valid_element_local_name(Utf16View const&);
 
 enum class ValidationContext {

@@ -351,7 +351,7 @@ private:
     WindowSettings m_window_settings;
 
     URL::URL m_new_tab_page_url;
-    bool m_restore_previous_session { false };
+    bool m_restore_previous_session { true };
     Vector<String> m_languages;
 
     Appearance m_appearance;

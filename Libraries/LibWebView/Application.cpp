@@ -1,3 +1,6 @@
+#include <LibWeb/Page/DerpBirdWebRequestRules.h>
+#include <LibWebView/WebUI/DerpBirdFilterIncludes.h>
+#include <LibWeb/Page/DerpBirdStyleRule.h>
 /*
  * Copyright (c) 2024, Andrew Kaster <akaster@serenityos.org>
  *
@@ -21,6 +24,7 @@
 #include <LibCore/StandardPaths.h>
 #include <LibCore/StatsLog.h>
 #include <LibCore/System.h>
+#include <LibThreading/Thread.h>
 #include <LibCore/TimeZoneWatcher.h>
 #include <LibCore/Timer.h>
 #include <LibDatabase/Database.h>
@@ -103,6 +107,8 @@
 #    include <signal.h>
 #    include <sys/wait.h>
 #endif
+
+#include <LibWeb/Page/DerpBirdScriptRegistry.h>
 
 namespace WebView {
 
@@ -254,6 +260,7 @@ Application::Application(Optional<ByteString> ladybird_binary_path)
 
 Application::~Application()
 {
+    *m_content_blocker_reload_alive = false;
 #if !defined(AK_OS_WINDOWS)
     // No event loop runs the handlers during teardown, so a signal from here on takes its default action again.
     for (auto handler : m_session_signal_handlers)
@@ -877,18 +884,54 @@ void Application::rebuild_content_blocker_list_paths()
     }
 }
 
-ErrorOr<bool> Application::load_content_blocker_lists()
+struct ContentBlockerLoadResult {
+    String signature;
+    Optional<Core::AnonymousBuffer> changed_buffer;
+};
+
+static ErrorOr<ContentBlockerLoadResult> prepare_content_blocker_lists(Vector<ByteString> const& paths, Vector<ContentBlockerList> const& catalog,
+    ByteString const& directory, String const& custom_filters, Optional<String> const& previous_signature, Optional<Core::AnonymousBuffer> const& previous_buffer)
 {
-    auto custom_filters = m_settings->custom_content_blocker_filters();
-    if (m_browser_options.content_blocker_list_paths.is_empty() && custom_filters.is_empty()) {
-        if (m_content_blocker_list_buffer.has_value() && m_content_blocker_list_buffer->size() == 0)
-            return false;
-        m_content_blocker_list_buffer = TRY(Core::AnonymousBuffer::create_with_size(0));
-        return true;
+    // Policy toggles (enabled/disabled sites) do not change filter source. Avoid
+    // re-reading and serializing every list on the UI thread for those changes.
+    JsonArray inputs;
+    for (auto const& path : paths) {
+        auto status = TRY(Core::File::stat(path));
+        JsonArray stamp;
+        stamp.must_append(TRY(String::from_utf8(path.view())));
+        stamp.must_append(TRY(String::formatted("{}:{}:{}:{}:{}", status.st_dev, status.st_ino, status.st_size, status.st_mtime, status.st_ctime)));
+#if defined(AK_OS_MACOS)
+        stamp.must_append(static_cast<i64>(status.st_mtimespec.tv_nsec));
+        stamp.must_append(static_cast<i64>(status.st_ctimespec.tv_nsec));
+#elif !defined(AK_OS_WINDOWS)
+        stamp.must_append(static_cast<i64>(status.st_mtim.tv_nsec));
+        stamp.must_append(static_cast<i64>(status.st_ctim.tv_nsec));
+#endif
+        inputs.must_append(move(stamp));
+    }
+    // Names and provenance affect attribution/trusted resources, even if the
+    // selected files themselves have not changed.
+    for (auto const& list : catalog) {
+        JsonArray metadata;
+        metadata.must_append(list.identifier);
+        metadata.must_append(list.name);
+        metadata.must_append(list.enabled);
+        metadata.must_append(list.built_in);
+        metadata.must_append(list.url.has_value() ? list.url->serialize() : String {});
+        inputs.must_append(move(metadata));
+    }
+    inputs.must_append(custom_filters);
+    auto input_signature = inputs.serialized();
+    if (previous_signature == input_signature)
+        return ContentBlockerLoadResult { move(input_signature), {} };
+    if (paths.is_empty() && custom_filters.is_empty()) {
+        if (previous_buffer.has_value() && previous_buffer->size() == 0)
+            return ContentBlockerLoadResult { move(input_signature), {} };
+        return ContentBlockerLoadResult { move(input_signature), TRY(Core::AnonymousBuffer::create_with_size(0)) };
     }
 
     Checked<size_t> total_size = 0;
-    for (auto const& path : m_browser_options.content_blocker_list_paths) {
+    for (auto const& path : paths) {
         auto file = TRY(Core::File::open(path, Core::File::OpenMode::Read));
         total_size += TRY(file->size());
         total_size += 1;
@@ -899,27 +942,138 @@ ErrorOr<bool> Application::load_content_blocker_lists()
     if (total_size.has_overflow() || total_size.value() > maximum_combined_content_blocker_list_size)
         return Error::from_string_literal("Content blocker lists are too large");
 
-    auto blocker_list_buffer = TRY(Core::AnonymousBuffer::create_with_size(total_size.value()));
-    auto bytes = Bytes { blocker_list_buffer.data<u8>(), blocker_list_buffer.size() };
-    size_t offset = 0;
-
-    for (auto const& path : m_browser_options.content_blocker_list_paths) {
+    // Keep list text separate from native provenance. Subscription contents
+    // cannot inject a trusted-source marker into another list.
+    JsonArray lists;
+    size_t actual_size = custom_filters.bytes().size();
+    auto chunk = TRY(ByteBuffer::create_uninitialized(64 * KiB));
+    for (auto const& path : paths) {
         auto file = TRY(Core::File::open(path, Core::File::OpenMode::Read));
-        auto file_size = TRY(file->size());
-        TRY(file->read_until_filled(bytes.slice(offset, file_size)));
-        offset += file_size;
-        bytes[offset++] = '\n';
+        ByteBuffer content;
+        while (true) {
+            auto bytes = TRY(file->read_some(chunk.bytes()));
+            if (bytes.is_empty()) break;
+            if (bytes.size() > maximum_content_blocker_list_size - content.size()
+                || bytes.size() > maximum_combined_content_blocker_list_size - actual_size)
+                return Error::from_string_literal("Content blocker lists grew beyond their size limit");
+            TRY(content.try_append(bytes));
+            actual_size += bytes.size();
+        }
+        String label = TRY(String::from_utf8(LexicalPath(path).basename()));
+        bool trusted = false;
+        for (auto const& list : catalog) {
+            if (LexicalPath::join(directory, ByteString::formatted("{}.txt", list.identifier)).string() != path) continue;
+            label = list.name;
+            if (list.built_in && list.url.has_value()) {
+                auto address = list.url->serialize();
+                trusted = address.bytes_as_string_view().starts_with("https://raw.githubusercontent.com/uBlockOrigin/uAssets/"sv);
+            }
+            break;
+        }
+        JsonObject item;
+        item.set("name"sv, move(label));
+        item.set("trusted"sv, trusted);
+        item.set("text"sv, TRY(String::from_utf8(StringView { content.bytes() })));
+        TRY(lists.append(move(item)));
     }
-    custom_filters.bytes().copy_to(bytes.slice(offset));
-    offset += custom_filters.bytes().size();
-    bytes[offset++] = '\n';
-    VERIFY(offset == bytes.size());
+    if (!custom_filters.is_empty()) {
+        JsonObject item;
+        item.set("name"sv, "My filters"sv);
+        item.set("user_owned"sv, true);
+        item.set("trusted"sv, true);
+        item.set("text"sv, custom_filters);
+        TRY(lists.append(move(item)));
+    }
+    JsonObject bundle;
+    bundle.set("derpbirdFilterBundle"sv, 1);
+    bundle.set("lists"sv, move(lists));
+    auto serialized = bundle.serialized();
+    // JSON escaping can expand the bounded raw lists by up to six times.
+    if (serialized.bytes().size() > maximum_combined_content_blocker_list_size * 6)
+        return Error::from_string_literal("Content blocker bundle is too large");
+    auto blocker_list_buffer = TRY(Core::AnonymousBuffer::create_with_size(serialized.bytes().size()));
+    serialized.bytes().copy_to(Bytes { blocker_list_buffer.data<u8>(), blocker_list_buffer.size() });
 
-    if (m_content_blocker_list_buffer.has_value() && m_content_blocker_list_buffer->bytes() == blocker_list_buffer.bytes())
-        return false;
+    if (previous_buffer.has_value() && previous_buffer->bytes() == blocker_list_buffer.bytes())
+        return ContentBlockerLoadResult { move(input_signature), {} };
 
-    m_content_blocker_list_buffer = move(blocker_list_buffer);
+    return ContentBlockerLoadResult { move(input_signature), move(blocker_list_buffer) };
+}
+
+ErrorOr<bool> Application::load_content_blocker_lists()
+{
+    auto result = TRY(prepare_content_blocker_lists(m_browser_options.content_blocker_list_paths, m_settings->content_blocker_lists(),
+        m_content_blocker_lists_directory, m_settings->custom_content_blocker_filters(), m_content_blocker_input_signature, m_content_blocker_list_buffer));
+    m_content_blocker_input_signature = move(result.signature);
+    if (!result.changed_buffer.has_value()) return false;
+    m_content_blocker_list_buffer = result.changed_buffer.release_value();
     return true;
+}
+
+void Application::schedule_content_blocker_reload()
+{
+    if (m_content_blocker_reload_running) return;
+    rebuild_content_blocker_list_paths();
+    m_content_blocker_reload_running = true;
+    auto generation = m_content_blocker_reload_generation;
+    // Only immutable value snapshots cross threads. The lifetime token is read
+    // and invalidated on the main thread; the worker never accesses Application.
+    auto worker = Threading::Thread::construct("Filter lists"sv,
+        [this, alive = m_content_blocker_reload_alive, event_loop = Core::EventLoop::current_weak(), generation,
+            paths = m_browser_options.content_blocker_list_paths, catalog = m_settings->content_blocker_lists(),
+            directory = m_content_blocker_lists_directory, custom = m_settings->custom_content_blocker_filters(),
+            signature = m_content_blocker_input_signature, buffer = m_content_blocker_list_buffer]() mutable -> intptr_t {
+            auto result = prepare_content_blocker_lists(paths, catalog, directory, custom, signature, buffer);
+            auto loop = event_loop->take();
+            if (!loop) return 0;
+            loop->deferred_invoke([this, alive = move(alive), generation, result = move(result)]() mutable {
+                if (!*alive) return;
+                m_content_blocker_reload_running = false;
+                if (generation != m_content_blocker_reload_generation) {
+                    schedule_content_blocker_reload();
+                    return;
+                }
+                if (result.is_error()) {
+                    warnln("Unable to apply content blocker settings: {}", result.error());
+                    return;
+                }
+                auto loaded = result.release_value();
+                m_content_blocker_input_signature = move(loaded.signature);
+                if (!loaded.changed_buffer.has_value()) return;
+                m_content_blocker_list_buffer = loaded.changed_buffer.release_value();
+                WebContentClient::for_each_client([&](WebContentClient& client) {
+                    client.async_set_content_blockers(*m_content_blocker_list_buffer);
+                    return IterationDecision::Continue;
+                });
+                ViewImplementation::for_each_view([](ViewImplementation& view) {
+                    view.notify_content_blocking_changed();
+                    return IterationDecision::Continue;
+                });
+            });
+            return 0;
+        });
+    worker->set_qos(Core::Platform::ThreadQoS::Utility);
+    worker->start();
+    worker->detach();
+    // detach() may race a completed thread, which then still needs joining.
+    if (worker->needs_to_be_joined()) (void)worker->join();
+}
+
+JsonObject Application::content_blocker_list_update_status(StringView identifier) const
+{
+    JsonObject status;
+    auto active = m_active_content_blocker_list_update.has_value() && m_active_content_blocker_list_update->identifier == identifier;
+    auto queued = any_of(m_pending_content_blocker_list_updates, [&](auto const& update) { return update.identifier == identifier; });
+    status.set("state"sv, active ? "updating"sv : queued ? "queued"sv : "idle"sv);
+    if (auto error = m_content_blocker_list_update_errors.get(identifier); error.has_value())
+        status.set("error"sv, *error);
+    return status;
+}
+
+void Application::record_content_blocker_list_update_error(StringView message)
+{
+    if (m_active_content_blocker_list_update.has_value())
+        m_content_blocker_list_update_errors.set(m_active_content_blocker_list_update->identifier, MUST(String::from_utf8(message)));
 }
 
 void Application::start_content_blocker_list_update(ContentBlockerListUpdateTrigger trigger, Optional<StringView> requested_identifier)
@@ -939,7 +1093,8 @@ void Application::start_content_blocker_list_update(ContentBlockerListUpdateTrig
         auto updated_at = content_blocker_list_last_updated_at(list.identifier);
         if (trigger == ContentBlockerListUpdateTrigger::Automatic && updated_at.has_value() && UnixDateTime::now() - *updated_at < AK::Duration::from_seconds(24 * 60 * 60))
             continue;
-        m_pending_content_blocker_list_updates.append({ list.identifier, list.name, *list.url, content_blocker_list_path(list.identifier), trigger });
+        m_content_blocker_list_update_errors.remove(list.identifier);
+        m_pending_content_blocker_list_updates.append({ list.identifier, list.name, *list.url, content_blocker_list_path(list.identifier), trigger, 0, {}, {} });
     }
 
     if (!m_active_content_blocker_list_update.has_value())
@@ -958,6 +1113,12 @@ void Application::start_next_content_blocker_list_update()
         return;
     }
 
+    auto generation = ++m_content_blocker_list_update_generation;
+    auto is_current = [this, generation] {
+        return generation == m_content_blocker_list_update_generation
+            && m_active_content_blocker_list_update.has_value()
+            && !m_content_blocker_list_update_cancelled;
+    };
     m_active_content_blocker_list_update = m_pending_content_blocker_list_updates.take_first();
     auto& update = *m_active_content_blocker_list_update;
 
@@ -966,6 +1127,7 @@ void Application::start_next_content_blocker_list_update()
 
     auto client = request_server_client();
     if (client.is_error()) {
+        record_content_blocker_list_update_error("Cannot start the network service."sv);
         warnln("Unable to launch RequestServer: {}", client.error());
         finish_current_content_blocker_list_update();
         return;
@@ -974,6 +1136,7 @@ void Application::start_next_content_blocker_list_update()
         "GET"sv, update.url, *request_headers, {}, HTTP::CacheMode::NoStore,
         HTTP::Cookie::IncludeCredentials::No);
     if (!m_content_blocker_list_update_request) {
+        record_content_blocker_list_update_error("Cannot start the download."sv);
         warnln("Unable to start update request for {}", update.name);
         finish_current_content_blocker_list_update();
         return;
@@ -988,7 +1151,9 @@ void Application::start_next_content_blocker_list_update()
         return 30 * 1000;
     }();
 
-    auto timeout = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(timeout_ms), [this] {
+    auto timeout = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(timeout_ms), [this, is_current] {
+        if (!is_current()) return;
+        record_content_blocker_list_update_error("Download timed out. The previous list is retained."sv);
         warnln("Content blocker list download timed out");
         stop_current_content_blocker_list_update_and_continue();
     });
@@ -996,14 +1161,15 @@ void Application::start_next_content_blocker_list_update()
     timeout->start();
 
     m_content_blocker_list_update_request->set_unbuffered_request_callbacks(
-        [this](NonnullRefPtr<HTTP::HeaderList> headers, Optional<u32> response_code, Optional<String> const& reason_phrase, Requests::CacheState) {
-            if (m_content_blocker_list_update_cancelled)
+        [this, is_current](NonnullRefPtr<HTTP::HeaderList> headers, Optional<u32> response_code, Optional<String> const& reason_phrase, Requests::CacheState) {
+            if (!is_current())
                 return;
             if (response_code.has_value() && Web::Fetch::Infrastructure::is_redirect_status(*response_code)) {
                 auto update = *m_active_content_blocker_list_update;
                 auto location = headers->get("Location"sv);
                 auto url = location.has_value() ? URL::Parser::basic_parse(*location, update.url) : Optional<URL::URL> {};
-                if (url.has_value() && (url->scheme() == "https"sv || (url->scheme() == "http"sv && update.url.scheme() == "http"sv)) && update.redirect_count < 20) {
+                if (url.has_value() && (url->scheme() == "https"sv || (url->scheme() == "http"sv && update.url.scheme() == "http"sv)) && update.redirect_count < 20
+                    && (!update.include_key.has_value() || DerpBirdFilterIncludes::allowed(*update.include_key, *url))) {
                     update.url = url.release_value();
                     ++update.redirect_count;
                     m_pending_content_blocker_list_updates.prepend(move(update));
@@ -1013,26 +1179,48 @@ void Application::start_next_content_blocker_list_update()
             }
             m_content_blocker_list_update_response_ok = response_code.has_value() && *response_code >= 200 && *response_code < 300;
             if (!m_content_blocker_list_update_response_ok) {
+                record_content_blocker_list_update_error("The server returned an unsuccessful response or an invalid redirect."sv);
                 warnln("Unable to update content blocker list: received HTTP status {} {}", response_code.value_or(0), reason_phrase.value_or(String {}));
                 stop_current_content_blocker_list_update_and_continue();
             }
         },
-        [this](Requests::ResponseData data) {
+        [this, is_current](Requests::ResponseData data) {
+            if (!is_current()) return;
             did_receive_content_blocker_list_update_data(data.bytes());
         },
-        [this](Core::ImmutableBytes data) {
+        [this, is_current](Core::ImmutableBytes data) {
+            if (!is_current()) return;
             did_receive_content_blocker_list_update_data(data.bytes());
         },
-        [this, timeout](u64, Requests::RequestTimingInfo const&, Optional<Requests::NetworkError> network_error) {
+        [this, timeout, is_current](u64, Requests::RequestTimingInfo const&, Optional<Requests::NetworkError> network_error) {
             timeout->stop();
-            VERIFY(m_active_content_blocker_list_update.has_value());
+            if (!is_current()) return;
             if (network_error.has_value()) {
+                record_content_blocker_list_update_error("Network error. The previous list is retained."sv);
                 warnln("Unable to update content blocker list: {}", Requests::network_error_to_string(*network_error));
             } else if (!m_content_blocker_list_update_cancelled && m_content_blocker_list_update_response_ok) {
-                if (auto result = save_content_blocker_list(m_active_content_blocker_list_update->path, m_content_blocker_list_update_payload.bytes()); result.is_error())
-                    warnln("Unable to save content blocker list update: {}", result.error());
-                else
+                auto expand = [&]() -> ErrorOr<void> {
+                    auto update = *m_active_content_blocker_list_update;
+                    if (!update.expansion)
+                        update.expansion = adopt_ref(*new DerpBirdFilterIncludes(update.url));
+                    TRY(update.expansion->accept(update.include_key.value_or(update.url), update.url, StringView { m_content_blocker_list_update_payload.bytes() }));
+                    if (auto next = update.expansion->next(); next.has_value()) {
+                        update.url = *next;
+                        update.include_key = next.release_value();
+                        update.redirect_count = 0;
+                        m_pending_content_blocker_list_updates.prepend(move(update));
+                        return {};
+                    }
+                    auto expanded = TRY(update.expansion->finish());
+                    TRY(save_content_blocker_list(update.path, expanded.bytes()));
+                    m_content_blocker_list_update_errors.remove(update.identifier);
                     m_content_blocker_list_update_had_success = true;
+                    return {};
+                };
+                if (auto result = expand(); result.is_error()) {
+                    record_content_blocker_list_update_error("Cannot parse included lists or save the update. The previous list is retained."sv);
+                    warnln("Unable to expand/save content blocker list update: {}", result.error());
+                }
             }
             finish_current_content_blocker_list_update();
         });
@@ -1045,12 +1233,14 @@ void Application::did_receive_content_blocker_list_update_data(ReadonlyBytes dat
 
     VERIFY(m_content_blocker_list_update_payload.size() <= maximum_content_blocker_list_size);
     if (data.size() > maximum_content_blocker_list_size - m_content_blocker_list_update_payload.size()) {
+        record_content_blocker_list_update_error("The downloaded list exceeds the size limit."sv);
         warnln("Unable to update content blocker list: response exceeds {} bytes", maximum_content_blocker_list_size);
         stop_current_content_blocker_list_update_and_continue();
         return;
     }
 
     if (auto result = m_content_blocker_list_update_payload.try_append(data); result.is_error()) {
+        record_content_blocker_list_update_error("Cannot buffer the downloaded list."sv);
         warnln("Unable to update content blocker list: {}", result.error());
         stop_current_content_blocker_list_update_and_continue();
     }
@@ -1068,6 +1258,7 @@ void Application::stop_current_content_blocker_list_update_and_continue()
 
 void Application::finish_current_content_blocker_list_update()
 {
+    ++m_content_blocker_list_update_generation;
     Core::deferred_invoke([this, request = m_content_blocker_list_update_request] {
         if (m_content_blocker_list_update_request != request)
             return;
@@ -1088,7 +1279,10 @@ ErrorOr<void> Application::save_content_blocker_list(ByteString const& path, Rea
         auto file = TRY(Core::File::open(temporary_path, Core::File::OpenMode::Write));
         TRY(file->write_until_depleted(contents));
     }
-    return FileSystem::move_file(path, temporary_path);
+    TRY(FileSystem::move_file(path, temporary_path));
+    m_content_blocker_input_signature.clear();
+    ++m_content_blocker_reload_generation;
+    return {};
 }
 
 ErrorOr<void> Application::import_local_content_blocker_list(String name, String contents)
@@ -1109,6 +1303,7 @@ ErrorOr<void> Application::import_local_content_blocker_list(String name, String
 
 void Application::remove_content_blocker_list(Badge<SettingsUI>, StringView identifier)
 {
+    m_content_blocker_list_update_errors.remove(identifier);
     if (!m_settings->remove_content_blocker_list(identifier))
         return;
     m_pending_content_blocker_list_updates.remove_all_matching([&](auto const& update) { return update.identifier == identifier; });
@@ -3007,6 +3202,9 @@ void Application::apply_view_options(Badge<ViewImplementation>, ViewImplementati
     view.set_preferred_motion(m_motion);
 
     apply_content_blocking_policy(page);
+    page.async_set_derpbird_web_requests(derpbird_web_request_snapshot(page.traversable()));
+    if (m_derpbird_user_style_sections.has_value())
+        page.async_set_derpbird_user_styles(*m_derpbird_user_style_sections);
 
     page.async_debug_request("set-line-box-borders"sv, m_show_line_box_borders_action->checked() ? "on"sv : "off"sv);
     page.async_debug_request("set-caret-hit-test-debug-overlay"sv, m_show_caret_hit_test_debug_overlay_action->checked() ? "on"sv : "off"sv);
@@ -3014,6 +3212,8 @@ void Application::apply_view_options(Badge<ViewImplementation>, ViewImplementati
     page.async_debug_request("block-pop-ups"sv, m_block_pop_ups_action->checked() ? "on"sv : "off"sv);
     page.async_debug_request("spoof-user-agent"sv, m_user_agent_string);
     page.async_debug_request("navigator-compatibility-mode"sv, m_navigator_compatibility_mode);
+    if (m_derpbird_user_scripts.has_value())
+        page.client().async_set_derpbird_user_scripts(Web::derpbird_scripts_for_context(*m_derpbird_user_scripts, page.client().session().is_private() == IsPrivate::Yes));
 }
 
 bool Application::sites_can_ask_for_location() const
@@ -3234,6 +3434,20 @@ bool Application::has_content_blocking_rules() const
     return m_content_blocker_list_buffer.has_value() && m_content_blocker_list_buffer->size() > 0;
 }
 
+ErrorOr<void> Application::set_derpbird_user_style_sections(JsonValue sections)
+{
+    TRY(Web::DerpBirdStyleSection::decode(sections));
+    m_derpbird_user_style_sections = move(sections);
+    WebContentClient::for_each_client([&](WebContentClient& client) {
+        client.for_each_page([&](WebContentPage& page) {
+            client.async_set_derpbird_user_styles(page.id(), *m_derpbird_user_style_sections);
+            return IterationDecision::Continue;
+        });
+        return IterationDecision::Continue;
+    });
+    return {};
+}
+
 void Application::apply_content_blocking_policy(WebContentPage& page)
 {
     auto disabled_sites = m_settings->content_blocker_disabled_sites().values();
@@ -3248,12 +3462,8 @@ void Application::content_blocker_settings_changed(Badge<ApplicationSettingsObse
 void Application::apply_content_blocker_settings()
 {
     rebuild_content_blocker_list_paths();
-    bool rules_changed = false;
-
-    if (auto result = load_content_blocker_lists(); result.is_error())
-        warnln("Unable to apply content blocker settings: {}", result.error());
-    else
-        rules_changed = result.release_value();
+    ++m_content_blocker_reload_generation;
+    schedule_content_blocker_reload();
 
     auto enabled = content_blocking_enabled();
     auto disabled_sites = m_settings->content_blocker_disabled_sites().values();
@@ -3263,8 +3473,6 @@ void Application::apply_content_blocker_settings()
             client.async_set_content_blocking_policy(page.id(), enabled, disabled_sites);
             return IterationDecision::Continue;
         });
-        if (rules_changed)
-            client.async_set_content_blockers(*m_content_blocker_list_buffer);
         return IterationDecision::Continue;
     });
     ViewImplementation::for_each_view([](ViewImplementation& view) {
@@ -4538,6 +4746,165 @@ void Application::did_disconnect_devtools_client(DevTools::TabDescription const&
 void Application::did_close_devtools_connection()
 {
     m_devtools_client.clear();
+}
+
+JsonValue Application::derpbird_web_request_snapshot(CanonicalTraversable& traversable)
+{
+    JsonArray snapshot;
+    traversable.for_each_in_inclusive_subtree([&](CanonicalNavigable& navigable) {
+        if (!navigable.active_session_history_entry() || !navigable.active_session_history_entry()->document_state->document) return IterationDecision::Continue;
+        auto& document = navigable.active_document();
+        auto const& host = document.host();
+        if (!host || !host->is_open() || document.browsing_context().has_been_discarded()) return IterationDecision::Continue;
+        for (auto const& entry : document.derpbird_web_requests) {
+            auto record = entry.value;
+            record.remove("configuration"sv);
+            snapshot.must_append(move(record));
+        }
+        return IterationDecision::Continue;
+    });
+    return JsonValue { move(snapshot) };
+}
+
+void Application::broadcast_derpbird_web_requests(CanonicalTraversable& traversable)
+{
+    auto snapshot = derpbird_web_request_snapshot(traversable);
+    traversable.for_each_hosting_page([&](WebContentPage& page) {
+        page.async_set_derpbird_web_requests(snapshot);
+    });
+}
+
+bool Application::publish_derpbird_web_requests(WebContentPage& page, CanonicalDocument& document, String const& script, String const& configuration, u64 revision, JsonValue rules, bool removed)
+{
+    auto previous = document.derpbird_web_requests.find(script);
+    if (removed) {
+        if (previous != document.derpbird_web_requests.end()
+            && previous->value.get_string("configuration"sv) == configuration
+            && previous->value.get_u64("revision"sv).value_or(0) <= revision) {
+            document.derpbird_web_requests.remove(previous);
+            broadcast_derpbird_web_requests(page.traversable());
+        }
+        return false;
+    }
+    if (!m_derpbird_user_scripts.has_value()) return false;
+    // The renderer supplies identity, never authority: compare with the installed
+    // normalized definition and derive destination scope from that definition.
+    Optional<JsonObject> installed;
+    for (auto const& item : m_derpbird_user_scripts->as_array().values()) {
+        if (item.as_object().get_string("id"sv) == script && item.serialized() == configuration) {
+            installed = item.as_object();
+            break;
+        }
+    }
+    if (!installed.has_value()) return false;
+    auto decoded = Web::DerpBirdScriptDefinition::decode(*installed);
+    if (decoded.is_error()) return false;
+    auto definition = decoded.release_value();
+    if (!definition.enabled || !definition.runs_in(page.client().session().is_private() == IsPrivate::Yes)) return false;
+    bool eligible = false;
+    page.traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable& navigable) {
+        if (!navigable.active_session_history_entry() || !navigable.active_session_history_entry()->document_state->document) return IterationDecision::Continue;
+        if (&navigable.active_document() != &document) return IterationDecision::Continue;
+        Web::DerpBirdScriptMatchBudget budget;
+        eligible = definition.url_policy.evaluate(document.creation_url(), navigable.is_top_level_traversable(), definition.file_access_granted, budget) == Web::DerpBirdScriptEligibility::Allowed;
+        return IterationDecision::Break;
+    });
+    if (!eligible) return false;
+    auto metadata = installed->get_object("metadata"sv).value();
+    if (revision == 0) {
+        JsonArray initial;
+        if (auto entries = metadata.get_array("entries"sv); entries.has_value()) {
+            for (auto const& entry : entries->values()) {
+                if (!entry.is_object() || entry.as_object().get_string("key"sv) != "webRequest"sv) continue;
+                auto text = entry.as_object().get_string("value"sv);
+                if (!text.has_value()) return false;
+                auto parsed = JsonValue::from_string(*text);
+                if (parsed.is_error()) return false;
+                auto value = parsed.release_value();
+                if (value.is_array()) {
+                    for (auto const& rule : value.as_array().values()) initial.must_append(rule);
+                } else initial.must_append(move(value));
+                if (initial.size() > 128) return false;
+            }
+        }
+        if (JsonValue { move(initial) }.serialized() != rules.serialized()) return false;
+    } else if (definition.grant_none || !definition.grants.contains_slow("GM_webRequest"sv)) return false;
+    if (previous != document.derpbird_web_requests.end()
+        && previous->value.get_string("configuration"sv) == configuration
+        && previous->value.get_u64("revision"sv).value_or(0) >= revision) return false;
+    if (Web::DerpBirdWebRequestRules::compile(rules).is_error()) return false;
+    JsonObject scope;
+    for (auto key : { "matches"sv, "excludeMatches"sv, "includes"sv, "excludes"sv }) scope.set(key, metadata.get(key).value());
+    scope.set("contextMenu"sv, definition.run_at == Web::DerpBirdScriptRunAt::ContextMenu);
+    size_t count = 0, bytes = rules.serialized().byte_count() + scope.serialized().byte_count();
+    page.traversable().for_each_in_inclusive_subtree([&](CanonicalNavigable& navigable) {
+        if (!navigable.active_session_history_entry() || !navigable.active_session_history_entry()->document_state->document) return IterationDecision::Continue;
+        for (auto const& entry : navigable.active_document().derpbird_web_requests) {
+            if (&navigable.active_document() == &document && entry.key == script) continue;
+            ++count;
+            bytes += entry.value.get("rules"sv)->serialized().byte_count() + entry.value.get("scope"sv)->serialized().byte_count();
+        }
+        return IterationDecision::Continue;
+    });
+    if (count >= 4096 || bytes > 8 * 1024 * 1024) return false;
+    JsonObject record;
+    record.set("namespace"sv, document.id().namespace_id);
+    record.set("document"sv, document.id().local_id);
+    record.set("script"sv, script);
+    record.set("configuration"sv, configuration);
+    record.set("revision"sv, revision);
+    record.set("rules"sv, move(rules));
+    record.set("scope"sv, move(scope));
+    document.derpbird_web_requests.set(script, move(record));
+    document.on_derpbird_web_requests_revoke = [weak = page.traversable().make_weak_ptr()] {
+        if (weak) Application::the().broadcast_derpbird_web_requests(static_cast<CanonicalTraversable&>(*weak));
+    };
+    broadcast_derpbird_web_requests(page.traversable());
+    return true;
+}
+
+ErrorOr<void> Application::set_derpbird_user_scripts(JsonValue snapshot)
+{
+    Web::DerpBirdScriptRegistry validated;
+    TRY(validated.replace(snapshot));
+    m_derpbird_user_scripts = move(snapshot);
+    HashTable<CanonicalTraversable*> request_tabs;
+    WebContentClient::for_each_client([&](WebContentClient& client) {
+        client.for_each_page([&](WebContentPage& page) {
+            request_tabs.set(&page.traversable());
+            return IterationDecision::Continue;
+        });
+        return IterationDecision::Continue;
+    });
+    for (auto* tab : request_tabs) {
+        bool changed = false;
+        tab->for_each_in_inclusive_subtree([&](CanonicalNavigable& navigable) {
+            if (!navigable.active_session_history_entry() || !navigable.active_session_history_entry()->document_state->document) return IterationDecision::Continue;
+            auto& records = navigable.active_document().derpbird_web_requests;
+            Vector<String> stale;
+            for (auto const& record : records) {
+                bool retained = false;
+                for (auto const& definition : validated.definitions()) {
+                    if (definition.enabled && definition.id == record.key && record.value.get_string("configuration"sv) == definition.configuration) {
+                        retained = true;
+                        break;
+                    }
+                }
+                if (!retained) stale.append(record.key);
+            }
+            for (auto const& key : stale) { records.remove(key); changed = true; }
+            return IterationDecision::Continue;
+        });
+        if (changed) broadcast_derpbird_web_requests(*tab);
+    }
+    // Revoke host capabilities before publishing the changed registry to renderers.
+    if (on_derpbird_scripts_changed)
+        on_derpbird_scripts_changed(*m_derpbird_user_scripts);
+    WebContentClient::for_each_client([&](WebContentClient& client) {
+        client.async_set_derpbird_user_scripts(Web::derpbird_scripts_for_context(*m_derpbird_user_scripts, client.session().is_private() == IsPrivate::Yes));
+        return IterationDecision::Continue;
+    });
+    return {};
 }
 
 }

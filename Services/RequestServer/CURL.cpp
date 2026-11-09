@@ -11,6 +11,7 @@
 #include <RequestServer/CURL.h>
 #include <RequestServer/Resolver.h>
 #include <openssl/ssl.h>
+#include <openssl/sha.h>
 #include <openssl/x509v3.h>
 #include <string.h>
 
@@ -160,6 +161,22 @@ Optional<ByteString> build_curl_connect_to_entry(DNS::LookupResult const& dns_re
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: Connect-to entry: {}", entry);
 
     return entry;
+}
+
+ByteString policy_connection_host(DNS::LookupResult const& result, StringView host, u16 port)
+{
+    auto identity = build_curl_resolve_list(result, host, port);
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<unsigned char const*>(identity.characters()), identity.length(), digest);
+    StringBuilder name;
+    // Two labels keep each label below the DNS 63-byte limit.
+    name.append("derpbird-"sv);
+    for (size_t i = 0; i < sizeof(digest); ++i) {
+        if (i == 16) name.append('.');
+        name.appendff("{:02x}", digest[i]);
+    }
+    name.append(".invalid"sv);
+    return name.to_byte_string();
 }
 
 Requests::NetworkError curl_code_to_network_error(int code)

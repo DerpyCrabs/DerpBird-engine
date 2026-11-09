@@ -27,6 +27,7 @@ namespace WebView {
 static constexpr auto FIRST_RUN_COMPLETE_KEY = "firstRunComplete"sv;
 static constexpr auto NEW_TAB_PAGE_URL_KEY = "newTabPageURL"sv;
 static constexpr auto RESTORE_PREVIOUS_SESSION_KEY = "restorePreviousSession"sv;
+static constexpr auto SESSION_RESTORE_INITIALIZED_KEY = "derpbirdSessionRestoreInitialized"sv;
 
 static constexpr auto LANGUAGES_KEY = "languages"sv;
 
@@ -405,7 +406,10 @@ Settings Settings::create(ByteString settings_path, Vector<String> platform_lang
             settings.m_new_tab_page_url = parsed_new_tab_page_url.release_value();
     }
 
-    settings.m_restore_previous_session = settings_json.value().get_bool(RESTORE_PREVIOUS_SESSION_KEY).value_or(false);
+    // Existing DerpBird profiles inherited Ladybird's pinned-only startup default.
+    // Migrate it once, then preserve subsequent choices made in settings.
+    if (settings_json.value().get_bool(SESSION_RESTORE_INITIALIZED_KEY).value_or(false))
+        settings.m_restore_previous_session = settings_json.value().get_bool(RESTORE_PREVIOUS_SESSION_KEY).value_or(true);
 
     if (auto languages = settings_json.value().get(LANGUAGES_KEY); languages.has_value())
         settings.m_languages = parse_json_languages(*languages);
@@ -587,6 +591,17 @@ Settings::Settings(ByteString settings_path)
     add_list("fanboyAnnoyances"sv, "Fanboy's Annoyance List"sv, "Blocks pop-ups, social widgets, newsletters, and other annoyances."sv, "https://secure.fanboy.co.nz/fanboy-annoyance.txt"sv);
     add_list("fanboySocial"sv, "Fanboy's Social Blocking List"sv, "Blocks social media widgets and other social content."sv, "https://easylist.to/easylist/fanboy-social.txt"sv);
     add_list("adblockWarningRemoval"sv, "Adblock Warning Removal List"sv, "Blocks warnings aimed at people who use a content blocker."sv, "https://easylist-downloads.adblockplus.org/antiadblockfilters.txt"sv);
+    // Core uBO subscriptions complement EasyList/EasyPrivacy. Keep them in
+    // the native catalog so provenance is not supplied by downloaded text.
+    add_list("ublock-filters"sv, "uBlock filters – Ads"sv, "Advertising and anti-adblock filters."sv, "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/filters.txt"sv);
+    add_list("ublock-privacy"sv, "uBlock filters – Privacy"sv, "Additional tracking protection."sv, "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy.txt"sv);
+    add_list("ublock-badware"sv, "uBlock filters – Badware risks"sv, "Known malicious and deceptive sites."sv, "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/badware.txt"sv);
+    add_list("ublock-unbreak"sv, "uBlock filters – Unbreak"sv, "Compatibility fixes for filtered sites."sv, "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/unbreak.txt"sv);
+    add_list("ublock-quick-fixes"sv, "uBlock filters – Quick fixes"sv, "Rapid fixes for advertising and site breakage."sv, "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/quick-fixes.txt"sv);
+    for (auto& list : m_content_blocker_lists) {
+        if (list.identifier == "easyList"sv || list.identifier == "easyPrivacy"sv || list.identifier.bytes_as_string_view().starts_with("ublock-"sv))
+            list.enabled = true;
+    }
     add_list("abpindo"sv, "ABPindo"sv, "Blocks advertising on Indonesian and Malaysian websites."sv, "https://raw.githubusercontent.com/heradhis/indonesianadblockrules/master/subscriptions/abpindo.txt"sv, ListCategory::Language);
     add_list("abpvn"sv, "ABPVN List"sv, "Blocks advertising on Vietnamese websites."sv, "https://abpvn.com/filter/abpvn-IPl6HE.txt"sv, ListCategory::Language);
     add_list("bulgarianList"sv, "Bulgarian list"sv, "Blocks advertising on Bulgarian websites."sv, "https://stanev.org/abp/adblock_bg.txt"sv, ListCategory::Language);
@@ -616,6 +631,7 @@ JsonValue Settings::serialize_json() const
     settings.set(FIRST_RUN_COMPLETE_KEY, m_first_run_complete);
     settings.set(NEW_TAB_PAGE_URL_KEY, m_new_tab_page_url.serialize());
     settings.set(RESTORE_PREVIOUS_SESSION_KEY, m_restore_previous_session);
+    settings.set(SESSION_RESTORE_INITIALIZED_KEY, true);
 
     JsonObject window_settings;
     if (m_window_settings.position.has_value()) {

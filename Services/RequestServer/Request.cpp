@@ -9,6 +9,7 @@
 #include <AK/Checked.h>
 #include <AK/GenericShorthands.h>
 #include <AK/HashMap.h>
+#include <AK/StringBuilder.h>
 #include <LibCore/File.h>
 #include <LibCore/MimeData.h>
 #include <LibCore/Notifier.h>
@@ -19,6 +20,7 @@
 #include <LibHTTP/HSTS/ParsedHSTSPolicy.h>
 #include <LibHTTP/Status.h>
 #include <LibTextCodec/Decoder.h>
+#include <LibURL/Parser.h>
 #include <RequestServer/AIA.h>
 #include <RequestServer/CURL.h>
 #include <RequestServer/ConnectionFromClient.h>
@@ -440,11 +442,13 @@ NonnullOwnPtr<Request> Request::fetch(
     HTTP::Cookie::IncludeCredentials include_credentials,
     Optional<Requests::RequestTransferLeaseKey> transfer_lease,
     Optional<u32> address_selection_hint,
-    bool notify_on_cache_miss)
+    bool notify_on_cache_miss, bool suppress_response_cookies, u8 query_response_policy)
 {
     auto request = adopt_own(*new Request { request_id, RequestType::Fetch, disk_cache, move(network_isolation_key), cache_mode, client, curl_multi, resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, move(transfer_lease) });
     request->m_address_selection_hint = address_selection_hint;
     request->m_notify_on_cache_miss = notify_on_cache_miss;
+    request->m_suppress_response_cookies = suppress_response_cookies;
+    request->m_query_response_policy = query_response_policy;
     request->process();
 
     return request;
@@ -475,12 +479,14 @@ NonnullOwnPtr<Request> Request::revalidate(
     ByteString method,
     NonnullRefPtr<HTTP::HeaderList> request_headers,
     ByteBuffer request_body,
-    HTTP::Cookie::IncludeCredentials include_credentials)
+    HTTP::Cookie::IncludeCredentials include_credentials, bool suppress_response_cookies, u8 query_response_policy)
 {
     // Revalidation headers must not leak into the initiating request.
     request_headers = HTTP::HeaderList::create(request_headers->headers());
 
     auto request = adopt_own(*new Request { request_id, RequestType::BackgroundRevalidation, disk_cache, move(network_isolation_key), HTTP::CacheMode::Default, client, curl_multi, resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials });
+    request->m_suppress_response_cookies = suppress_response_cookies;
+    request->m_query_response_policy = query_response_policy;
     request->process();
 
     return request;
@@ -573,6 +579,8 @@ NonnullOwnPtr<Request> Request::import(
     request->m_status_code = exported.status_code;
     request->m_reason_phrase = move(exported.reason_phrase);
     request->m_response_headers = HTTP::HeaderList::create(move(exported.response_headers));
+    request->m_canonical_host_names = move(exported.canonical_host_names);
+    request->m_imported_policy_ip_addresses = move(exported.policy_ip_addresses);
     request->m_import = Import {};
     request->m_import->body_fd = exported.body.take_fd();
     request->m_import->status_fd = exported.status.take_fd();
@@ -582,6 +590,8 @@ NonnullOwnPtr<Request> Request::import(
 
 Request::~Request()
 {
+    if (m_type == RequestType::BackgroundRevalidation && m_query_response_policy && m_client->is_open())
+        m_client->async_release_response_header_policy(m_request_id);
     if constexpr (REQUESTSERVER_DEBUG) {
         if (!m_response_buffer.is_eof())
             dbgln("Warning: Request destroyed with buffered data (it's likely that the client disappeared or the request was cancelled)");
@@ -630,7 +640,7 @@ bool Request::notify_retrieved_http_cookie(Badge<ControlConnectionFromClient>, u
         m_appended_cookie_header = true;
     }
 
-    transition_to_state(State::Fetch);
+    transition_to_state(m_request_policy_for_cache ? State::ReadCache : State::Fetch);
     return true;
 }
 
@@ -639,6 +649,22 @@ bool Request::defer_until_response_cookies_and_hsts_policy_are_stored(Function<v
     // Background responses still affect cookies and HSTS.
     if (!first_is_one_of(m_type, RequestType::Fetch, RequestType::BackgroundRevalidation))
         return false;
+
+    if ((m_query_response_policy & 1) && !m_response_policy_done) {
+        if (!m_response_policy_continuation) {
+            m_response_policy_continuation = move(continuation);
+            ++m_response_policy_generation;
+            m_response_policy_timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(30), [this] {
+                complete_response_header_policy(m_response_policy_generation, 24);
+            });
+            m_response_policy_timer->start();
+            m_client->async_query_response_header_policy(m_request_id, m_response_policy_generation, m_type == RequestType::BackgroundRevalidation, m_response_headers->headers(), policy_ip_addresses());
+        }
+        return true;
+    }
+
+    // Cached responses must be filtered, but must not replay cookies or HSTS.
+    if (m_cache_status == CacheStatus::ReadFromCache) return false;
 
     switch (m_response_storage_state) {
     case ResponseStorageState::NotStarted:
@@ -655,7 +681,7 @@ bool Request::defer_until_response_cookies_and_hsts_policy_are_stored(Function<v
     // 15. If includeCredentials is true, then the user agent should parse and store response `Set-Cookie` headers
     //     given request and response.
     Vector<HTTP::Cookie::ParsedCookie> cookies;
-    if (m_include_credentials == HTTP::Cookie::IncludeCredentials::Yes) {
+    if (m_include_credentials == HTTP::Cookie::IncludeCredentials::Yes && !m_suppress_response_cookies) {
         for (auto const& [name, value] : *m_response_headers) {
             if (!name.equals_ignoring_ascii_case("Set-Cookie"sv))
                 continue;
@@ -695,6 +721,26 @@ bool Request::defer_until_response_cookies_and_hsts_policy_are_stored(Function<v
     m_pending_response_storage = PendingResponseStorage { .cookies = move(cookies), .hsts_policy = move(hsts_policy) };
     request_response_storage(*connection);
     return true;
+}
+
+void Request::resolve_response_header_policy(Badge<ConnectionFromClient>, u64 generation, u8 policy)
+{
+    complete_response_header_policy(generation, policy);
+}
+
+void Request::complete_response_header_policy(u64 generation, u8 policy)
+{
+    if (generation != m_response_policy_generation || !m_response_policy_continuation) return;
+    m_response_policy_timer->stop();
+    m_response_policy_done = true;
+    m_suppress_response_cookies = policy & 8;
+    auto continuation = move(m_response_policy_continuation);
+    if (policy & 16) {
+        m_network_error = Requests::NetworkError::Unknown;
+        transition_to_state(State::Error);
+        return;
+    }
+    continuation();
 }
 
 void Request::request_response_storage(ControlConnectionFromClient& connection)
@@ -848,10 +894,23 @@ void Request::handle_fetch_complete(int result_code)
 
 void Request::reset_for_retry()
 {
+    ++m_canonical_policy_generation;
+    if (m_canonical_policy_timer) m_canonical_policy_timer->stop();
+    m_pending_canonical_urls.clear();
+    m_pending_ip_addresses.clear();
     m_response_headers->clear();
     m_reason_phrase.clear();
     m_status_code.clear();
     m_response_storage_state = ResponseStorageState::NotStarted;
+    m_response_policy_done = false;
+    m_request_policy_done = false;
+    m_request_policy_for_cache = false;
+    m_request_policy_pending = false;
+    ++m_request_policy_generation;
+    if (m_request_policy_timer) m_request_policy_timer->stop();
+    ++m_response_policy_generation;
+    m_response_policy_continuation = nullptr;
+    if (m_response_policy_timer) m_response_policy_timer->stop();
 
     if constexpr (REQUESTSERVER_WIRE_DEBUG) {
         wire_stats().remove(this);
@@ -1006,6 +1065,30 @@ void Request::process()
 
 void Request::handle_initial_state()
 {
+    // Materialize defaults before Vary lookup and header filtering, and pass
+    // these same values to curl. Cookie/conditional fields are added later.
+    if (!m_request_headers->contains("Host"sv)) {
+        auto host = m_url.port().has_value() ? ByteString::formatted("{}:{}", m_url.serialized_host(), *m_url.port()) : m_url.serialized_host().to_byte_string();
+        m_request_headers->set({ "Host"sv, host });
+    }
+    if (!m_request_headers->contains("Accept"sv)) m_request_headers->set({ "Accept"sv, "*/*"sv });
+    if (!m_request_headers->contains("Accept-Encoding"sv) || m_generated_accept_encoding) {
+        StringBuilder encodings;
+        if (!m_content_decoding_disabled) {
+            for (auto encoding : { "deflate"sv, "gzip"sv, "br"sv, "zstd"sv }) {
+                if (!curl_supports_content_encoding(encoding)) continue;
+                if (!encodings.is_empty()) encodings.append(", "sv);
+                encodings.append(encoding);
+            }
+        }
+        if (encodings.is_empty()) encodings.append("identity"sv);
+        m_request_headers->set({ "Accept-Encoding"sv, encodings.to_byte_string() });
+        m_generated_accept_encoding = true;
+    }
+    if ((m_method.is_one_of("POST"sv, "PUT"sv, "PATCH"sv, "DELETE"sv) || (!m_request_body.is_empty() && m_method != "HEAD"sv))
+        && !m_request_headers->contains("Content-Length"sv))
+        m_request_headers->set({ "Content-Length"sv, ByteString::number(m_request_body.size()) });
+
     // Check for resource substitution before anything else.
     if (g_resource_substitution_map) {
         if (g_resource_substitution_map->lookup(m_url).has_value()) {
@@ -1028,7 +1111,7 @@ void Request::handle_initial_state()
 
                     if (m_cache_entry_reader.has_value()) {
                         if (m_cache_entry_reader->revalidation_type() == HTTP::CacheEntryReader::RevalidationType::StaleWhileRevalidate)
-                            m_client->start_revalidation_request({}, *m_network_isolation_key, m_method, m_url, m_request_headers, m_request_body, m_include_credentials);
+                            m_client->start_revalidation_request({}, *m_network_isolation_key, m_method, m_url, m_request_headers, m_request_body, m_include_credentials, m_suppress_response_cookies, m_query_response_policy ? Optional<u64> { m_request_id } : Optional<u64> {}, m_query_response_policy);
 
                         if (is_revalidation_request())
                             transition_to_state(State::DNSLookup);
@@ -1132,10 +1215,38 @@ void Request::wait_for_cache_timed_out()
 
 void Request::handle_read_cache_state()
 {
+    // Cached responses still require policy against current cookies and the
+    // generated request headers. Do not evaluate incomplete renderer headers.
+    if ((m_query_response_policy & 4) && !m_request_policy_done) {
+        if (!m_request_policy_for_cache) {
+            m_request_policy_for_cache = true;
+            transition_to_state(State::RetrieveCookie);
+        } else if (!m_request_policy_pending) {
+            query_request_headers();
+        }
+        return;
+    }
+    if (!m_cache_canonical_policy_done) {
+        m_cache_canonical_policy_done = true;
+        // A cached response has no current connection address.
+        m_pending_ip_addresses.clear();
+        m_canonical_host_names = m_cache_entry_reader->canonical_host_names();
+        if (!decode_canonical_hosts(m_canonical_host_names)) {
+            m_network_error = Requests::NetworkError::CacheReadFailed;
+            transition_to_state(State::Error);
+            return;
+        }
+        if ((m_query_response_policy & 2) && !m_pending_canonical_urls.is_empty()) {
+            query_canonical_urls();
+            return;
+        }
+        m_pending_canonical_urls.clear();
+    }
     m_status_code = m_cache_entry_reader->status_code();
     m_reason_phrase = m_cache_entry_reader->reason_phrase();
     m_response_headers = m_cache_entry_reader->response_headers();
     m_cache_status = CacheStatus::ReadFromCache;
+    if (defer_until_response_cookies_and_hsts_policy_are_stored([this] { handle_read_cache_state(); })) return;
 
     transfer_headers_to_client_if_needed();
 
@@ -1279,9 +1390,12 @@ void Request::handle_dns_lookup_state()
         return;
     }
 
+    m_pending_ip_addresses.clear();
     // Avoid leaking hostnames resolved by the proxy.
     m_proxy = proxy_configuration().proxy_for(m_url).copy();
-    if (m_proxy.has_value() && m_proxy->resolves_hostnames()) {
+    if (m_proxy.has_value() && m_proxy->resolves_hostnames()
+        && !IPv4Address::from_string(m_url.serialized_host()).has_value()
+        && !IPv6Address::from_string(m_url.serialized_host()).has_value()) {
         m_dns_result = nullptr;
         continue_after_dns_lookup();
         return;
@@ -1298,7 +1412,14 @@ void Request::handle_dns_lookup_state()
     }
 
     // Use our resolver so alternatives receive the same DNSSEC validation as the origin.
-    auto host = connect_host().to_byte_string();
+    // An Alt-Svc endpoint does not establish the origin's canonical identity.
+    // Check that identity first, then resolve the selected alternative normally.
+    m_resolving_canonical_origin = connect_host() != m_url.serialized_host();
+    resolve_connection_host((m_resolving_canonical_origin ? m_url.serialized_host() : connect_host()).to_byte_string());
+}
+
+void Request::resolve_connection_host(ByteString host)
+{
     auto const& dns_info = DNSInfo::the();
 
     mark_lifecycle_event(this, &WireStats::dns_started_at);
@@ -1318,8 +1439,13 @@ void Request::handle_dns_lookup_state()
                 self.transition_to_state(State::Error);
                 return;
             }
-            self.m_dns_result = move(dns_result);
-            self.continue_after_dns_lookup();
+            // A system resolver can append its second address family later.
+            // Pin exactly the records whose canonical owners we check below.
+            auto snapshot = make_ref_counted<DNS::LookupResult>(DNS::Messages::DomainName::from_string(host));
+            for (auto const& record : dns_result->records())
+                snapshot->add_record(record);
+            self.m_dns_result = move(snapshot);
+            self.check_canonical_urls_before_connect();
         }));
 }
 
@@ -1337,8 +1463,115 @@ u16 Request::connect_port() const
     return m_url.port_or_default();
 }
 
+bool Request::decode_canonical_hosts(StringView names)
+{
+    m_pending_canonical_urls.clear();
+    if (names.length() > 4096) return false;
+    for (auto name : names.split_view('\n')) {
+        if (name.is_empty()) continue;
+        auto parsed = URL::Parser::basic_parse(MUST(String::formatted("https://{}/", name)));
+        if (!parsed.has_value() || !parsed->host().has_value() || parsed->includes_credentials()
+            || !parsed->serialized_host().equals_ignoring_ascii_case(name) || m_pending_canonical_urls.size() >= 16)
+            return false;
+        auto alias = m_url;
+        alias.set_host(*parsed->host());
+        if (!alias.serialized_host().equals_ignoring_ascii_case(m_url.serialized_host()))
+            m_pending_canonical_urls.append(move(alias));
+    }
+    return true;
+}
+
+void Request::check_canonical_urls_before_connect()
+{
+    m_pending_ip_addresses.clear();
+    if (!m_dns_result) {
+        continue_after_dns_lookup();
+        return;
+    }
+    // Check every pinned candidate before curl may select it. Do not use
+    // reverse DNS or cache a connection address with response metadata.
+    if (m_query_response_policy & 8) {
+        for (auto const& address : m_dns_result->cached_addresses()) {
+            if (m_pending_ip_addresses.size() >= 256) {
+                m_network_error = Requests::NetworkError::UnableToResolveHost;
+                transition_to_state(State::Error);
+                return;
+            }
+            m_pending_ip_addresses.append(address.visit([](auto const& value) { return MUST(value.to_string()); }));
+        }
+    }
+    // Alt-Svc destination addresses are checked, but its hostname must not
+    // replace the origin CNAME identity or its cached metadata.
+    if (!m_resolving_canonical_origin && connect_host() != m_url.serialized_host()) {
+        m_pending_canonical_urls.clear();
+        if (!m_pending_ip_addresses.is_empty()) query_canonical_urls();
+        else continue_after_dns_lookup();
+        return;
+    }
+    StringBuilder names;
+    for (auto const& owner : m_dns_result->canonical_address_names()) {
+        auto text = owner.to_canonical_string();
+        auto name = text.view();
+        if (name.ends_with('.')) name = name.substring_view(0, name.length() - 1);
+        if (!name.is_ascii()) {
+            m_network_error = Requests::NetworkError::UnableToResolveHost;
+            transition_to_state(State::Error);
+            return;
+        }
+        names.append(name);
+        names.append('\n');
+    }
+    m_canonical_host_names = MUST(names.to_string());
+    if (!decode_canonical_hosts(m_canonical_host_names)) {
+        m_network_error = Requests::NetworkError::UnableToResolveHost;
+        transition_to_state(State::Error);
+        return;
+    }
+    if (!(m_query_response_policy & 10) || (m_pending_canonical_urls.is_empty() && m_pending_ip_addresses.is_empty())) {
+        m_pending_canonical_urls.clear();
+        continue_after_dns_lookup();
+        return;
+    }
+    query_canonical_urls();
+}
+
+void Request::query_canonical_urls()
+{
+    ++m_canonical_policy_generation;
+    m_canonical_policy_timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), weak_callback(*this, [](auto& self) {
+        self.complete_canonical_url_policy(self.m_canonical_policy_generation, false);
+    }));
+    m_canonical_policy_timer->start();
+    m_client->async_query_canonical_url_policy(m_request_id, m_canonical_policy_generation, m_type == RequestType::BackgroundRevalidation, m_pending_canonical_urls, m_pending_ip_addresses);
+}
+
+void Request::resolve_canonical_url_policy(Badge<ConnectionFromClient>, u64 generation, bool allowed)
+{
+    complete_canonical_url_policy(generation, allowed);
+}
+
+void Request::complete_canonical_url_policy(u64 generation, bool allowed)
+{
+    if (generation != m_canonical_policy_generation || (m_pending_canonical_urls.is_empty() && m_pending_ip_addresses.is_empty()) || (m_state != State::DNSLookup && m_state != State::ReadCache)) return;
+    m_canonical_policy_timer->stop();
+    m_pending_canonical_urls.clear();
+    m_pending_ip_addresses.clear();
+    if (!allowed) {
+        m_network_error = Requests::NetworkError::Unknown;
+        transition_to_state(State::Error);
+        return;
+    }
+    if (m_state == State::ReadCache) handle_read_cache_state();
+    else continue_after_dns_lookup();
+}
+
 void Request::continue_after_dns_lookup()
 {
+    if (m_resolving_canonical_origin) {
+        m_resolving_canonical_origin = false;
+        resolve_connection_host(connect_host().to_byte_string());
+        return;
+    }
     if (first_is_one_of(m_type, RequestType::Fetch, RequestType::BackgroundRevalidation))
         transition_to_state(State::RetrieveCookie);
     else if (m_type == RequestType::Connect && m_connect_cache_level == CacheLevel::CreateConnection)
@@ -1349,8 +1582,9 @@ void Request::continue_after_dns_lookup()
 
 void Request::handle_retrieve_cookie_state()
 {
+    m_request_policy_done = false;
     if (m_include_credentials == HTTP::Cookie::IncludeCredentials::No) {
-        transition_to_state(State::Fetch);
+        transition_to_state(m_request_policy_for_cache ? State::ReadCache : State::Fetch);
         return;
     }
 
@@ -1404,14 +1638,90 @@ void Request::handle_connect_state()
         }
     }
 
+    if ((m_query_response_policy & 8) && m_dns_result && (!m_proxy.has_value() || !m_proxy->resolves_hostnames())) {
+        // CONNECT_TO controls the connection-pool destination, while TLS/SNI
+        // and HTTP retain the original URL. Preserve all approved candidates
+        // for Happy Eyeballs rather than forcing a fresh socket per request.
+        auto policy_host = policy_connection_host(*m_dns_result, connect_host(), connect_port());
+        auto resolve = build_curl_resolve_list(*m_dns_result, policy_host, connect_port());
+        auto target = ByteString::formatted("{}:{}:{}:{}", m_url.serialized_host(), m_url.port_or_default(), policy_host, connect_port());
+        auto* resolve_list = curl_slist_append(nullptr, resolve.characters());
+        auto* target_list = curl_slist_append(nullptr, target.characters());
+        VERIFY(resolve_list && target_list);
+        set_option(CURLOPT_RESOLVE, resolve_list);
+        set_option(CURLOPT_CONNECT_TO, target_list);
+        m_curl_string_lists.append(resolve_list);
+        m_curl_string_lists.append(target_list);
+    }
+
     mark_lifecycle_event(this, &WireStats::curl_added_at);
     auto result = curl_multi_add_handle(m_curl_multi_handle, m_curl_easy_handle);
     VERIFY(result == CURLM_OK);
     m_curl_easy_handle_is_in_multi = true;
 }
 
+String Request::policy_ip_addresses() const
+{
+    if (m_type == RequestType::Imported) return m_imported_policy_ip_addresses;
+    if (!(m_query_response_policy & 8) || !m_dns_result || m_cache_status == CacheStatus::ReadFromCache || m_state == State::ReadCache || m_request_policy_for_cache) return {};
+    StringBuilder result;
+    for (auto const& address : m_dns_result->cached_addresses()) {
+        if (!result.is_empty()) result.append('\n');
+        address.visit([&](auto const& value) { result.append(MUST(value.to_string())); });
+    }
+    return MUST(result.to_string());
+}
+
+void Request::query_request_headers()
+{
+    ++m_request_policy_generation;
+    m_request_policy_pending = true;
+    m_request_policy_timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), weak_callback(*this, [](auto& self) {
+        self.complete_request_header_policy(self.m_request_policy_generation, false);
+    }));
+    m_request_policy_timer->start();
+    m_client->async_query_request_header_policy(m_request_id, m_request_policy_generation, m_type == RequestType::BackgroundRevalidation, m_request_headers->headers(), policy_ip_addresses());
+}
+
+void Request::resolve_request_header_policy(Badge<ConnectionFromClient>, u64 generation, bool allowed)
+{
+    complete_request_header_policy(generation, allowed);
+}
+
+void Request::complete_request_header_policy(u64 generation, bool allowed)
+{
+    if (!m_request_policy_pending || generation != m_request_policy_generation || (m_state != State::Fetch && m_state != State::ReadCache)) return;
+    m_request_policy_pending = false;
+    m_request_policy_timer->stop();
+    if (!allowed) {
+        m_network_error = Requests::NetworkError::Unknown;
+        transition_to_state(State::Error);
+        return;
+    }
+    m_request_policy_done = true;
+    if (m_state == State::ReadCache) handle_read_cache_state();
+    else handle_fetch_state();
+}
+
 void Request::handle_fetch_state()
 {
+    // Persist revalidation validators so Vary can match them.
+    if (is_revalidation_request()) {
+        auto revalidation_attributes = HTTP::RevalidationAttributes::create(m_cache_entry_reader->response_headers());
+        VERIFY(revalidation_attributes.etag.has_value() || revalidation_attributes.last_modified.has_value());
+
+        if (revalidation_attributes.etag.has_value())
+            m_request_headers->set({ "If-None-Match"sv, *revalidation_attributes.etag });
+        if (revalidation_attributes.last_modified.has_value())
+            m_request_headers->set({ "If-Modified-Since"sv, *revalidation_attributes.last_modified });
+    }
+
+    // Evaluate after cookies and validators are attached, before creating a network handle.
+    if ((m_query_response_policy & 4) && !m_request_policy_done) {
+        if (!m_request_policy_pending) query_request_headers();
+        return;
+    }
+
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: DNS lookup successful");
 
     m_curl_easy_handle = curl_easy_init();
@@ -1451,7 +1761,8 @@ void Request::handle_fetch_state()
         set_option(CURLOPT_ACCEPT_ENCODING, "identity");
         set_option(CURLOPT_HTTP_CONTENT_DECODING, 0L);
     } else {
-        set_option(CURLOPT_ACCEPT_ENCODING, ""); // Empty string lets curl define the accepted encodings.
+        auto encoding = m_request_headers->get("Accept-Encoding"sv).value_or("identity"sv);
+        set_option(CURLOPT_ACCEPT_ENCODING, encoding.characters());
     }
 
     set_option(CURLOPT_URL, url_without_credentials(m_url).characters());
@@ -1503,8 +1814,10 @@ void Request::handle_fetch_state()
 
     curl_slist* curl_headers = nullptr;
 
-    if (m_method.is_one_of("POST"sv, "PUT"sv, "PATCH"sv, "DELETE"sv)) {
-        set_option(CURLOPT_POSTFIELDSIZE, m_request_body.size());
+    // OPTIONS and extension methods can carry a body too. Keep this condition
+    // aligned with Content-Length materialization before header policy.
+    if (m_method.is_one_of("POST"sv, "PUT"sv, "PATCH"sv, "DELETE"sv) || (!m_request_body.is_empty() && m_method != "HEAD"sv)) {
+        set_option(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(m_request_body.size()));
         set_option(CURLOPT_POSTFIELDS, m_request_body.data());
 
         // CURLOPT_POSTFIELDS automatically sets the Content-Type header. Tell curl to remove it by setting a blank
@@ -1515,21 +1828,12 @@ void Request::handle_fetch_state()
         set_option(CURLOPT_NOBODY, 1L);
     }
 
-    // Persist revalidation validators so Vary can match them.
-    if (is_revalidation_request) {
-        auto revalidation_attributes = HTTP::RevalidationAttributes::create(m_cache_entry_reader->response_headers());
-        VERIFY(revalidation_attributes.etag.has_value() || revalidation_attributes.last_modified.has_value());
-
-        if (revalidation_attributes.etag.has_value())
-            m_request_headers->set({ "If-None-Match"sv, *revalidation_attributes.etag });
-        if (revalidation_attributes.last_modified.has_value())
-            m_request_headers->set({ "If-Modified-Since"sv, *revalidation_attributes.last_modified });
-    }
-
-    // INTEROP: Like other engines, ask HTTP/1.x servers to keep the connection alive. curl leaves this header out of
-    //          HTTP/2 and HTTP/3 requests, which have no Connection header.
-    if (!m_request_headers->contains("Connection"sv))
-        curl_headers = curl_slist_append(curl_headers, "Connection: keep-alive");
+    // HTTP/1.1 connections are persistent by default; HTTP/2 and HTTP/3 forbid
+    // Connection. Do not synthesize a protocol-dependent field after policy ran.
+    // curl otherwise adds Expect for large POST bodies. Keep the filtered header
+    // set authoritative and avoid an extra 100-continue wait on ordinary uploads.
+    if (!m_request_headers->contains("Expect"sv))
+        curl_headers = curl_slist_append(curl_headers, "Expect:");
 
     // NB: Send each header name once, with the combined value of all headers of that name, as other engines do.
     Vector<StringView> sent_header_names;
@@ -1610,6 +1914,22 @@ void Request::handle_fetch_state()
                 VERIFY_NOT_REACHED();
             }
         }
+    }
+
+    if ((m_query_response_policy & 8) && m_dns_result && (!m_proxy.has_value() || !m_proxy->resolves_hostnames())) {
+        // CONNECT_TO controls the connection-pool destination, while TLS/SNI
+        // and HTTP retain the original URL. Preserve all approved candidates
+        // for Happy Eyeballs rather than forcing a fresh socket per request.
+        auto policy_host = policy_connection_host(*m_dns_result, connect_host(), connect_port());
+        auto resolve = build_curl_resolve_list(*m_dns_result, policy_host, connect_port());
+        auto target = ByteString::formatted("{}:{}:{}:{}", m_url.serialized_host(), m_url.port_or_default(), policy_host, connect_port());
+        auto* resolve_list = curl_slist_append(nullptr, resolve.characters());
+        auto* target_list = curl_slist_append(nullptr, target.characters());
+        VERIFY(resolve_list && target_list);
+        set_option(CURLOPT_RESOLVE, resolve_list);
+        set_option(CURLOPT_CONNECT_TO, target_list);
+        m_curl_string_lists.append(resolve_list);
+        m_curl_string_lists.append(target_list);
     }
 
     mark_lifecycle_event(this, &WireStats::curl_added_at);
@@ -1782,6 +2102,8 @@ ErrorOr<Requests::ExportedRequest> Request::export_response()
         .status_code = m_status_code,
         .reason_phrase = m_reason_phrase,
         .response_headers = m_response_headers->headers(),
+        .canonical_host_names = m_canonical_host_names,
+        .policy_ip_addresses = policy_ip_addresses(),
         .body = move(body),
         .status = move(status),
     };
@@ -2127,6 +2449,16 @@ ErrorOr<void> Request::transfer_to_client(ConnectionFromClient& client, u64 requ
     if (m_state == State::RetrieveCookie)
         handle_retrieve_cookie_state();
 
+    if (!m_pending_canonical_urls.is_empty() || !m_pending_ip_addresses.is_empty()) {
+        ++m_canonical_policy_generation;
+        m_client->async_query_canonical_url_policy(m_request_id, m_canonical_policy_generation, m_type == RequestType::BackgroundRevalidation, m_pending_canonical_urls, m_pending_ip_addresses);
+    }
+    if (m_request_policy_pending) query_request_headers();
+    if (m_response_policy_continuation) {
+        ++m_response_policy_generation;
+        m_client->async_query_response_header_policy(m_request_id, m_response_policy_generation, m_type == RequestType::BackgroundRevalidation, m_response_headers->headers(), policy_ip_addresses());
+    }
+
     // NB: Likewise, a pending storage of the response's cookies and HSTS policy names the previous client and request
     //     IDs, so its acknowledgement would never reach the request, which stays paused until it does. Ask the UI
     //     process again on behalf of the new owner. Storing the same cookies twice changes nothing.
@@ -2205,7 +2537,7 @@ void Request::transfer_headers_to_client_if_needed()
         m_disk_cache->invalidate(*m_disk_cache_partition, m_url);
 
     if (m_cache_entry_writer.has_value()) {
-        if (m_cache_entry_writer->write_status_and_reason(*m_status_code, m_reason_phrase, m_request_headers, m_response_headers).is_error()) {
+        if (m_cache_entry_writer->write_status_and_reason(*m_status_code, m_reason_phrase, m_request_headers, m_response_headers, m_canonical_host_names).is_error()) {
             m_cache_status = CacheStatus::NotCached;
             m_cache_entry_writer.clear();
         } else {
@@ -2265,7 +2597,7 @@ void Request::send_headers_to_client()
     auto cache_state = Requests::CacheState::NotCached;
     if (m_cache_status == CacheStatus::ReadFromCache)
         cache_state = m_cache_entry_was_revalidated ? Requests::CacheState::Validated : Requests::CacheState::Local;
-    m_client->async_headers_became_available(m_request_id, m_response_headers->headers(), m_status_code, m_reason_phrase, cache_state, m_http_version);
+    m_client->async_headers_became_available(m_request_id, m_response_headers->headers(), m_status_code, m_reason_phrase, cache_state, m_http_version, m_canonical_host_names, policy_ip_addresses());
 }
 
 void Request::write_to_disk_cache(ReadonlyBytes bytes)

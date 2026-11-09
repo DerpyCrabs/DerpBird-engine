@@ -166,19 +166,26 @@ public:
         VERIFY(response);
     }
 
-    void start_request(u64 request_id, Optional<URL::URL> target_url = {}, ByteString method = "GET"sv, Vector<HTTP::Header> headers = {}, Optional<HTTP::NetworkIsolationKey> network_isolation_key = {})
+    void start_request(u64 request_id, Optional<URL::URL> target_url = {}, ByteString method = "GET"sv, Vector<HTTP::Header> headers = {}, Optional<HTTP::NetworkIsolationKey> network_isolation_key = {}, bool query_policy = false)
     {
         auto url = target_url.value_or(URL::Parser::basic_parse("http://localhost"sv).release_value());
-        auto message = make<Messages::RequestServer::StartRequest>(request_id, move(method), move(url), move(headers), ByteBuffer {}, HTTP::CacheMode::Default, move(network_isolation_key), HTTP::Cookie::IncludeCredentials::Yes, true, Optional<u32> {}, false, 0, 0);
+        auto message = make<Messages::RequestServer::StartRequest>(request_id, move(method), move(url), move(headers), ByteBuffer {}, HTTP::CacheMode::Default, move(network_isolation_key), HTTP::Cookie::IncludeCredentials::Yes, true, Optional<u32> {}, false, 0, 0, false, query_policy);
         auto response = dispatch(move(message));
         VERIFY(!response);
     }
 
     void websocket_connect(u64 websocket_id, URL::URL url, ByteString origin = "http://localhost"sv, Vector<ByteString> protocols = {}, Vector<HTTP::Header> headers = {})
     {
-        auto message = make<Messages::RequestServer::WebsocketConnect>(websocket_id, move(url), Optional<HTTP::NetworkIsolationKey> {}, move(origin), move(protocols), Vector<ByteString> {}, move(headers));
+        auto message = make<Messages::RequestServer::WebsocketConnect>(websocket_id, move(url), Optional<HTTP::NetworkIsolationKey> {}, move(origin), move(protocols), Vector<ByteString> {}, move(headers), false);
         auto response = dispatch(move(message));
         VERIFY(!response);
+    }
+
+    size_t retained_policies = 0;
+    size_t completed_requests = 0;
+    void resolve_policy(u64 request_id, u64 generation, bool suppress, bool background)
+    {
+        VERIFY(!dispatch(make<Messages::RequestServer::ResolveResponseHeaderPolicy>(request_id, generation, static_cast<u8>(suppress ? 8 : 0), background)));
     }
 
     template<typename MessageType>
@@ -235,6 +242,8 @@ private:
     {
         (void)m_remote_transport->read_as_many_messages_as_possible_without_blocking([&](auto&& raw_message) {
             auto message = MUST(RequestClientEndpoint::decode_message(raw_message.bytes.bytes(), raw_message.attachments));
+            if (message->message_id() == Messages::RequestClient::RetainResponseHeaderPolicy::static_message_id()) ++retained_policies;
+            if (message->message_id() == Messages::RequestClient::RequestFinished::static_message_id()) ++completed_requests;
             if (!result && message->message_id() == MessageType::static_message_id())
                 result = message.template release_nonnull<MessageType>();
         });
@@ -885,4 +894,50 @@ TEST_CASE(background_revalidation_stores_response_cookies)
 
     control.stored_response_cookies_and_hsts_policy(connection.client_id(), storage_request->request_id(), storage_request->store_request_id());
     EXPECT(control.is_open());
+}
+
+
+TEST_CASE(background_revalidation_queries_current_response_cookie_policy)
+{
+    for (bool suppress : { false, true }) {
+        TestServer server;
+        TestControlConnection control { server };
+        auto cache_root = LexicalPath::join(Core::StandardPaths::tempfile_directory(), ByteString::formatted("Ladybird-DerpBirdPolicy-{}-{}", Core::System::getpid(), suppress));
+        ScopeGuard remove_cache = [&] { (void)FileSystem::remove(cache_root.string(), FileSystem::RecursionMode::Allowed); };
+        auto disk_cache = MUST(HTTP::DiskCache::create(HTTP::DiskCache::Mode::Testing, cache_root)).release_value();
+        TestConnection connection { server, disk_cache };
+        RevalidatingServer http_server;
+        Vector<HTTP::Header> headers { { ByteString { HTTP::TEST_CACHE_ENABLED_HEADER }, "1"sv } };
+        HTTP::NetworkIsolationKey key { .top_level_site = "http://localhost"_utf16, .frame_site = "http://localhost"_utf16 };
+        connection.start_request(0, http_server.url(), "GET"sv, headers, key, true);
+        auto cookie = control.wait_for_cookie_request(server.event_loop);
+        control.retrieve_http_cookie(connection.client_id(), 0, RequestServer::RequestType::Fetch, cookie->cookie_request_id());
+        auto first = connection.take_client_message<Messages::RequestClient::QueryResponseHeaderPolicy>(server.event_loop);
+        EXPECT(!first->background());
+        connection.resolve_policy(first->request_id(), first->generation(), !suppress, false);
+        EXPECT(!connection.take_client_message<Messages::RequestClient::RequestFinished>(server.event_loop)->network_error().has_value());
+        connection.start_request(1, http_server.url(), "GET"sv, headers, key, true);
+        // The cached foreground response has its own current-header policy gate.
+        auto cached_policy = connection.take_client_message<Messages::RequestClient::QueryResponseHeaderPolicy>(server.event_loop);
+        EXPECT(!cached_policy->background());
+        EXPECT_EQ(cached_policy->request_id(), 1u);
+        connection.resolve_policy(cached_policy->request_id(), cached_policy->generation(), false, false);
+        EXPECT(!connection.take_client_message<Messages::RequestClient::RequestFinished>(server.event_loop)->network_error().has_value());
+        auto lookup = control.wait_for_cookie_request(server.event_loop);
+        EXPECT_EQ(lookup->request_type(), RequestServer::RequestType::BackgroundRevalidation);
+        control.retrieve_http_cookie(connection.client_id(), lookup->request_id(), lookup->request_type(), lookup->cookie_request_id());
+        auto policy = connection.take_client_message<Messages::RequestClient::QueryResponseHeaderPolicy>(server.event_loop);
+        EXPECT(policy->background());
+        EXPECT_EQ(connection.retained_policies, 1u);
+        EXPECT_EQ(connection.completed_requests, 2u);
+        connection.resolve_policy(policy->request_id(), policy->generation(), suppress, true);
+        if (!suppress) {
+            auto storage = control.wait_for_storage_request(server.event_loop);
+            EXPECT_EQ(storage->cookies().size(), 1u);
+            control.stored_response_cookies_and_hsts_policy(connection.client_id(), storage->request_id(), storage->store_request_id());
+        }
+        // A suppressed write must finish without waiting for a UI cookie commit.
+        auto released = connection.take_client_message<Messages::RequestClient::ReleaseResponseHeaderPolicy>(server.event_loop);
+        EXPECT_EQ(released->background_request_id(), policy->request_id());
+    }
 }

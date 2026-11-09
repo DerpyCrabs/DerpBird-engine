@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <UI/Qt/DerpBirdValueHost.h>
+#include <UI/Qt/DerpBirdScriptTabHost.h>
+#include <UI/Qt/DerpBirdChrome.h>
+#include <UI/Qt/DerpBirdCredentialManager.h>
+#include <UI/Qt/DerpBirdStyleStore.h>
+#include <LibWebView/Profile.h>
 #include <LibCore/ArgsParser.h>
 #include <LibURL/InternalURLs.h>
 #include <LibURL/URL.h>
@@ -31,6 +37,7 @@
 #include <UI/Qt/Menu.h>
 #include <UI/Qt/PictureInPictureWindow.h>
 #include <UI/Qt/PlainText.h>
+#include <UI/Qt/DerpBirdScriptStore.h>
 #include <UI/Qt/ProcessManagerWindow.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/Tab.h>
@@ -611,9 +618,23 @@ public:
 };
 #endif
 
+ErrorOr<DerpBirdStyleStore*> Application::derpbird_style_store()
+{
+    if (!m_derpbird_style_store) {
+        auto path = QString::fromUtf8(profile().paths().data.characters()) + "/DerpBirdStyles.json";
+        auto store = make<DerpBirdStyleStore>(move(path));
+        TRY(store->load());
+        TRY(set_derpbird_user_style_sections(store->enabled_sections()));
+        m_derpbird_style_store = move(store);
+    }
+    return m_derpbird_style_store.ptr();
+}
+
 Application::Application() = default;
 Application::~Application()
 {
+    m_derpbird_credentials = nullptr;
+    m_derpbird_values = nullptr;
     // NB: A run stopped by a signal leaves its windows open for the next launch to recover. Their pages must still go
     //     before the QApplication does, since the processes torn down after it end their navigations, which updates
     //     their widgets.
@@ -711,7 +732,38 @@ Core::EventLoop& Application::create_platform_event_loop()
         static_cast<EventLoopImplementationQt&>(event_loop.impl()).set_main_loop();
     }
 
+    m_derpbird_values = make<DerpBirdValueHost>(*this);
+    m_derpbird_values->tabs.on_open = open_derpbird_script_tab;
+    m_derpbird_values->window_action = perform_derpbird_script_window_action;
+    m_derpbird_values->notifications.highlight = [](WebView::WebContentPage& page) {
+        for (auto* widget : QApplication::topLevelWidgets()) {
+            auto* window = as_if<BrowserWindow>(widget);
+            if (!window) continue;
+            window->for_each_tab([&](Tab& tab) {
+                if (&tab.view().page() == &page && window->current_tab() != &tab) {
+                    tab.request_attention();
+                    if (window->derpbird_chrome()) window->derpbird_chrome()->queue_snapshot();
+                }
+            });
+        }
+    };
+    m_derpbird_values->commands.on_change = [] {
+        for (auto* widget : QApplication::topLevelWidgets())
+            if (auto* window = as_if<BrowserWindow>(widget); window && window->derpbird_chrome())
+                window->derpbird_chrome()->queue_snapshot();
+    };
     return event_loop;
+}
+
+JsonArray Application::derpbird_script_commands(WebView::WebContentPage const& page, Optional<Web::HTML::CrossProcessId> clicked_document)
+{
+    return m_derpbird_values ? m_derpbird_values->list_commands(page, clicked_document) : JsonArray {};
+}
+
+ErrorOr<void> Application::invoke_derpbird_script_command(WebView::WebContentPage const& page, String const& id, JsonObject const& event, Optional<Web::HTML::CrossProcessId> clicked_document)
+{
+    if (!m_derpbird_values) return Error::from_string_literal("Userscript host is unavailable");
+    return m_derpbird_values->invoke_command(page, id, event, clicked_document);
 }
 
 NonnullOwnPtr<WebView::MicrophoneAuthorizer> Application::create_microphone_authorizer()
@@ -1295,7 +1347,12 @@ void Application::finish_quit()
     for (auto* window : windows.in_reverse())
         window->close();
 
-    QApplication::quit();
+    m_derpbird_values->shutdown([this] {
+        if (m_derpbird_credentials)
+            MUST(m_derpbird_credentials->close([] { QApplication::quit(); }));
+        else
+            QApplication::quit();
+    });
 }
 
 void Application::cancel_quit()
@@ -2046,4 +2103,33 @@ DEFINE_APP_MENU_GETTER(QAction, zoom_out_action);
 DEFINE_APP_MENU_GETTER(QAction, reset_zoom_action);
 DEFINE_APP_MENU_GETTER(QAction, quit_action);
 
+ErrorOr<DerpBirdScriptStore*> Application::derpbird_script_store()
+{
+    if (!m_derpbird_script_store) {
+        auto path = QString::fromUtf8(profile().paths().data.characters()) + "/DerpBirdScripts.json";
+        auto store = make<DerpBirdScriptStore>(move(path));
+        TRY(store->load());
+        TRY(set_derpbird_user_scripts(JsonValue { store->items() }));
+        m_derpbird_script_store = move(store);
+    }
+    return m_derpbird_script_store.ptr();
+}
+
+}
+
+namespace Ladybird {
+void Application::derpbird_credentials_request(JsonValue const& request, bool is_private, Function<void(ErrorOr<JsonValue>)> completion)
+{
+    if (is_private || profile().is_temporary() || m_quit_is_finishing) {
+        completion(Error::from_string_literal("Password management requires a regular persistent profile"));
+        return;
+    }
+    if (!m_derpbird_credentials) {
+        auto identity = WebView::Profile::routing_identifier(profile().paths().identity);
+        auto directory = QString::fromUtf8(profile().paths().data.characters()) + "/Credentials";
+        m_derpbird_credentials = make<DerpBirdCredentialManager>(move(directory), MUST(String::from_utf8(identity.view())));
+    }
+    auto result = m_derpbird_credentials->dispatch(request, is_private, completion);
+    if (result.is_error()) completion(result.release_error());
+}
 }

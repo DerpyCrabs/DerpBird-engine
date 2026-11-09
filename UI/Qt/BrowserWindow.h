@@ -39,6 +39,7 @@ class TabBarButton;
 class WebContentView;
 class BrowserWindow;
 class DevToolsBanner;
+class DerpBirdChrome;
 
 class ExitFullscreenButton : public QPushButton {
     Q_OBJECT
@@ -150,6 +151,8 @@ public:
     BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window = IsPopupWindow::No, WebView::IsPrivate = WebView::IsPrivate::No, Tab* parent_tab = nullptr, Optional<WebView::CanonicalTraversable&> traversable = {}, Optional<WebView::SessionWindowId> restored_session_window_id = {});
     virtual ~BrowserWindow() override;
 
+    DerpBirdChrome* derpbird_chrome() const { return m_derpbird_chrome; }
+
     WebContentView& view() const { return m_current_tab->view(); }
     WebView::IsPrivate is_private() const { return m_is_private; }
     WebView::BrowsingSession& session() const { return *m_session; }
@@ -256,6 +259,7 @@ public slots:
     void exit_fullscreen();
 
 private:
+    DerpBirdChrome* m_derpbird_chrome { nullptr };
     bool close_tab(int index, WebView::SessionStore::KeepForReopening);
     virtual bool event(QEvent*) override;
     virtual bool eventFilter(QObject*, QEvent*) override;
@@ -351,6 +355,7 @@ private:
     WindowCloseCoordinator m_window_close_coordinator;
     Function<void(bool approved)> m_window_close_preflight_on_complete;
     bool m_window_close_approved { false };
+    bool m_window_close_accepted { false };
 
     ExitFullscreenButton* m_exit_button { nullptr };
     FullscreenMode* m_fullscreen_mode { nullptr };

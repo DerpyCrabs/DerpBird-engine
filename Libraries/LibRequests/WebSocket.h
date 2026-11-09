@@ -12,6 +12,8 @@
 #include <AK/Function.h>
 #include <AK/RefCounted.h>
 #include <AK/WeakPtr.h>
+#include <AK/Vector.h>
+#include <LibURL/URL.h>
 
 namespace Requests {
 
@@ -58,6 +60,7 @@ public:
     void send(StringView text_message);
     void close(u16 code = 1005, ByteString reason = {});
 
+    Function<bool(Vector<URL::URL> const&, Vector<String> const&)> canonical_url_policy;
     Function<void()> on_open;
     Function<void(Message)> on_message;
     Function<void(Error)> on_error;

@@ -23,6 +23,7 @@ static constexpr u32 INDEX_SCHEMA_BASELINE_VERSION = 1u;
 static constexpr u32 INDEX_SCHEMA_PARTITIONED_CACHE_KEYS_VERSION = 2u;
 static constexpr u32 INDEX_SCHEMA_VARY_KEY_VERSION = 3u;
 static constexpr u32 INDEX_SCHEMA_RESPONSES_ONLY_VERSION = 4u;
+static constexpr u32 INDEX_SCHEMA_CANONICAL_PROVENANCE_VERSION = 5u;
 
 // Persist full-range hashes as signed bit patterns; keys are only compared for equality.
 static i64 encode_cache_key_for_database(u64 key)
@@ -126,7 +127,7 @@ static void log_orphaned_disk_cache_entries(Database::Database& database)
 // a migration here without invalidating the cache entries on disk. Entry files embed
 // CACHE_VERSION in their headers and are validated when read, so an entry format break must
 // append a migration that deletes the index rows referencing the now-unreadable entries.
-static_assert(CACHE_VERSION == 8, "Bumping CACHE_VERSION requires appending a CacheIndex migration that deletes the index rows referencing the old entry format");
+static_assert(CACHE_VERSION == 9, "Bumping CACHE_VERSION requires appending a CacheIndex migration that deletes the index rows referencing the old entry format");
 
 ErrorOr<Database::MigrationOutcome> CacheIndex::migrate_schema(Database::Database& database, Database::MigrationMode mode)
 {
@@ -181,6 +182,18 @@ ErrorOr<Database::MigrationOutcome> CacheIndex::migrate_schema(Database::Databas
                 for_each_cache_entry_file(database, [](LexicalPath const& cache_entry) {
                     if (cache_entry.basename().contains('.'))
                         (void)FileSystem::remove(cache_entry.string(), FileSystem::RecursionMode::Disallowed);
+                });
+                return {};
+            },
+        },
+        {
+            // Format9 records DNS provenance. Old bodies cannot be rechecked
+            // against canonical filters, so retire both their rows and files.
+            .version = INDEX_SCHEMA_CANONICAL_PROVENANCE_VERSION,
+            .sql = "DELETE FROM CacheIndex;"sv,
+            .backfill = [](Database::Database& database) -> ErrorOr<void> {
+                for_each_cache_entry_file(database, [](LexicalPath const& entry) {
+                    (void)FileSystem::remove(entry.string(), FileSystem::RecursionMode::Disallowed);
                 });
                 return {};
             },

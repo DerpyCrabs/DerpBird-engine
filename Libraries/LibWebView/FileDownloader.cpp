@@ -130,7 +130,9 @@ struct FileDownloader::ActiveDownload {
     bool stopped { false };
     URL::URL effective_url;
     u32 redirect_count { 0 };
+    RefPtr<HTTP::HeaderList> custom_request_headers;
     bool can_issue_own_requests { false };
+    bool resumable_producer { false };
     bool can_restart_from_zero { false };
     DownloadRangeSupport range_support;
     bool segmentation_abandoned { false };
@@ -212,7 +214,7 @@ static String status_to_error_string(Optional<Requests::NetworkError> const& net
     return MUST(String::formatted("Received error response code {} while downloading file", *response_code));
 }
 
-u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, LexicalPath destination, MayReplaceDestination may_replace_destination)
+u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, LexicalPath destination, MayReplaceDestination may_replace_destination, RefPtr<HTTP::HeaderList> request_headers)
 {
     auto download_id = start_download(is_private, url, move(destination), {}, may_replace_destination);
     auto* active = active_download(download_id);
@@ -221,6 +223,7 @@ u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, Lex
 
     active->can_issue_own_requests = true;
     active->can_restart_from_zero = true;
+    active->custom_request_headers = move(request_headers);
     start_download_request(download_id, url);
 
     return download_id;
@@ -240,6 +243,9 @@ void FileDownloader::start_download_request(u64 download_id, URL::URL const& url
     //        originally fetch the image in WebContent.
     auto request_headers = HTTP::HeaderList::create();
     request_headers->set({ "User-Agent"sv, Web::default_user_agent });
+    if (active->custom_request_headers) {
+        for (auto const& header : active->custom_request_headers->headers()) request_headers->set(header);
+    }
 
     auto client = Application::request_server_client(download->is_private);
     if (client.is_error()) {
@@ -280,6 +286,9 @@ void FileDownloader::follow_download_redirect(u64 download_id, HTTP::HeaderList 
         return;
     }
 
+    // Fetch-style credential stripping is permanent across this redirect chain.
+    if (active->custom_request_headers && !active->effective_url.origin().is_same_origin(redirect_url->origin()))
+        active->custom_request_headers->delete_("Authorization"sv);
     stop_segment_request(*active, 0);
 
     start_download_request(download_id, redirect_url.release_value());
@@ -619,6 +628,9 @@ void FileDownloader::start_segment_request(u64 download_id, size_t segment_index
 
     auto request_headers = HTTP::HeaderList::create();
     request_headers->set({ "User-Agent"sv, Web::default_user_agent });
+    if (active->custom_request_headers) {
+        for (auto const& header : active->custom_request_headers->headers()) request_headers->set(header);
+    }
     auto range = segment.end_offset == NumericLimits<u64>::max()
         ? ByteString::formatted("bytes={}-", segment.next_offset)
         : ByteString::formatted("bytes={}-{}", segment.next_offset, segment.end_offset);
@@ -999,6 +1011,16 @@ bool FileDownloader::has_unresumable_downloads() const
     return false;
 }
 
+void FileDownloader::enable_producer_pause(u64 id)
+{
+    auto* download = mutable_download_or_null(id);
+    auto* active = active_download(id);
+    if (!download || !active || active->can_issue_own_requests) return;
+    active->resumable_producer = true;
+    download->can_resume = true;
+    notify_download_updated(*download);
+}
+
 void FileDownloader::append_download_data(u64 id, ReadonlyBytes bytes)
 {
     append_segment_data(id, 0, bytes);
@@ -1256,6 +1278,7 @@ void FileDownloader::resume_download(u64 id)
 
     auto size_or_error = active->file->size();
     if (size_or_error.is_error() || size_or_error.value() < required_size) {
+        if (active->resumable_producer) { fail_download(id, "The partial Blob file is no longer usable"_string); return; }
         download->status = DownloadStatus::InProgress;
         restart_download_from_zero(id, "The partially downloaded file is no longer usable"_string);
         return;
@@ -1278,6 +1301,11 @@ void FileDownloader::resume_download(u64 id)
     download->status = DownloadStatus::InProgress;
     download->error = {};
     active->rate_sample_time = {};
+    if (active->resumable_producer) {
+        // The original Blob still owns the next byte. Never issue a GET for its document URL.
+        notify_download_updated(*download);
+        return;
+    }
 
     for (size_t i = 0; i < active->segments.size(); ++i) {
         auto& segment = active->segments[i];
@@ -1331,7 +1359,28 @@ void FileDownloader::adopt_download_store(Badge<Application>, DownloadStore& dow
 
     m_next_download_id = max(m_next_download_id, static_cast<u64>(download_store.maximum_download_id()) + 1);
 
+    for (auto const& record : download_store.download_history()) {
+        auto url = URL::Parser::basic_parse(record.url);
+        LexicalPath destination { record.destination.to_byte_string() };
+        if (!url.has_value() || !destination.is_absolute()) continue;
+        Download download {
+            .id = static_cast<u64>(record.id),
+            .url = url.release_value(),
+            .destination = move(destination),
+            .status = static_cast<DownloadStatus>(record.status),
+            .downloaded_size = static_cast<u64>(record.downloaded_size),
+            .total_size = {},
+            .error = {},
+            .bytes_per_second = {},
+            .created_time = record.created_time,
+        };
+        if (record.total_size >= 0) download.total_size = static_cast<u64>(record.total_size);
+        if (!record.error.is_empty()) download.error = record.error;
+        download.created_time = record.created_time;
+        m_downloads.append(move(download));
+    }
     restore_persisted_downloads();
+    quick_sort(m_downloads, [](auto const& a, auto const& b) { return a.id < b.id; });
 }
 
 void FileDownloader::persist_download_snapshot(u64 id, PersistUrgency urgency)
@@ -1346,7 +1395,9 @@ void FileDownloader::persist_download_snapshot(u64 id, PersistUrgency urgency)
     if (!download || !active)
         return;
 
-    if (download->is_private == IsPrivate::Yes)
+    // Custom headers may contain credentials: never persist them, or restore a
+    // transfer without the request context that selected its representation.
+    if (download->is_private == IsPrivate::Yes || active->custom_request_headers || active->resumable_producer)
         return;
 
     if (!download->can_resume || !download->total_size.has_value() || !status_is_active(download->status))
@@ -1718,6 +1769,21 @@ void FileDownloader::notify_download_added(Download const& download)
 
 void FileDownloader::notify_download_updated(Download const& download)
 {
+    static_assert(static_cast<u8>(DownloadStatus::Completed) == 2);
+    static_assert(static_cast<u8>(DownloadStatus::Canceled) == 3);
+    static_assert(static_cast<u8>(DownloadStatus::Failed) == 4);
+    // Persist metadata once at terminal transitions, never progress ticks,
+    // private transfers, request headers, or live producer capabilities.
+    if (m_download_store && download.is_private == IsPrivate::No && !status_is_active(download.status)
+        && download.id <= static_cast<u64>(NumericLimits<i64>::max())
+        && download.downloaded_size <= static_cast<u64>(NumericLimits<i64>::max())
+        && (!download.total_size.has_value() || *download.total_size <= static_cast<u64>(NumericLimits<i64>::max()))) {
+        m_download_store->save_history({
+            static_cast<i64>(download.id), download.url.serialize(),
+            MUST(String::from_byte_string(download.destination.string())), static_cast<u8>(download.status),
+            static_cast<i64>(download.downloaded_size), download.total_size.has_value() ? static_cast<i64>(*download.total_size) : -1,
+            download.error.value_or(String {}), download.created_time });
+    }
     RefPtr<AdoptedResponseObserver> response_observer;
     Optional<Download> finished_download;
     if (!status_is_active(download.status)) {

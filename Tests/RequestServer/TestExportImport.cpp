@@ -92,7 +92,7 @@ public:
 
     void start_request(u64 request_id, URL::URL url, HTTP::NetworkIsolationKey network_isolation_key, bool create_transfer_lease)
     {
-        auto message = make<Messages::RequestServer::StartRequest>(request_id, ByteString { "GET" }, move(url), cacheable_request_headers(), ByteBuffer {}, HTTP::CacheMode::Default, move(network_isolation_key), HTTP::Cookie::IncludeCredentials::No, create_transfer_lease, Optional<u32> {}, false, 0, 0);
+        auto message = make<Messages::RequestServer::StartRequest>(request_id, ByteString { "GET" }, move(url), cacheable_request_headers(), ByteBuffer {}, HTTP::CacheMode::Default, move(network_isolation_key), HTTP::Cookie::IncludeCredentials::No, create_transfer_lease, Optional<u32> {}, false, 0, 0, false, false);
         VERIFY(!dispatch(move(message)));
     }
 
@@ -359,6 +359,7 @@ TEST_CASE(exported_response_is_delivered_and_cached_by_the_importing_request_ser
     // Transfer through the target site's UI client before the target document adopts the response.
     auto exported = source_ui.export_request(10);
     EXPECT(exported.has_value());
+    exported->canonical_host_names = "tracker.example\n"_string;
     (void)source_ui.wait_for<Messages::RequestClient::RequestTransferred>(event_loop, 10);
 
     TestConnection target_ui { target_server, ReadsBodies::No };
@@ -369,6 +370,7 @@ TEST_CASE(exported_response_is_delivered_and_cached_by_the_importing_request_ser
 
     auto headers = target.wait_for<Messages::RequestClient::HeadersBecameAvailable>(event_loop, 30);
     EXPECT_EQ(headers->status_code(), 200u);
+    EXPECT_EQ(headers->canonical_host_names(), "tracker.example\n"sv);
     EXPECT(headers->response_headers().first_matching([](auto const& header) { return header.name == "Cache-Control"sv; }).has_value());
 
     auto finished = target.wait_for<Messages::RequestClient::RequestFinished>(event_loop, 30);
@@ -381,6 +383,7 @@ TEST_CASE(exported_response_is_delivered_and_cached_by_the_importing_request_ser
 
     target.start_request(31, url, key, false);
     auto cached_headers = target.wait_for<Messages::RequestClient::HeadersBecameAvailable>(event_loop, 31);
+    EXPECT_EQ(cached_headers->canonical_host_names(), "tracker.example\n"sv);
     auto cache_status = cached_headers->response_headers().first_matching([](auto const& header) { return header.name == HTTP::TEST_CACHE_STATUS_HEADER; });
     EXPECT(cache_status.has_value());
     EXPECT_EQ(cache_status->value, "read-from-cache"sv);

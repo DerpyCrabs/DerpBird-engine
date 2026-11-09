@@ -29,12 +29,12 @@ static void write_settings_file(StringView contents)
     MUST(file->write_until_depleted(contents.bytes()));
 }
 
-TEST_CASE(restoring_the_previous_session_is_off_by_default)
+TEST_CASE(restoring_the_previous_session_is_on_by_default)
 {
     remove_settings_file();
 
     auto settings = WebView::Settings::create(settings_path());
-    EXPECT(!settings.restore_previous_session());
+    EXPECT(settings.restore_previous_session());
 }
 
 TEST_CASE(restoring_the_previous_session_is_persistent)
@@ -57,11 +57,25 @@ TEST_CASE(restoring_the_previous_session_is_persistent)
     remove_settings_file();
 }
 
-TEST_CASE(a_non_boolean_saved_value_leaves_restoring_off)
+TEST_CASE(a_non_boolean_saved_value_uses_the_default)
 {
     remove_settings_file();
     write_settings_file(R"({"restorePreviousSession":"yes"})"sv);
 
+    auto settings = WebView::Settings::create(settings_path());
+    EXPECT(settings.restore_previous_session());
+    remove_settings_file();
+}
+
+TEST_CASE(legacy_pinned_only_default_is_migrated_once)
+{
+    remove_settings_file();
+    write_settings_file(R"({"restorePreviousSession":false})"sv);
+    {
+        auto settings = WebView::Settings::create(settings_path());
+        EXPECT(settings.restore_previous_session());
+        settings.set_restore_previous_session(false);
+    }
     auto settings = WebView::Settings::create(settings_path());
     EXPECT(!settings.restore_previous_session());
     remove_settings_file();

@@ -1842,3 +1842,33 @@ fn staged_hover_nearest_top_layer_changes_with_same_target() {
         assert_staged_hover_facts(&engine, &nodes, expected);
     }
 }
+
+#[test]
+fn layer_orders_are_independent_per_origin_across_transactions() {
+    let (mut engine, _, _) = authoring_engine();
+    let scope = TreeScopeID::DOCUMENT;
+    let first = CascadeLayerID(1);
+    let second = CascadeLayerID(2);
+    let user = CascadeOrigin::User as u8;
+    let ua = CascadeOrigin::UserAgent as u8;
+    engine.set_layer_order(scope, &[first, second]);
+    engine.set_layer_order_for_origin(scope, &[second, first], user);
+    engine.set_layer_order_for_origin(scope, &[first, second], ua);
+    assert_eq!(engine.layer_index(scope, first), 0);
+    assert_eq!(engine.layer_index_for_origin(scope, first, user), 1);
+    let transaction = engine.take_transaction();
+    engine.release_transaction(transaction);
+    assert_eq!(engine.rules.layer_index_for_origin(scope, first, user), 1);
+    engine.set_layer_order_for_origin(scope, &[first, second], user);
+    assert_eq!(engine.layer_index(scope, first), 0);
+    assert_eq!(engine.layer_index_for_origin(scope, first, user), 0);
+    let transaction = engine.take_transaction();
+    assert_eq!(transaction.rule_changes.reordered_scopes, vec![scope]);
+    engine.release_transaction(transaction);
+    engine.set_layer_order_for_origin(scope, &[], user);
+    let transaction = engine.take_transaction();
+    engine.release_transaction(transaction);
+    assert_eq!(engine.rules.layer_index(scope, second), 1);
+    assert_eq!(engine.rules.layer_index_for_origin(scope, second, ua), 1);
+    assert_eq!(engine.rules.layer_index_for_origin(scope, second, user), 0);
+}

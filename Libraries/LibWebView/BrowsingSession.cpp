@@ -21,7 +21,11 @@ BrowsingSession::BrowsingSession(IsPrivate is_private)
 {
 }
 
-BrowsingSession::~BrowsingSession() = default;
+BrowsingSession::~BrowsingSession()
+{
+    if (on_derpbird_values_close)
+        on_derpbird_values_close();
+}
 
 NonnullRefPtr<BrowsingSession> BrowsingSession::create(IsPrivate is_private)
 {

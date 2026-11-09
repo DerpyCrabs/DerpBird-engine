@@ -520,6 +520,28 @@ pub fn execute_anchored_into_with_scratch<I: Input>(
     result
 }
 
+/// Anchored matching with a caller-owned instruction budget shared across patterns.
+/// Unlike the normal JavaScript path, this skips uncharged search hints and
+/// never resets the budget for another candidate start position.
+pub fn execute_anchored_budgeted<I: Input>(
+    program: &Program,
+    input: I,
+    start_pos: usize,
+    scratch: &mut VmScratch,
+    remaining: &mut u64,
+    out: &mut [i32],
+) -> VmResult {
+    if *remaining == 0 {
+        return VmResult::LimitExceeded;
+    }
+    let mut vm = Vm::new(program, input, start_pos, scratch);
+    vm.step_limit = *remaining;
+    let result = vm.run();
+    *remaining = remaining.saturating_sub(vm.steps);
+    if result == VmResult::Match { copy_captures_to_out(vm.registers, program.capture_count, out); }
+    result
+}
+
 /// Find all non-overlapping matches, writing (start, end) i32 pairs into result_buf.
 /// Returns number of matches found, or -1 if buffer is too small, or -2 if step limit exceeded.
 /// Keeps the VM alive across matches to avoid per-match setup overhead.
@@ -1401,6 +1423,7 @@ struct Vm<'a, I: Input> {
     /// trail, and backtracking to it undoes the writes after that point, so saving a state costs nothing per register.
     register_trail: &'a mut Vec<RegisterUndo>,
     steps: u64,
+    step_limit: u64,
     modifiers: ActiveModifiers,
     modifier_stack: &'a mut Vec<ActiveModifiers>,
     /// The changes to the modifier stack so far, most recent last. A saved state records the length of this trail, and
@@ -1433,6 +1456,7 @@ impl<'a, I: Input> Vm<'a, I> {
             backtrack_stack: &mut scratch.backtrack_stack,
             register_trail: &mut scratch.register_trail,
             steps: 0,
+            step_limit: MATCH_LIMIT,
             modifiers: ActiveModifiers {
                 ignore_case: program.ignore_case,
                 multiline: program.multiline,
@@ -1495,7 +1519,7 @@ impl<'a, I: Input> Vm<'a, I> {
         let input_len = input.len();
         'vm_loop: loop {
             self.steps += 1;
-            if self.steps >= MATCH_LIMIT {
+            if self.steps >= self.step_limit {
                 return VmResult::LimitExceeded;
             }
 
@@ -1867,7 +1891,7 @@ impl<'a, I: Input> Vm<'a, I> {
         let num_instructions = instructions.len();
         'vm_loop: loop {
             self.steps += 1;
-            if self.steps >= MATCH_LIMIT {
+            if self.steps >= self.step_limit {
                 return VmResult::LimitExceeded;
             }
 

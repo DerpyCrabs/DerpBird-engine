@@ -40,9 +40,9 @@ class Geolocation : public Bindings::GCAllocatedWrappable {
     GC_DECLARE_ALLOCATOR(Geolocation);
 
 public:
-    [[nodiscard]] static GC::Ref<Geolocation> create(HTML::Window&);
+    [[nodiscard]] static WEB_API GC::Ref<Geolocation> create(HTML::Window&);
 
-    void get_current_position(GC::Ref<WebIDL::CallbackType>, GC::Ptr<WebIDL::CallbackType>, PositionOptions const&);
+    WEB_API void get_current_position(GC::Ref<WebIDL::CallbackType>, GC::Ptr<WebIDL::CallbackType>, PositionOptions const&);
     WebIDL::Long watch_position(GC::Ref<WebIDL::CallbackType>, GC::Ptr<WebIDL::CallbackType>, PositionOptions const&);
     void clear_watch(WebIDL::Long);
 

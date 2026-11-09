@@ -179,6 +179,8 @@ void ConnectionFromClient::cancel_owned_work()
 {
     m_active_requests.clear();
     m_active_revalidation_requests.clear();
+    m_websocket_policies.clear();
+    m_websocket_policy_enabled.clear();
     m_pending_websockets.clear();
     m_websocket_cookie_requests.clear();
     m_websockets.clear();
@@ -291,7 +293,25 @@ bool ConnectionFromClient::is_live_request_id(u64 request_id) const
     return m_active_requests.contains(request_id) || m_request_transfer_leases.contains({ client_id(), request_id });
 }
 
-void ConnectionFromClient::start_request(u64 request_id, ByteString method, URL::URL url, Vector<HTTP::Header> request_headers, ByteBuffer request_body, HTTP::CacheMode cache_mode, Optional<HTTP::NetworkIsolationKey> network_isolation_key, HTTP::Cookie::IncludeCredentials include_credentials, bool create_transfer_lease, Optional<u32> address_selection_hint, bool notify_on_cache_miss, i32 originating_process_id, u64 originating_page_id)
+void ConnectionFromClient::resolve_request_header_policy(u64 request_id, u64 generation, bool allowed, bool background)
+{
+    auto request = background ? m_active_revalidation_requests.get(request_id) : m_active_requests.get(request_id);
+    if (request.has_value()) (*request)->resolve_request_header_policy({}, generation, allowed);
+}
+
+void ConnectionFromClient::resolve_canonical_url_policy(u64 request_id, u64 generation, bool allowed, bool background)
+{
+    auto request = background ? m_active_revalidation_requests.get(request_id) : m_active_requests.get(request_id);
+    if (request.has_value()) (*request)->resolve_canonical_url_policy({}, generation, allowed);
+}
+
+void ConnectionFromClient::resolve_response_header_policy(u64 request_id, u64 generation, u8 policy, bool background)
+{
+    auto request = background ? m_active_revalidation_requests.get(request_id) : m_active_requests.get(request_id);
+    if (request.has_value()) (*request)->resolve_response_header_policy({}, generation, policy);
+}
+
+void ConnectionFromClient::start_request(u64 request_id, ByteString method, URL::URL url, Vector<HTTP::Header> request_headers, ByteBuffer request_body, HTTP::CacheMode cache_mode, Optional<HTTP::NetworkIsolationKey> network_isolation_key, HTTP::Cookie::IncludeCredentials include_credentials, bool create_transfer_lease, Optional<u32> address_selection_hint, bool notify_on_cache_miss, i32 originating_process_id, u64 originating_page_id, bool suppress_response_cookies, u8 query_response_policy)
 {
     note_event_tick("ipc-start-request"sv);
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: start_request({}, {})", request_id, url);
@@ -343,7 +363,7 @@ void ConnectionFromClient::start_request(u64 request_id, ByteString method, URL:
     auto transfer_lease = create_transfer_lease
         ? Optional<Requests::RequestTransferLeaseKey> { lease_key }
         : Optional<Requests::RequestTransferLeaseKey> {};
-    auto request = Request::fetch(request_id, m_disk_cache, move(network_isolation_key), cache_mode, *this, m_curl_multi, m_resolver, move(url), move(method), HTTP::HeaderList::create(move(request_headers)), move(request_body), include_credentials, transfer_lease, address_selection_hint, notify_on_cache_miss);
+    auto request = Request::fetch(request_id, m_disk_cache, move(network_isolation_key), cache_mode, *this, m_curl_multi, m_resolver, move(url), move(method), HTTP::HeaderList::create(move(request_headers)), move(request_body), include_credentials, transfer_lease, address_selection_hint, notify_on_cache_miss, suppress_response_cookies, query_response_policy);
     request->set_performance_origin(originating_process_id, originating_page_id);
     m_active_requests.set(request_id, move(request));
 
@@ -430,14 +450,15 @@ void ConnectionFromClient::release_request_transfer_lease(int source_client_id, 
     }
 }
 
-void ConnectionFromClient::start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey network_isolation_key, ByteString method, URL::URL url, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials include_credentials)
+void ConnectionFromClient::start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey network_isolation_key, ByteString method, URL::URL url, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials include_credentials, bool suppress_response_cookies, Optional<u64> policy_parent, u8 query_response_policy)
 {
     note_event_tick("ipc-start-revalidation"sv);
     auto request_id = m_next_revalidation_request_id++;
 
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: start_revalidation_request({}, {})", request_id, url);
 
-    auto request = Request::revalidate(request_id, m_disk_cache, move(network_isolation_key), *this, m_curl_multi, m_resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials);
+    if (policy_parent.has_value()) async_retain_response_header_policy(*policy_parent, request_id);
+    auto request = Request::revalidate(request_id, m_disk_cache, move(network_isolation_key), *this, m_curl_multi, m_resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, suppress_response_cookies, query_response_policy);
     m_active_revalidation_requests.set(request_id, move(request));
 }
 
@@ -595,7 +616,9 @@ void ConnectionFromClient::fetch_aia_intermediate(Badge<Request>, ByteString con
 
     // Avoid leaking hostnames resolved by the proxy.
     auto proxy = proxy_configuration().proxy_for(*parsed).copy();
-    if (proxy.has_value() && proxy->resolves_hostnames()) {
+    if (proxy.has_value() && proxy->resolves_hostnames()
+        && !IPv4Address::from_string(host).has_value()
+        && !IPv6Address::from_string(host).has_value()) {
         start_aia_fetch(url, fetch_url, move(proxy), {});
         return;
     }
@@ -722,6 +745,8 @@ void ConnectionFromClient::complete_aia_fetch(void* easy_handle, int result_code
 
 void ConnectionFromClient::fail_websocket(u64 websocket_id, Requests::WebSocket::Error error)
 {
+    m_websocket_policy_enabled.remove(websocket_id);
+    m_websocket_policies.remove(websocket_id);
     async_websocket_ready_state_changed(websocket_id, to_underlying(Requests::WebSocket::ReadyState::Closed));
     async_websocket_errored(websocket_id, to_underlying(error));
     async_websocket_closed(websocket_id, to_underlying(WebSocket::CloseStatusCode::AbnormalClosure), {}, false);
@@ -847,7 +872,7 @@ size_t ConnectionFromClient::total_websocket_count() const
     return count;
 }
 
-void ConnectionFromClient::websocket_connect(u64 websocket_id, URL::URL url, Optional<HTTP::NetworkIsolationKey> network_isolation_key, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers)
+void ConnectionFromClient::websocket_connect(u64 websocket_id, URL::URL url, Optional<HTTP::NetworkIsolationKey> network_isolation_key, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers, u8 query_canonical_policy)
 {
     if (m_pending_websockets.contains(websocket_id) || m_websockets.contains(websocket_id)) {
         did_misbehave("reused live WebSocket ID");
@@ -892,6 +917,7 @@ void ConnectionFromClient::websocket_connect(u64 websocket_id, URL::URL url, Opt
     });
 
     m_pending_websockets.set(websocket_id);
+    if (query_canonical_policy) m_websocket_policy_enabled.set(websocket_id, query_canonical_policy);
 
     auto control_connection = ControlConnectionFromClient::the();
     if (!control_connection.has_value()) {
@@ -946,7 +972,9 @@ void ConnectionFromClient::connect_websocket(u64 websocket_id, URL::URL url, Byt
 
     // Avoid leaking hostnames resolved by the proxy.
     auto proxy = proxy_configuration().proxy_for(url).copy();
-    if (proxy.has_value() && proxy->resolves_hostnames()) {
+    if (proxy.has_value() && proxy->resolves_hostnames()
+        && !IPv4Address::from_string(host).has_value()
+        && !IPv6Address::from_string(host).has_value()) {
         if (m_pending_websockets.remove(websocket_id))
             open_websocket(websocket_id, move(url), move(origin), move(protocols), move(extensions), move(additional_request_headers), move(proxy), nullptr);
         return;
@@ -978,12 +1006,75 @@ void ConnectionFromClient::connect_websocket(u64 websocket_id, URL::URL url, Byt
             if (!self->m_pending_websockets.remove(websocket_id))
                 return;
 
-            self->open_websocket(websocket_id, move(url), move(origin), move(protocols), move(extensions), move(additional_request_headers), move(proxy), dns_result);
+            auto snapshot = make_ref_counted<DNS::LookupResult>(DNS::Messages::DomainName::from_string(host));
+            for (auto const& record : dns_result->records()) snapshot->add_record(record);
+            Vector<URL::URL> aliases;
+            Vector<String> addresses;
+            auto policy_flags = self->m_websocket_policy_enabled.take(websocket_id).value_or(0);
+            if (policy_flags & 8) {
+                for (auto const& address : snapshot->cached_addresses()) {
+                    if (addresses.size() >= 256) {
+                        self->fail_websocket(websocket_id, Requests::WebSocket::Error::CouldNotEstablishConnection);
+                        return;
+                    }
+                    addresses.append(address.visit([](auto const& value) { return MUST(value.to_string()); }));
+                }
+            }
+            if (policy_flags & 2) {
+                for (auto const& owner : snapshot->canonical_address_names()) {
+                    auto text = owner.to_canonical_string();
+                    auto name = text.view();
+                    if (name.ends_with('.')) name = name.substring_view(0, name.length() - 1);
+                    if (!name.is_ascii()) {
+                        self->fail_websocket(websocket_id, Requests::WebSocket::Error::CouldNotEstablishConnection);
+                        return;
+                    }
+                    auto parsed = URL::Parser::basic_parse(MUST(String::formatted("https://{}/", name)));
+                    if (!parsed.has_value() || !parsed->host().has_value() || parsed->includes_credentials()
+                        || !parsed->serialized_host().equals_ignoring_ascii_case(name) || aliases.size() >= 16) {
+                        self->fail_websocket(websocket_id, Requests::WebSocket::Error::CouldNotEstablishConnection);
+                        return;
+                    }
+                    auto alias = url;
+                    alias.set_host(*parsed->host());
+                    aliases.append(move(alias));
+                }
+            }
+            auto connect = [weak_self, websocket_id, url = move(url), origin = move(origin), protocols = move(protocols), extensions = move(extensions), headers = move(additional_request_headers), proxy = move(proxy), snapshot = move(snapshot)]() mutable {
+                if (auto self = weak_self.strong_ref())
+                    self->open_websocket(websocket_id, move(url), move(origin), move(protocols), move(extensions), move(headers), move(proxy), move(snapshot));
+            };
+            if (aliases.is_empty() && addresses.is_empty()) { connect(); return; }
+            self->m_pending_websockets.set(websocket_id);
+            auto generation = ++self->m_next_websocket_policy_generation;
+            auto timer = Core::Timer::create_single_shot(AK::Duration::from_seconds(5), [weak_self, websocket_id, generation] {
+                if (auto self = weak_self.strong_ref()) self->complete_websocket_canonical_policy(websocket_id, generation, false);
+            });
+            timer->start();
+            self->m_websocket_policies.set(websocket_id, { generation, move(timer), move(connect) });
+            self->async_query_websocket_canonical_policy(websocket_id, generation, move(aliases), move(addresses));
         });
+}
+
+void ConnectionFromClient::resolve_websocket_canonical_policy(u64 websocket_id, u64 generation, bool allowed)
+{
+    complete_websocket_canonical_policy(websocket_id, generation, allowed);
+}
+
+void ConnectionFromClient::complete_websocket_canonical_policy(u64 websocket_id, u64 generation, bool allowed)
+{
+    auto pending = m_websocket_policies.get(websocket_id);
+    if (!pending.has_value() || pending->generation != generation) return;
+    auto policy = m_websocket_policies.take(websocket_id).release_value();
+    policy.timer->stop();
+    if (!m_pending_websockets.remove(websocket_id)) return;
+    if (!allowed) { fail_websocket(websocket_id, Requests::WebSocket::Error::CouldNotEstablishConnection); return; }
+    policy.connect();
 }
 
 void ConnectionFromClient::open_websocket(u64 websocket_id, URL::URL url, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers, Optional<HTTP::Proxy> proxy, RefPtr<DNS::LookupResult const> dns_result)
 {
+    m_websocket_policy_enabled.remove(websocket_id);
     auto weak_self = make_weak_ptr<ConnectionFromClient>();
 
     WebSocket::ConnectionInfo connection_info(move(url));
@@ -1081,6 +1172,8 @@ void ConnectionFromClient::websocket_send_shared(u64 websocket_id, bool is_text,
 
 void ConnectionFromClient::websocket_close(u64 websocket_id, u16 code, ByteString reason)
 {
+    m_websocket_policies.remove(websocket_id);
+    m_websocket_policy_enabled.remove(websocket_id);
     m_websocket_cookie_requests.remove(websocket_id);
 
     if (m_pending_websockets.remove(websocket_id)) {

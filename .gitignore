@@ -67,3 +67,7 @@ Meta/CMake/vcpkg/user-variables.cmake
 .DS_Store
 
 __pycache__
+
+# DerpBird UI bundles are produced by the parent project build.
+/Base/res/ladybird/about-pages/derpbird-assets/
+/Base/res/ladybird/about-pages/derpbird.html

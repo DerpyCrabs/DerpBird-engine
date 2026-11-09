@@ -118,6 +118,8 @@ protected:
     virtual ScriptElementFetchAttributes fetch_attributes() const = 0;
 
 private:
+    RefPtr<DerpBirdInsertionAuthority> m_derpbird_insertion_authority;
+
     // https://www.w3.org/TR/trusted-types/#prepare-script-text
     WebIDL::ExceptionOr<void> prepare_script_text();
 

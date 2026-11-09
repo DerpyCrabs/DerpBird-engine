@@ -26,6 +26,8 @@
 #include <LibWeb/Loader/GeneratedPagesLoader.h>
 #include <LibWeb/Loader/LoadRequest.h>
 #include <LibWeb/Loader/ResourceLoader.h>
+#include <LibWeb/Page/DerpBirdWebRequestRegistration.h>
+#include <LibWeb/Page/DerpBirdResponseFiltering.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/Platform/Timer.h>
@@ -155,7 +157,7 @@ void ResourceLoader::prefetch_dns(GC::Ptr<DOM::Document> document, URL::URL cons
         return;
 
     if (!document || document->content_blocking_enabled()) {
-        if (ContentBlocker::the().is_filtered(url, source_url, ContentBlocker::ResourceType::Other)) {
+        if (ContentBlocker::the().check(url, source_url, ContentBlocker::ResourceType::Other, {}, document ? document->relevant_settings_object().top_level_creation_url : Optional<URL::URL> {}).blocked) {
             dbgln("ResourceLoader: Refusing to prefetch DNS for '{}': \033[31;1mURL was filtered\033[0m", url);
             return;
         }
@@ -176,7 +178,7 @@ void ResourceLoader::preconnect(GC::Ptr<DOM::Document> document, URL::URL const&
         return;
 
     if (!document || document->content_blocking_enabled()) {
-        if (ContentBlocker::the().is_filtered(url, source_url, ContentBlocker::ResourceType::Other)) {
+        if (ContentBlocker::the().check(url, source_url, ContentBlocker::ResourceType::Other, {}, document ? document->relevant_settings_object().top_level_creation_url : Optional<URL::URL> {}).blocked) {
             dbgln("ResourceLoader: Refusing to pre-connect to '{}': \033[31;1mURL was filtered\033[0m", url);
             return;
         }
@@ -292,7 +294,7 @@ static StringView blocked_resource_kind(LoadRequest const& request)
     VERIFY_NOT_REACHED();
 }
 
-static bool should_block_request(LoadRequest const& request)
+static ContentBlocker::Decision filter_request(LoadRequest const& request)
 {
     auto const& url = request.url().value();
 
@@ -307,19 +309,48 @@ static bool should_block_request(LoadRequest const& request)
 
     if (is_port_blocked(url.port_or_default())) {
         log_failure(request, ByteString::formatted("Port #{} is blocked", url.port_or_default()));
-        return true;
+        return { .blocked = true };
     }
 
-    if (auto page = request.page(); !page || page->content_blocking_enabled_for_url(request.top_level_creation_url())) {
-        auto source_url = request.source_url().value_or(url);
-        if (ContentBlocker::the().is_filtered(url, source_url, request.destination(), request.initiator_type(), request.request_mode())) {
-            if (page)
-                page->client().page_did_block_resource(url, blocked_resource_kind(request));
-            return true;
+    if (auto page = request.page(); page && DerpBirdWebRequestRegistration::has_rules(*page)) {
+        using Type = DerpBirdWebRequestRules::Type;
+        auto kind = ContentBlocker::resource_type_from_fetch_metadata(request.destination(), request.initiator_type(), request.request_mode());
+        auto type = request.derpbird_subframe_navigation || kind == ContentBlocker::ResourceType::Subdocument ? Type::SubFrame
+            : kind == ContentBlocker::ResourceType::Script ? Type::Script
+            : kind == ContentBlocker::ResourceType::XMLHttpRequest ? Type::XHR : Type::Other;
+        auto result = DerpBirdWebRequestRegistration::evaluate(*page, url, type);
+        if (result.is_error()) return { .blocked = true, .matched_rule = "Userscript request policy limit"_string };
+        if (result.value().has_value()) {
+            auto decision = result.release_value().release_value();
+            if (decision.cancel || decision.redirect.has_value())
+                return { .blocked = decision.cancel, .matched_rule = "Userscript webRequest"_string, .rewritten_url = move(decision.redirect) };
         }
     }
 
-    return false;
+    if (request.derpbird_approved_navigation) return {};
+
+    if (auto page = request.page(); !page || page->content_blocking_enabled_for_url(request.top_level_creation_url())) {
+        if (request.derpbird_popup_source.has_value()) {
+            auto popup = ContentBlocker::the().check(url, *request.derpbird_popup_source, request.derpbird_popunder ? ContentBlocker::ResourceType::Popunder : ContentBlocker::ResourceType::Popup, request.method(), request.derpbird_popup_top);
+            if (popup.blocked) {
+                if (page) page->client().page_did_block_resource(url, request.derpbird_popunder ? "Popunder"sv : "Popup"sv, popup.matched_rule);
+                return popup;
+            }
+        }
+        auto source_url = request.source_url().value_or(url);
+        auto type = ContentBlocker::resource_type_from_fetch_metadata(request.destination(), request.initiator_type(), request.request_mode());
+        if (request.derpbird_subframe_navigation) type = ContentBlocker::ResourceType::Subdocument;
+        auto decision = ContentBlocker::the().check(url, source_url, type, request.method(), request.top_level_creation_url());
+        if (decision.blocked && page)
+            page->client().page_did_block_resource(url, blocked_resource_kind(request), decision.matched_rule);
+        else if (page && decision.rewritten_url.has_value())
+            page->client().page_did_block_resource(url, "Filter: rewrite"sv, decision.matched_rule);
+        else if (page && !decision.matched_rule.is_empty())
+            page->client().page_did_block_resource(url, "Filter: allow"sv, decision.matched_rule);
+        return decision;
+    }
+
+    return {};
 }
 
 template<typename FileHandler, typename ErrorHandler>
@@ -470,11 +501,71 @@ void ResourceLoader::handle_resource_load_request(LoadRequest const& request, Re
 RefPtr<Fetch::Engine::NetworkTransportHandle> ResourceLoader::load(LoadRequest& request, GC::Root<OnHeadersReceived> on_headers_received, GC::Root<OnDataReceived> on_data_received, GC::Root<OnCachedBodyAvailable> on_cached_body_available, GC::Root<OnComplete> on_complete, Requests::RequestClient::TransferLease transfer_lease)
 {
     auto const& url = request.url().value();
+    if (request.method() != "HEAD"sv && (!request.page() || request.page()->content_blocking_enabled_for_url(request.top_level_creation_url()))) {
+        auto type = ContentBlocker::resource_type_from_fetch_metadata(request.destination(), request.initiator_type(), request.request_mode());
+        if (request.derpbird_subframe_navigation) type = ContentBlocker::ResourceType::Subdocument;
+        DerpBirdResponseFiltering::wrap({}, on_headers_received, on_data_received, on_cached_body_available, on_complete,
+            [request](JsonArray const& operations) {
+                if (auto page = request.page()) {
+                    for (auto const& operation : operations.values()) {
+                        if (!operation.is_object()) continue;
+                        if (auto rule = operation.as_object().get_string("matched_rule"sv); rule.has_value())
+                            page->client().page_did_block_resource(*request.url(), "Filter: response"sv, *rule);
+                    }
+                }
+            }, [request, type](Fetch::Engine::NetworkTransportHandle* transport) {
+                if (auto page = request.page(); page && !page->content_blocking_enabled_for_url(request.top_level_creation_url())) return JsonArray {};
+                StringView addresses = transport ? transport->policy_ip_addresses().bytes_as_string_view() : StringView {};
+                return ContentBlocker::the().response_replacements(*request.url(), request.source_url().value_or(*request.url()), type, request.method(), request.top_level_creation_url(), addresses);
+            });
+    }
 
     log_request_start(request);
     request.start_timer();
 
-    if (should_block_request(request)) {
+    auto decision = filter_request(request);
+    auto deliver_filter_response = [request, on_headers_received, on_data_received, on_complete](ContentBlocker::Decision& decision) {
+        auto local_origin = request.headers().get("Origin"sv).value_or("*"sv);
+        if (decision.substitute.has_value()) {
+            // A local resource response, not a navigation to a data: URL. Fetch still
+            // applies its normal CORS, MIME, integrity and CSP checks.
+            auto& resource = *decision.substitute;
+            if (request.derpbird_navigation_state) request.derpbird_navigation_state->click_to_load = resource.click_to_load;
+            auto length = ByteString::number(resource.body.size());
+            auto headers = HTTP::HeaderList::create({
+                { "Content-Type"sv, resource.mime_type.bytes_as_string_view() },
+                { "Content-Length"sv, length },
+                { "Access-Control-Allow-Origin"sv, local_origin },
+                { "Access-Control-Allow-Credentials"sv, "true"sv },
+                { "Cache-Control"sv, "no-store"sv },
+                { "X-Content-Type-Options"sv, "nosniff"sv },
+            });
+            on_headers_received->function()(nullptr, headers, 200u, {}, Requests::CacheState::NotCached);
+            if (request.method() != "HEAD"sv && !resource.body.is_empty())
+                on_data_received->function()(Requests::ResponseData::from_bytes(resource.body.bytes()));
+            on_complete->function()(true, {}, {});
+            return true;
+        }
+        if (decision.rewritten_url.has_value()) {
+            // Go through Fetch's redirect machinery: preserve POST bodies, respect
+            // redirect mode/limits, and reapply the normal security checks.
+            auto location = decision.rewritten_url->serialize();
+            // This response is browser-generated. The redirected network response
+            // still has to pass its own CORS checks before any body is exposed.
+            auto headers = HTTP::HeaderList::create({
+                { "Location"sv, location.bytes_as_string_view() },
+                { "Access-Control-Allow-Origin"sv, local_origin },
+                { "Access-Control-Allow-Credentials"sv, "true"sv },
+                { "Cache-Control"sv, "no-store"sv },
+            });
+            on_headers_received->function()(nullptr, headers, 307u, {}, Requests::CacheState::NotCached);
+            on_complete->function()(true, {}, {});
+            return true;
+        }
+        return false;
+    };
+    if (deliver_filter_response(decision)) return nullptr;
+    if (decision.blocked) {
         on_complete->function()(false, {}, "Request was blocked"sv);
         return nullptr;
     }
@@ -544,6 +635,8 @@ RefPtr<Fetch::Engine::NetworkTransportHandle> ResourceLoader::load(LoadRequest& 
         return nullptr;
     }
 
+    // RequestServer evaluates header rules after cookies, validators and
+    // generated headers exist, including disk-cache hits.
     auto protocol_request = start_network_request(request, transfer_lease);
     if (!protocol_request) {
         on_complete->function()(false, {}, "Failed to start network request"sv);
@@ -551,12 +644,85 @@ RefPtr<Fetch::Engine::NetworkTransportHandle> ResourceLoader::load(LoadRequest& 
     }
 
     auto network_transport = Fetch::Engine::NetworkTransportHandle::create(*protocol_request);
+    struct CanonicalAction final : RefCounted<CanonicalAction> {
+        Optional<ContentBlocker::Decision> decision;
+    };
+    auto canonical_action = adopt_ref(*new CanonicalAction);
+    protocol_request->set_canonical_url_policy([request, canonical_action](Vector<URL::URL> const& aliases, Vector<String> const& addresses) {
+        if (auto page = request.page(); page && !page->content_blocking_enabled_for_url(request.top_level_creation_url())) return true;
+        auto type = ContentBlocker::resource_type_from_fetch_metadata(request.destination(), request.initiator_type(), request.request_mode());
+        if (request.derpbird_subframe_navigation) type = ContentBlocker::ResourceType::Subdocument;
+        for (auto const& address : addresses) {
+            auto decision = ContentBlocker::the().check(*request.url(), request.source_url().value_or(*request.url()), type, request.method(), request.top_level_creation_url(), address);
+            if (!decision.blocked && !decision.rewritten_url.has_value()) continue;
+            if (auto page = request.page()) page->client().page_did_block_resource(*request.url(), "IP address"sv, decision.matched_rule);
+            canonical_action->decision = move(decision);
+            return false;
+        }
+        if (aliases.is_empty()) return true;
+        StringBuilder address_context;
+        for (auto const& address : addresses) {
+            if (!address_context.is_empty()) address_context.append('\n');
+            address_context.append(address);
+        }
+        StringBuilder names;
+        for (auto const& alias : aliases) {
+            if (!names.is_empty()) names.append('\n');
+            names.append(alias.serialized_host());
+        }
+        auto decision = ContentBlocker::the().check_canonical_hosts(*request.url(), request.source_url().value_or(*request.url()), type, request.method(), names.string_view(), request.top_level_creation_url(), address_context.string_view());
+        if (!decision.blocked && !decision.rewritten_url.has_value()) return true;
+        if (auto page = request.page()) page->client().page_did_block_resource(*request.url(), "CNAME"sv, decision.matched_rule);
+        canonical_action->decision = move(decision);
+        // Terminate the transport before any cookies/body reach the destination.
+        // Its completion callback supplies the same local/307 response as URL rules.
+        return false;
+    });
+
 
     auto protocol_headers_received = [on_headers_received = move(on_headers_received), request, &protocol_request = *protocol_request, network_transport](auto const& response_headers, auto status_code, auto const& reason_phrase, auto cache_state) {
-        if (auto page = request.page())
-            page->client().page_did_receive_network_response_headers(protocol_request.id(), status_code.value_or(0), reason_phrase, response_headers->headers(), cache_state);
+        // Never mutate transport/cache-owned headers or replace the site's CSP.
+        // Recheck policy at response time, including the top-level site switch.
+        NonnullRefPtr<HTTP::HeaderList const> effective_headers = response_headers;
+        auto page = request.page();
+        bool enabled = !page || page->content_blocking_enabled_for_url(request.top_level_creation_url());
+        auto type = ContentBlocker::resource_type_from_fetch_metadata(request.destination(), request.initiator_type(), request.request_mode());
+        if (request.derpbird_subframe_navigation) type = ContentBlocker::ResourceType::Subdocument;
+        auto const& ip_addresses = protocol_request.response_policy_ip_addresses();
+        auto policy = enabled ? ContentBlocker::the().csp_for_response(*request.url(), request.source_url().value_or(*request.url()), type, request.method(), request.top_level_creation_url(), ip_addresses) : String {};
+        auto removals = protocol_request.response_header_policy().value_or_lazy_evaluated([&] {
+            return enabled ? ContentBlocker::the().response_header_removals(*request.url(), type) : u8 { 0 };
+        });
+        auto permissions = enabled ? ContentBlocker::the().response_modifiers(*request.url(), request.source_url().value_or(*request.url()), type, request.method(), true, request.top_level_creation_url(), ip_addresses) : String {};
+        if (!policy.is_empty() || !permissions.is_empty() || removals) {
+            auto headers = HTTP::HeaderList::create(response_headers->headers());
+            headers->set_canonical_host_names(response_headers->canonical_host_names());
+            // Derived policy must not survive a later rule change in Fetch cache.
+            headers->set({ "Cache-Control"sv, "no-store"sv });
+            Array names { "location"sv, "refresh"sv, "report-to"sv, "set-cookie"sv };
+            for (size_t i = 0; i < names.size(); ++i)
+                if (removals & (1 << i)) headers->delete_(names[i]);
+            if (!policy.is_empty()) headers->append({ "Content-Security-Policy"sv, policy.bytes_as_string_view() });
+            if (!permissions.is_empty()) headers->append({ "Permissions-Policy"sv, permissions.bytes_as_string_view() });
+            effective_headers = move(headers);
+            if (page) {
+                auto log_rules = [&](u8 action, StringView label, String const& fallback) {
+                    auto rules = ContentBlocker::the().action_rules(*request.url(), request.source_url().value_or(*request.url()), type, request.method(), request.top_level_creation_url(), action, ip_addresses);
+                    if (rules.is_empty()) page->client().page_did_block_resource(*request.url(), label, fallback);
+                    else for (auto const& rule : rules) page->client().page_did_block_resource(*request.url(), label, rule);
+                };
+                if (!policy.is_empty()) log_rules(0, "Filter: CSP"sv, policy);
+                if (!permissions.is_empty()) log_rules(1, "Filter: permissions"sv, permissions);
+                for (size_t i = 0; i < names.size(); ++i) {
+                    if ((removals & (1 << i)) && response_headers->contains(names[i]))
+                        log_rules(i + 2, "Filter: response"sv, MUST(String::formatted("Removed response header: {}", names[i])));
+                }
+            }
+        }
+        if (page)
+            page->client().page_did_receive_network_response_headers(protocol_request.id(), status_code.value_or(0), reason_phrase, effective_headers->headers(), cache_state);
 
-        on_headers_received->function()(network_transport.ptr(), response_headers, move(status_code), reason_phrase, cache_state);
+        on_headers_received->function()(network_transport.ptr(), effective_headers, move(status_code), reason_phrase, cache_state);
     };
 
     auto protocol_data_received = [on_data_received = move(on_data_received), request, request_id = protocol_request->id()](auto data) {
@@ -565,11 +731,15 @@ RefPtr<Fetch::Engine::NetworkTransportHandle> ResourceLoader::load(LoadRequest& 
         on_data_received->function()(move(data));
     };
 
-    auto protocol_complete = [this, on_complete = move(on_complete), request, &protocol_request = *protocol_request](u64 total_size, Requests::RequestTimingInfo const& timing_info, Optional<Requests::NetworkError> const& network_error) {
+    auto protocol_complete = [this, on_complete = move(on_complete), request, canonical_action, deliver_filter_response = move(deliver_filter_response), &protocol_request = *protocol_request](u64 total_size, Requests::RequestTimingInfo const& timing_info, Optional<Requests::NetworkError> const& network_error) {
         finish_network_request(protocol_request);
 
         if (auto page = request.page())
             page->client().page_did_finish_network_request(protocol_request.id(), total_size, timing_info, network_error);
+
+        if (network_error.has_value() && canonical_action->decision.has_value()
+            && deliver_filter_response(*canonical_action->decision))
+            return;
 
         if (!network_error.has_value()) {
             log_success(request);
@@ -621,11 +791,45 @@ RefPtr<Requests::Request> ResourceLoader::start_network_request(LoadRequest cons
     //     requests are attributed through the worker process's browser-level owners.
     auto originating_page_id = request.page() && request.page()->has_top_level_traversable() ? request.page()->client().id().value() : 0;
     auto headers = headers_with_normalized_values(request.headers());
-    auto protocol_request = request_client->start_request(request.method(), request.url().value(), *headers, request.body(), request.cache_mode(), request.include_credentials(), transfer_lease, {}, cache_miss_notification, originating_page_id, request.network_isolation_key());
+    auto response_type = ContentBlocker::resource_type_from_fetch_metadata(request.destination(), request.initiator_type(), request.request_mode());
+    if (request.derpbird_subframe_navigation) response_type = ContentBlocker::ResourceType::Subdocument;
+    u8 query_response_policy = (ContentBlocker::the().has_header_filters() || response_type == ContentBlocker::ResourceType::Document || response_type == ContentBlocker::ResourceType::Subdocument) ? 1 : 0;
+    if (!request.page() || request.page()->content_blocking_enabled_for_url(request.top_level_creation_url())) query_response_policy |= 2;
+    if (ContentBlocker::the().has_ip_address_filters() && (query_response_policy & 2)) query_response_policy |= 9;
+    if (ContentBlocker::the().has_request_header_filters() && (!request.page() || request.page()->content_blocking_enabled_for_url(request.top_level_creation_url()))) query_response_policy |= 4;
+    bool suppress_response_cookies = false;
+    if (!request.page() || request.page()->content_blocking_enabled_for_url(request.top_level_creation_url())) {
+        auto type = ContentBlocker::resource_type_from_fetch_metadata(request.destination(), request.initiator_type(), request.request_mode());
+        suppress_response_cookies = ContentBlocker::the().response_header_removals(*request.url(), type) & 8;
+    }
+    auto protocol_request = request_client->start_request(request.method(), request.url().value(), *headers, request.body(), request.cache_mode(), request.include_credentials(), transfer_lease, {}, cache_miss_notification, originating_page_id, request.network_isolation_key(), suppress_response_cookies, query_response_policy);
     if (!protocol_request) {
         log_failure(request, "Failed to initiate load"sv);
         return nullptr;
     }
+
+    protocol_request->set_response_header_policy([request, response_type](HTTP::HeaderList const& headers, StringView ip_addresses) -> u8 {
+        if (auto page = request.page(); page && !page->content_blocking_enabled_for_url(request.top_level_creation_url())) return 0;
+        auto& blocker = ContentBlocker::the();
+        auto mask = blocker.response_header_removals(*request.url(), response_type);
+        auto decision = blocker.check_response(*request.url(), request.source_url().value_or(*request.url()), response_type, request.method(), headers, request.top_level_creation_url(), ip_addresses);
+        if (decision.blocked) {
+            mask |= 16;
+            if (auto page = request.page()) page->client().page_did_block_resource(*request.url(), "Response header"sv, decision.matched_rule);
+        }
+        return mask;
+    });
+    protocol_request->set_request_header_policy([request, response_type](HTTP::HeaderList const& headers, StringView ip_addresses) {
+        if (auto page = request.page(); page && !page->content_blocking_enabled_for_url(request.top_level_creation_url())) return true;
+        auto decision = ContentBlocker::the().check_request_headers(*request.url(), request.source_url().value_or(*request.url()), response_type, request.method(), headers, request.top_level_creation_url(), ip_addresses);
+        if (decision.blocked) {
+            if (auto page = request.page()) page->client().page_did_block_resource(*request.url(), "Request header"sv, decision.matched_rule);
+        }
+        return !decision.blocked;
+    });
+
+
+
 
     if (auto page = request.page()) {
         Optional<String> initiator_type_string;

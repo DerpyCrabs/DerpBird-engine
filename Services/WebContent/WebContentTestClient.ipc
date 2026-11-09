@@ -14,6 +14,7 @@ endpoint WebContentTestClient routed by Web::PageId page_id
     did_set_test_timeout(Web::PageId page_id, double milliseconds) =|
     did_receive_reference_test_metadata(Web::PageId page_id, JsonValue result) =|
 
+    did_probe_derpbird_values(u64 probe_id, bool success, ByteBuffer payload) =|
     did_expire_cookies_with_time_offset(AK::Duration offset) => ()
     did_store_hsts_policy_for_testing(String domain, HTTP::HSTS::ParsedHSTSPolicy policy) => ()
     [NotRouted] did_request_clear_storage_for_testing(Web::PageId page_id, Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id) => ()

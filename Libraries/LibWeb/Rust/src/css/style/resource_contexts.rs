@@ -15,6 +15,7 @@ use crate::css::style_compute::FfiStyleSheetResourceContext;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct StyleSheetResourceContext {
+    pub derpbird_authority_id: u64,
     pub(crate) base_url: Box<[u8]>,
     pub(crate) has_base_url: bool,
     pub(crate) origin_clean: bool,
@@ -80,6 +81,7 @@ impl DocumentResourceContexts {
                 *context.base_url == *lent(entry.base_url, entry.base_url_length)
                     && context.has_base_url == entry.has_base_url
                     && context.origin_clean == entry.origin_clean
+                    && context.derpbird_authority_id == entry.derpbird_authority_id
             })
         };
         if entries.len() == self.by_source.len() && entries.iter().all(held) {
@@ -89,6 +91,7 @@ impl DocumentResourceContexts {
             .iter()
             .map(|entry| {
                 let context = StyleSheetResourceContext {
+                    derpbird_authority_id: entry.derpbird_authority_id,
                     base_url: lent(entry.base_url, entry.base_url_length).into(),
                     has_base_url: entry.has_base_url,
                     origin_clean: entry.origin_clean,
@@ -107,6 +110,7 @@ impl StyleSheetResourceContext {
     /// The context as the drive reads it, borrowing this one's base URL.
     pub(crate) fn as_drive_context(&self) -> FfiStyleSheetResourceContext {
         FfiStyleSheetResourceContext {
+            derpbird_authority_id: self.derpbird_authority_id,
             base_url: if self.has_base_url {
                 self.base_url.as_ptr()
             } else {
@@ -131,6 +135,7 @@ mod tests {
         let entries: Vec<_> = sheets
             .iter()
             .map(|&(source_identity, base_url)| FfiStyleSheetResourceContextEntry {
+                derpbird_authority_id: 0,
                 source_identity,
                 base_url: base_url.as_ptr(),
                 base_url_length: base_url.len(),

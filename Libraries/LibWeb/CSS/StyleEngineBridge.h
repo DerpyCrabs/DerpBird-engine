@@ -114,6 +114,7 @@ u32 style_engine_last_pass_size(DocumentHost const*, BegunRead const*, StyleNode
 u32 style_engine_last_pass_element(DocumentHost const*, BegunRead const*, StyleNodeID root, bool changed, u32 index);
 u64 style_engine_animated_style_samples(DocumentHost const*, BegunRead const*, bool rebuilt_every_group, bool reset);
 u32 style_engine_layer_index(DocumentHost const*, BegunRead const*, TreeScopeID tree_scope, u32 layer);
+u32 style_engine_layer_index_for_origin(DocumentHost const*, BegunRead const*, TreeScopeID tree_scope, u32 layer, u8 origin);
 u64 style_engine_size_query_container_scan_visits(DocumentHost const*, BegunRead const*, bool reset);
 u64 style_engine_ensure_random_base_value(DocumentHost const*, BegunRead const*, StyleNodeID node, ReadonlySpan<u16> name, bool element_shared);
 }
@@ -143,6 +144,7 @@ struct StyleProperty;
 // A style sheet's resource context as a rule's cascaded values read it, keyed by its native
 // sheet: an imported sheet has its own.
 struct CollectedStyleSheetResourceContext {
+    u64 derpbird_authority_id { 0 };
     u64 source_identity { 0 };
     String base_url;
     bool has_base_url { false };

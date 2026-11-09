@@ -43,16 +43,22 @@ GC_DEFINE_ALLOCATOR(Geolocation);
 
 static void invoke_position_callback(GC::Ref<WebIDL::CallbackType> callback, GC::Ref<GeolocationPosition> position)
 {
-    auto& callback_realm = callback->callback->shape().realm();
+    auto& callback_realm = callback->associated_realm();
+    auto& world = Bindings::host_defined_wrapper_world(callback_realm);
+    if (world.is_detached())
+        return;
     (void)WebIDL::invoke_callback(callback, {}, WebIDL::ExceptionBehavior::Report,
-        { { Bindings::wrap(Bindings::host_defined_wrapper_world(callback_realm), callback_realm, position) } });
+        { { Bindings::wrap(world, callback_realm, position) } });
 }
 
 static void invoke_position_error_callback(GC::Ref<WebIDL::CallbackType> callback, GC::Ref<GeolocationPositionError> error)
 {
-    auto& callback_realm = callback->callback->shape().realm();
+    auto& callback_realm = callback->associated_realm();
+    auto& world = Bindings::host_defined_wrapper_world(callback_realm);
+    if (world.is_detached())
+        return;
     (void)WebIDL::invoke_callback(callback, {}, WebIDL::ExceptionBehavior::Report,
-        { { Bindings::wrap(Bindings::host_defined_wrapper_world(callback_realm), callback_realm, error) } });
+        { { Bindings::wrap(world, callback_realm, error) } });
 }
 
 static void queue_success_callback(GC::Ref<WebIDL::CallbackType> callback, GC::Ref<GeolocationPosition> position)

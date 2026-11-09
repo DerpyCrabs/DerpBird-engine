@@ -171,6 +171,8 @@ public:
     void set_zoom_level(double);
     void set_vertical_tab_overlay_insets(int left, int right);
     void set_bookmarks_bar_overlay_height(int);
+    void set_transparent_background(bool);
+    void set_compositing_above(WebContentView*);
     // How much the page is dimmed under a page dialog, from 0 to 1, where the page is presented above anything Qt paints
     // over it.
     void set_page_dim(qreal);
@@ -212,6 +214,8 @@ public:
     void set_follows_mouse_while_inactive(bool follows) { m_follows_mouse_while_inactive = follows; }
 
 signals:
+    void native_surface_changed();
+    void zoom_level_changed();
     void ready_to_paint();
     void crash_overlay_changed();
     void image_overlay_unavailable();
@@ -502,6 +506,7 @@ private:
     int m_vertical_tab_overlay_right { 0 };
     int m_bookmarks_bar_overlay_height { 0 };
 #endif
+    QPointer<WebContentView> m_compositing_below;
 };
 
 bool wheel_event_scrolls_continuously(QWheelEvent const&);

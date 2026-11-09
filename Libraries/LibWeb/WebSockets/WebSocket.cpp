@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/StringBuilder.h>
 #include <AK/ByteBuffer.h>
 #include <AK/QuickSort.h>
 #include <LibGC/Heap.h>
@@ -14,6 +15,10 @@
 #include <LibRequests/RequestClient.h>
 #include <LibURL/Origin.h>
 #include <LibWeb/Bindings/Wrappable.h>
+#include <LibWeb/Bindings/PrincipalHostDefined.h>
+#include <LibWeb/Loader/ContentBlocker.h>
+#include <LibWeb/Page/DerpBirdWebRequestRegistration.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/ContentSecurityPolicy/FetchIntegration.h>
@@ -178,8 +183,26 @@ HTML::WindowOrWorkerGlobalScopeMixin& WebSocket::relevant_global_scope() const
 ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_record, Vector<Utf16String> const& protocols, HTML::EnvironmentSettingsObject& client)
 {
     // 1. Let requestURL be a copy of url, with its scheme set to "http", if url's scheme is "ws"; otherwise to "https".
-    auto request_url = url_record;
-    request_url.set_scheme(url_record.scheme() == "ws"sv ? "http"sv : "https"sv);
+    auto& page = Bindings::principal_host_defined_page(client.realm());
+    auto selected_url = url_record;
+    // Apply extension redirects before constructing the handshake request so the
+    // final destination still passes CSP, mixed-content, port and cookie policy.
+    for (size_t redirects = 0; DerpBirdWebRequestRegistration::has_rules(page); ++redirects) {
+        if (redirects >= 20) return Error::from_string_literal("Userscript WebSocket redirect limit");
+        auto decision = TRY(DerpBirdWebRequestRegistration::evaluate(page, selected_url, DerpBirdWebRequestRules::Type::WebSocket));
+        if (!decision.has_value()) break;
+        if (decision->cancel) return Error::from_string_literal("WebSocket canceled by userscript");
+        if (!decision->redirect.has_value()) break;
+        auto target = decision->redirect.release_value();
+        if (target.scheme() == "http"sv) target.set_scheme("ws"sv);
+        else if (target.scheme() == "https"sv) target.set_scheme("wss"sv);
+        if (!target.scheme().is_one_of("ws"sv, "wss"sv) || target.fragment().has_value())
+            return Error::from_string_literal("Invalid userscript WebSocket redirect");
+        if (target == selected_url) break;
+        selected_url = move(target);
+    }
+    auto request_url = selected_url;
+    request_url.set_scheme(selected_url.scheme() == "ws"sv ? "http"sv : "https"sv);
 
     // 2. Let request be a new request, whose URL is requestURL, client is client, service-workers mode is "none",
     //    referrer is "no-referrer", mode is "websocket", credentials mode is "include", cache mode is "no-store", and
@@ -243,7 +266,43 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
     if (!request_client)
         return Error::from_string_literal("RequestServer is currently unavailable");
 
-    m_websocket = request_client->websocket_connect(connection_url, move(network_isolation_key), origin_string, protocol_byte_strings, {}, additional_headers);
+    auto source = request->client_snapshot()->content_blocker_source_url;
+    auto top_level = request->client_snapshot()->top_level_creation_url;
+    bool blocking = page.content_blocking_enabled_for_url(top_level);
+    if (blocking) {
+        auto decision = ContentBlocker::the().check(connection_url, source, ContentBlocker::ResourceType::WebSocket, "GET"sv, top_level);
+        if (decision.blocked) {
+            page.client().page_did_block_resource(connection_url, "WebSocket"sv, decision.matched_rule);
+            return Error::from_string_literal("WebSocket blocked by content filter");
+        }
+    }
+    m_websocket = request_client->websocket_connect(connection_url, move(network_isolation_key), origin_string, protocol_byte_strings, {}, additional_headers, blocking ? (2 | (ContentBlocker::the().has_ip_address_filters() ? 8 : 0)) : 0);
+    m_websocket->canonical_url_policy = [page = GC::Weak<Page> { &page }, source, top_level, connection_url](Vector<URL::URL> const& aliases, Vector<String> const& addresses) {
+        if (!page) return false;
+        if (!page->content_blocking_enabled_for_url(top_level)) return true;
+        auto& blocker = ContentBlocker::the();
+        for (auto const& address : addresses) {
+            auto decision = blocker.check(connection_url, source, ContentBlocker::ResourceType::WebSocket, "GET"sv, top_level, address);
+            if (!decision.blocked) continue;
+            page->client().page_did_block_resource(connection_url, "WebSocket IP address"sv, decision.matched_rule);
+            return false;
+        }
+        StringBuilder address_context;
+        for (auto const& address : addresses) {
+            if (!address_context.is_empty()) address_context.append('\n');
+            address_context.append(address);
+        }
+        if (blocker.canonical_url_exempt(connection_url, source, ContentBlocker::ResourceType::WebSocket, "GET"sv, top_level, address_context.string_view())) return true;
+        for (auto const& alias : aliases) {
+            auto decision = blocker.check(alias, source, ContentBlocker::ResourceType::WebSocket, "GET"sv, top_level, address_context.string_view());
+            if (decision.blocked) {
+                auto rule = MUST(String::formatted("{}\n! CNAME: {}", decision.matched_rule, alias.serialized_host()));
+                page->client().page_did_block_resource(connection_url, "WebSocket CNAME"sv, rule);
+                return false;
+            }
+        }
+        return true;
+    };
 
     m_websocket->on_open = GC::weak_callback(*this, [](auto& self) {
         self.on_open();

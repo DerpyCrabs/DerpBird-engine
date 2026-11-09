@@ -242,8 +242,11 @@ WebIDL::UnsignedLong request_idle_callback(HTML::Window& window, WebIDL::Callbac
     // NB: A plain GC reference rather than a GC::Root, for the same reason as in request_animation_frame() above: the
     //     window's idle callback lists trace the handler, so the callback lives exactly as long as the window's document.
     auto handler = [callback = GC::Ref { callback }](GC::Ref<RequestIdleCallback::IdleDeadline> deadline) -> JS::Completion {
-        auto& callback_realm = callback->callback->shape().realm();
-        return WebIDL::invoke_callback(*callback, {}, { { wrap(host_defined_wrapper_world(callback_realm), callback_realm, deadline) } });
+        auto& callback_realm = callback->associated_realm();
+        auto& world = host_defined_wrapper_world(callback_realm);
+        if (world.is_detached())
+            return JS::js_undefined();
+        return WebIDL::invoke_callback(*callback, {}, { { wrap(world, callback_realm, deadline) } });
     };
     return window.request_idle_callback(move(handler), options);
 }
@@ -514,7 +517,7 @@ WebIDL::ExceptionOr<Window::OpenedWindow> Window::window_open_steps_internal(Utf
         : UserNavigationInvolvement::None;
     // 13. Let targetNavigable and windowType be the result of applying the rules for choosing a navigable given target, sourceDocument's node navigable, and noopener.
     VERIFY(source_document.navigable());
-    auto [target_navigable, window_type] = source_document.navigable()->choose_a_navigable(target, no_opener, ActivateTab::Yes, tokenized_features);
+    auto [target_navigable, window_type] = source_document.navigable()->choose_a_navigable(target, no_opener, ActivateTab::Yes, tokenized_features, url_record);
 
     // 14. If targetNavigable is null, then return null.
     if (target_navigable == nullptr)

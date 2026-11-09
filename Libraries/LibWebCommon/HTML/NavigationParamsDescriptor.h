@@ -77,6 +77,7 @@ struct NavigationResponseDescriptor {
     Vector<URL::URL> url_list;
     u16 status { 200 };
     ByteString status_message;
+    bool derpbird_click_to_load { false };
     Vector<HTTP::Header> headers;
     Optional<String> network_error_message;
     bool timing_allow_passed { false };

@@ -471,6 +471,8 @@ GC::Ref<HTMLLinkElement::LinkProcessingOptions> HTMLLinkElement::create_link_opt
     // FIXME: 6. Assert: options's href is not the empty string, or options's source set is not null.
     //           A link element with neither an href or an imagesrcset does not represent a link.
 
+    // Snapshot the native operation before any asynchronous fetch work.
+    options->derpbird_insertion_authority = derpbird_insertion_authority();
     // 7. Return options.
     return options;
 }
@@ -494,6 +496,7 @@ RefPtr<Fetch::Infrastructure::Request> HTMLLinkElement::create_link_request(HTML
 
     // 5. Let request be the result of creating a potential-CORS request given url, options's destination, and options's crossorigin.
     auto request = create_potential_CORS_request(*url, options.destination, options.crossorigin);
+    request->set_derpbird_insertion_authority(options.derpbird_insertion_authority);
 
     // 6. Set request's policy container to options's policy container.
     // AD-HOC: A clone of it, so that the request and its redirects keep the policies its document had when the request
@@ -556,6 +559,7 @@ void HTMLLinkElement::fetch_and_process_linked_resource()
 // https://html.spec.whatwg.org/multipage/semantics.html#default-fetch-and-process-the-linked-resource
 void HTMLLinkElement::default_fetch_and_process_linked_resource(u64 fetch_generation)
 {
+    m_derpbird_stylesheet_authority = derpbird_insertion_authority();
     // https://html.spec.whatwg.org/multipage/semantics.html#the-link-element:attr-link-href-4
     // If both the href and imagesrcset attributes are absent, then the element does not define a link.
     // FIXME: Support imagesrcset attribute
@@ -588,7 +592,7 @@ void HTMLLinkElement::default_fetch_and_process_linked_resource(u64 fetch_genera
 
     // 7. Fetch request with processResponseConsumeBody set to the following steps given response response and null, failure, or a byte sequence bodyBytes:
     Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::ConsumeForCallback };
-    fetch_algorithms_input.process_response_consume_body = [this, fetch_generation](auto response, auto body_bytes) {
+    fetch_algorithms_input.process_response_consume_body = [this, fetch_generation, insertion_authority = options->derpbird_insertion_authority](auto response, auto body_bytes) {
         // "if, since the resource in question was fetched, it has become appropriate to fetch it again"
         if (fetch_generation != m_current_fetch_generation)
             return;
@@ -618,6 +622,10 @@ void HTMLLinkElement::default_fetch_and_process_linked_resource(u64 fetch_genera
             },
             [&](auto) { success = false; });
 
+        if (insertion_authority && !insertion_authority->active()) {
+            success = false;
+            successful_body_bytes = nullptr;
+        }
         // FIXME: 3. Otherwise, wait for the link resource's critical subresources to finish loading.
 
         // 4. Process the linked resource given el, success, response, and bodyBytes.
@@ -809,6 +817,7 @@ void HTMLLinkElement::fetch_and_process_linked_modulepreload_resource()
     //     integrity metadata, parser metadata is "not-parser-inserted", credentials mode is credentials mode, referrer
     //     policy is referrer policy, and fetch priority is fetch priority.
     ScriptFetchOptions options {
+        .derpbird_insertion_authority = derpbird_insertion_authority(),
         .cryptographic_nonce = move(cryptographic_nonce),
         .integrity_metadata = move(integrity_metadata),
         .parser_metadata = Fetch::Infrastructure::Request::ParserMetadata::NotParserInserted,
@@ -1146,6 +1155,7 @@ void HTMLLinkElement::modulepreload(LinkProcessingOptions const& options)
         integrity_metadata = resolve_a_module_integrity_metadata(*url, settings_object);
 
     ScriptFetchOptions script_fetch_options {
+        .derpbird_insertion_authority = options.derpbird_insertion_authority,
         .cryptographic_nonce = options.cryptographic_nonce_metadata,
         .integrity_metadata = move(integrity_metadata),
         .parser_metadata = Fetch::Infrastructure::Request::ParserMetadata::NotParserInserted,
@@ -1571,7 +1581,20 @@ void HTMLLinkElement::process_stylesheet_resource(bool success, Fetch::Infrastru
                             auto sheet = CSS::StyleSheetState::create(parsed.native_rules(), loaded_document.ptr(), {}, location, referrer_policy);
                             if (base_url != location)
                                 sheet->set_base_url(move(base_url));
-                            link->associate_style_sheet(*sheet, origin_clean);
+                            auto authority = link->m_derpbird_stylesheet_authority;
+                            if (authority && !authority->active()) {
+                                link->dispatch_event(create_event_for_element(*link, HTML::EventNames::error));
+                                link->finish_processing_stylesheet_resource(fetch_generation);
+                                return;
+                            }
+                            // Only association may transfer this generation's
+                            // authority to the parsed sheet, never later edits.
+                            auto previous_authority = link->derpbird_insertion_authority();
+                            link->set_derpbird_insertion_authority(authority);
+                            {
+                                ScopeGuard restore = [&] { link->set_derpbird_insertion_authority(move(previous_authority)); };
+                                link->associate_style_sheet(*sheet, origin_clean);
+                            }
 
                             // NB: The sheet has to be associated before its critical subresources (@import rules)
                             //     get fetched. Wait for them before firing load and unblocking scripts.

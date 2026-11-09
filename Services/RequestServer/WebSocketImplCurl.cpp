@@ -114,7 +114,18 @@ void WebSocketImplCurl::connect(WebSocket::ConnectionInfo const& info)
     m_curl_string_lists.append(curl_headers);
 
     if (auto const& dns_info = info.dns_result(); dns_info.has_value()) {
-        auto* resolve_list = curl_slist_append(nullptr, build_curl_resolve_list(*dns_info, url.serialized_host(), url.port_or_default()).characters());
+        // Remote-resolving proxies must see the actual literal destination;
+        // only locally resolved connections use an internal pool identity.
+        auto policy_host = m_proxy.has_value() && m_proxy->resolves_hostnames()
+            ? url.serialized_host().to_byte_string()
+            : policy_connection_host(*dns_info, url.serialized_host(), url.port_or_default());
+        auto target = ByteString::formatted("{}:{}:{}:{}", url.serialized_host(), url.port_or_default(), policy_host, url.port_or_default());
+        auto* target_list = curl_slist_append(nullptr, target.characters());
+        VERIFY(target_list);
+        set_option(CURLOPT_CONNECT_TO, target_list);
+        m_curl_string_lists.append(target_list);
+        auto* resolve_list = curl_slist_append(nullptr, build_curl_resolve_list(*dns_info, policy_host, url.port_or_default()).characters());
+        VERIFY(resolve_list);
         set_option(CURLOPT_RESOLVE, resolve_list);
         m_curl_string_lists.append(resolve_list);
     }

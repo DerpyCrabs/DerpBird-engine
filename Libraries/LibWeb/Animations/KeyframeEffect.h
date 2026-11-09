@@ -82,6 +82,7 @@ public:
 
     struct KeyFrameSet : public RefCounted<KeyFrameSet> {
         struct StyleSheetResourceContext {
+            u64 derpbird_authority_id { 0 };
             String base_url;
             bool origin_clean { false };
         };

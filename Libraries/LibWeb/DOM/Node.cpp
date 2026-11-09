@@ -1036,8 +1036,13 @@ static void run_post_connection_steps(Nodes const& nodes)
 
     // 12. For each node of staticNodeList: if node is connected, then run the post-connection steps with node.
     for (auto& node : static_node_list) {
-        if (node->is_connected())
+        if (node->is_connected()) {
             node->post_connection();
+            // Resource loaders have captured the one-shot authority by now.
+            // Later page mutations/reinsertions must not inherit it.
+            if (auto* element = as_if<Element>(*node))
+                element->finish_derpbird_pending_insertion(false);
+        }
     }
 }
 
@@ -1077,7 +1082,8 @@ void Node::insert_nodes_before(ReadonlySpan<GC::Ref<Node>> nodes, GC::Ptr<Node> 
             // 1. Run the insertion steps with inclusiveDescendant.
             inclusive_descendant.inserted();
             if (!any_node_has_post_connection_steps)
-                any_node_has_post_connection_steps = inclusive_descendant.has_post_connection_steps();
+                any_node_has_post_connection_steps = inclusive_descendant.has_post_connection_steps()
+                    || (is<Element>(inclusive_descendant) && static_cast<Element&>(inclusive_descendant).derpbird_insertion_pending());
 
             // 2. If inclusiveDescendant is not connected, then continue.
             if (!inclusive_descendant.is_connected())
@@ -2386,6 +2392,7 @@ void Node::set_document(Document& document)
         old_document.forget_assigned_slot_change_note(*element);
         if (element->style_uses_if_css_function() || element->style_uses_custom_function() || element->style_depends_on_viewport_metrics())
             document.add_element_with_viewport_dependent_style(*element);
+        element->finish_derpbird_pending_insertion(true);
         element->on_document_changed(old_document, document);
 
         // NB: The set of elements with rendered text is the old document's, and the element is not in the new

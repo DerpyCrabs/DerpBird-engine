@@ -60,6 +60,6 @@ private:
 public:
 };
 
-void invoke_resize_observer_callback(ResizeObserver&, ReadonlySpan<GC::Ref<ResizeObserverEntry>> entries);
+WEB_API void invoke_resize_observer_callback(ResizeObserver&, ReadonlySpan<GC::Ref<ResizeObserverEntry>> entries);
 
 }

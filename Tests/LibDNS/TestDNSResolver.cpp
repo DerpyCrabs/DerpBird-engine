@@ -1211,3 +1211,23 @@ TEST_CASE(test_system_resolver_does_not_join_a_lookup_without_ipv4_addresses_onc
 
     loop.spin_until([&] { return has_address_of_family(*first, false); });
 }
+
+TEST_CASE(canonical_address_owners_are_unique_and_expire_with_their_addresses)
+{
+    using namespace DNS::Messages;
+    auto result = make_ref_counted<DNS::LookupResult>(DomainName::from_string("visible.example"sv));
+    auto add = [&](StringView owner, AK::UnixDateTime received) {
+        result->add_record({ DomainName::from_string(owner), ResourceType::A, Class::IN, 60,
+            Records::A { IPv4Address { 192, 0, 2, 1 } }, {} }, received);
+    };
+    auto now = AK::UnixDateTime::now();
+    add("VISIBLE.EXAMPLE"sv, now);
+    add("tracker.example"sv, now);
+    add("TRACKER.EXAMPLE"sv, now);
+    add("expired.example"sv, now - AK::Duration::from_seconds(120));
+    result->check_expiration();
+    auto owners = result->canonical_address_names();
+    EXPECT_EQ(owners.size(), 1u);
+    EXPECT_EQ(owners.first().to_string(), "tracker.example."sv);
+    EXPECT_EQ(result->cached_addresses().size(), 3u);
+}

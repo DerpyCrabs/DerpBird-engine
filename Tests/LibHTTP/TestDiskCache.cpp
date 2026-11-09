@@ -436,3 +436,27 @@ TEST_CASE(force_cache_reuses_stale_must_revalidate_entries)
     VERIFY(reader.has_value());
     EXPECT_EQ(reader->revalidation_type(), HTTP::CacheEntryReader::RevalidationType::None);
 }
+
+TEST_CASE(canonical_provenance_survives_disk_cache_reopen_and_preserves_body_offset)
+{
+    auto url = parse_url("https://visible.example/canonical"sv);
+    auto request_headers = create_cacheable_request_headers();
+    {
+        auto cache = MUST(HTTP::DiskCache::create(HTTP::DiskCache::Mode::Normal, test_cache_root())).release_value();
+        TestCacheRequest request;
+        auto response_headers = create_cacheable_response_headers();
+        auto& writer = create_cache_entry(cache, request, url, *request_headers);
+        TRY_OR_FAIL(writer.write_status_and_reason(200, "OK"_string, *request_headers, *response_headers, "tracker.example\nother.example\n"_string));
+        TRY_OR_FAIL(writer.write_data("exact cached body"sv.bytes()));
+        TRY_OR_FAIL(writer.flush(request_headers));
+    }
+    auto cache = MUST(HTTP::DiskCache::create(HTTP::DiskCache::Mode::Normal, test_cache_root())).release_value();
+    TestCacheRequest request;
+    auto reader = open_cache_entry(cache, request, url, *request_headers, HTTP::CacheMode::OnlyIfCached);
+    VERIFY(reader.has_value());
+    EXPECT_EQ(reader->canonical_host_names(), "tracker.example\nother.example\n"sv);
+    EXPECT(!reader->response_headers().contains("tracker.example"sv));
+    auto file = TRY_OR_FAIL(reader->take_body_file());
+    auto body = TRY_OR_FAIL(Core::ImmutableBytes::map_from_fd_range_and_close(file.fd, "canonical cached body"sv, file.offset, file.size));
+    EXPECT_EQ(body.bytes(), "exact cached body"sv.bytes());
+}

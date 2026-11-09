@@ -360,6 +360,7 @@ public:
     GC::Ref<JS::Object> style_group_sharing_info(DOM::Element&);
     void update_style();
     void set_user_style(Utf16String const& source);
+    bool set_derpbird_user_styles(Utf16String const& source);
     void set_preferred_color_scheme(Utf16String const& color_scheme);
     void set_page_focus(bool has_focus);
     void set_system_visibility_state(Utf16String const& state);

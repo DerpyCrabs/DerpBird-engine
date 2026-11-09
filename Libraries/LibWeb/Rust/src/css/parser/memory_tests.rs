@@ -266,8 +266,12 @@ fn parsed_sheet_bytes_per_unit() {
         Unit {
             name: "declaration, url()",
             bytes: declaration_slope(2, &|index, k| format!("{}: url(a{index}-{k}.png)", URL_PROPERTIES[k])),
-            ceiling: 128.0,
-            typical: "16 + 40 B + text",
+            // DerpBird retains one u64 authority ID on each image resource
+            // context (patch 0042), so page and userscript resources cannot
+            // share an interned value across the capability boundary. Keep the
+            // upstream budget for everything else; allow exactly that field.
+            ceiling: 128.0 + size_of::<u64>() as f64,
+            typical: "16 + 40 B + text + 8 B userscript authority",
         },
         Unit {
             name: "declaration, var()",

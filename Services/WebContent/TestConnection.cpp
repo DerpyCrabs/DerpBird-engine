@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <WebContent/PageHost.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Compositor/RenderClock.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <WebContent/ConnectionFromClient.h>
@@ -52,6 +54,32 @@ void TestConnection::reset_state_for_testing(Web::PageId page_id)
         VERIFY(active_entry);
         async_did_reset_state_for_testing(page_id, Web::HTML::create_session_history_entry_descriptor(*active_entry));
     }
+}
+
+void TestConnection::probe_derpbird_values(Web::PageId page_id, u64 probe_id, bool unknown_document, ByteBuffer payload)
+{
+    m_client.dispatch_pending_messages();
+    auto page = m_client.page(page_id);
+    if (!page.has_value()) {
+        async_did_probe_derpbird_values(probe_id, false, {});
+        return;
+    }
+    auto document_id = page->page().local_traversable()->active_document()->id();
+    auto complete = [weak = make_weak_ptr<TestConnection>(), probe_id](ErrorOr<ByteBuffer> result) {
+        if (!weak) return;
+        weak->prepare_to_send();
+        if (result.is_error()) weak->async_did_probe_derpbird_values(probe_id, false, {});
+        else weak->async_did_probe_derpbird_values(probe_id, true, result.value().bytes());
+    };
+    if (unknown_document) {
+        document_id.namespace_id = NumericLimits<u64>::max();
+        auto request = m_client.page_host().value_requests().add(page_id, document_id, move(complete));
+        if (request.is_error()) async_did_probe_derpbird_values(probe_id, false, {});
+        else m_client.async_did_request_derpbird_values(page_id, document_id, request.value(), payload.bytes());
+        return;
+    }
+    auto request = m_client.page_host().request_derpbird_values(page_id, document_id, move(payload), move(complete));
+    if (request.is_error()) async_did_probe_derpbird_values(probe_id, false, {});
 }
 
 }

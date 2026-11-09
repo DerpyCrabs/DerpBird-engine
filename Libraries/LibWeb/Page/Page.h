@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <LibWeb/Page/DerpBirdStyleRule.h>
 #include <AK/Assertions.h>
 #include <AK/ByteBuffer.h>
 #include <AK/JsonValue.h>
@@ -105,6 +106,8 @@
 #include <LibWebCommon/StorageAPI/StorageEndpoint.h>
 #include <LibWebCommon/UIEvents/KeyCode.h>
 #include <LibWebCommon/WebView/StorageSetResult.h>
+
+#include <LibWeb/Page/DerpBirdScriptPhase.h>
 
 namespace Web {
 
@@ -470,6 +473,8 @@ public:
     Optional<Utf16String> const& user_style() const { return m_user_style_sheet_source; }
     void set_user_style(Utf16String source);
     void invalidate_user_style();
+    ErrorOr<void> set_derpbird_user_styles(JsonValue const&);
+    Vector<DerpBirdStyleSection> const& derpbird_user_styles() const { return m_derpbird_user_styles; }
     void invalidate_style_for_preference_change();
 
     bool content_blocking_enabled_for_url(Optional<URL::URL> const&) const;
@@ -668,6 +673,7 @@ private:
     size_t m_active_screen_wake_lock_count { 0 };
 
     Optional<Utf16String> m_user_style_sheet_source;
+    Vector<DerpBirdStyleSection> m_derpbird_user_styles;
 
     bool m_content_blocking_enabled { true };
     HashTable<String> m_content_blocking_disabled_sites;
@@ -731,6 +737,9 @@ public:
     virtual Page& page() = 0;
     virtual Page const& page() const = 0;
     virtual bool is_connection_open() const = 0;
+    virtual void publish_derpbird_web_requests(HTML::CrossProcessId, String const&, String const&, u64, JsonValue const&, bool) { }
+    virtual void derpbird_web_request_event(HTML::CrossProcessId, String const&, u64, JsonValue const&) const { }
+
     virtual bool has_focus() const { return true; }
     virtual void set_has_focus([[maybe_unused]] bool has_focus) { }
     virtual bool has_active_devtools_client() const { return false; }
@@ -771,6 +780,7 @@ public:
     virtual double device_pixel_ratio() const = 0;
     virtual double device_pixels_per_css_pixel() const = 0;
     virtual double maximum_frames_per_second() const { return 60.0; }
+    virtual bool has_transparent_background() const { return false; }
     virtual CSS::PreferredColorScheme preferred_color_scheme() const = 0;
     virtual CSS::PreferredContrast preferred_contrast() const = 0;
     virtual CSS::PreferredMotion preferred_motion() const = 0;
@@ -846,6 +856,7 @@ public:
     // The node an assistive technology should treat as focused: the focused element, or the document element once
     // nothing in the document is focused.
     virtual void page_did_change_accessibility_focus(Web::UniqueNodeID) { }
+    virtual void page_did_prepare_script_context_menu(HTML::CrossProcessId, HTML::CrossProcessId) { }
     virtual void page_did_request_context_menu([[maybe_unused]] HTML::CrossProcessId local_root_id, CSSPixelPoint, ContextMenuForInputEventsTarget, [[maybe_unused]] Optional<Utf16String> misspelled_word, [[maybe_unused]] GC::Ptr<DOM::Range> selected_text_range) { }
     virtual void page_did_request_link_context_menu([[maybe_unused]] HTML::CrossProcessId local_root_id, CSSPixelPoint, HTML::PreparedNavigationDescriptor, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers, [[maybe_unused]] GC::Ptr<DOM::Range> selected_text_range) { }
     virtual void page_did_request_image_context_menu([[maybe_unused]] HTML::CrossProcessId local_root_id, CSSPixelPoint, HTML::PreparedNavigationDescriptor, [[maybe_unused]] ByteString const& target, [[maybe_unused]] unsigned modifiers, Optional<Gfx::Bitmap const*>, [[maybe_unused]] Optional<HTML::PreparedNavigationDescriptor> link_navigation, [[maybe_unused]] Optional<String> image_mime_type) { }
@@ -1002,7 +1013,7 @@ public:
     virtual void pump_gamepad_events() { }
     virtual void reset_gamepad_access_for_testing() { }
 
-    virtual void page_did_block_resource([[maybe_unused]] URL::URL const& url, [[maybe_unused]] StringView kind) { }
+    virtual void page_did_block_resource([[maybe_unused]] URL::URL const& url, [[maybe_unused]] StringView kind, [[maybe_unused]] StringView rule = {}) { }
     virtual void page_did_start_network_request([[maybe_unused]] u64 request_id, [[maybe_unused]] URL::URL const& url, [[maybe_unused]] ByteString const& method, [[maybe_unused]] Vector<HTTP::Header> const& request_headers, [[maybe_unused]] ReadonlyBytes request_body, [[maybe_unused]] Optional<String> initiator_type, [[maybe_unused]] String const& referrer_policy, [[maybe_unused]] bool is_navigation_request, [[maybe_unused]] Fetch::Infrastructure::Request::Priority priority) { }
     virtual void page_did_receive_network_response_headers([[maybe_unused]] u64 request_id, [[maybe_unused]] u32 status_code, [[maybe_unused]] Optional<String> reason_phrase, [[maybe_unused]] Vector<HTTP::Header> const& response_headers, [[maybe_unused]] Requests::CacheState cache_state) { }
     virtual void page_did_receive_network_response_body([[maybe_unused]] u64 request_id, [[maybe_unused]] ReadonlyBytes data) { }
@@ -1030,6 +1041,12 @@ public:
     virtual void received_message_from_web_ui([[maybe_unused]] Utf16String const& name, [[maybe_unused]] JS::Value data) { }
 
     virtual bool is_headless() const = 0;
+    virtual void derpbird_document_phase(DOM::Document&, DerpBirdScriptRunAt) { }
+    virtual void derpbird_document_destroyed(DOM::Document&) { }
+    virtual bool wants_derpbird_credential_submissions() const { return false; }
+    // Native recipient only. Submission is not evidence of successful login.
+    virtual void derpbird_credential_focus_changed(DOM::Document&) { }
+    virtual void derpbird_credential_submitted(DOM::Document&, String const&, String const&) { }
 
     virtual bool is_svg_page_client() const { return false; }
     virtual bool supports_compositor() const { return false; }

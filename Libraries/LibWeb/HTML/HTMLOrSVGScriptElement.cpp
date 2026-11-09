@@ -124,6 +124,12 @@ void HTMLOrSVGScriptElement::execute_script()
     // 3. Unblock rendering on el.
     element.unblock_rendering();
 
+    if (m_derpbird_insertion_authority && !m_derpbird_insertion_authority->active()) {
+        m_document_load_event_delayer.clear();
+        element.dispatch_event(create_event_for_element(element, HTML::EventNames::error));
+        return;
+    }
+
     // 3. If el's result is null, then fire an event named error at el, and return.
     if (m_result.has<ResultState::Null>()) {
         dbgln("HTMLScriptElement: Refusing to run script because the element's result is null.");
@@ -218,6 +224,7 @@ ScriptFetchOptions script_element_fetch_options(DOM::Element const& element, Scr
     //     credentials mode is module script credentials mode, referrer policy is referrer policy,
     //     and fetch priority is fetch priority.
     return {
+        .derpbird_insertion_authority = element.derpbird_insertion_authority(),
         .cryptographic_nonce = move(cryptographic_nonce),
         .integrity_metadata = move(integrity_metadata),
         .parser_metadata = parser_metadata,
@@ -410,6 +417,7 @@ void HTMLOrSVGScriptElement::prepare_script()
 
     // 25-31. Let options be a script fetch options for el.
     auto options = script_element_fetch_options(element, fetch_attributes);
+    m_derpbird_insertion_authority = options.derpbird_insertion_authority;
 
     // 32. Let settings object be el's node document's relevant settings object.
     auto& settings_object = element.document().relevant_settings_object();

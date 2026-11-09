@@ -306,6 +306,7 @@ JsonObject SettingsUI::serialize_settings() const
         object.set("enabled"sv, list.enabled);
         auto updated = Application::the().content_blocker_list_last_updated_at(list.identifier);
         object.set("lastUpdatedAt"sv, updated.has_value() ? JsonValue(updated->milliseconds_since_epoch()) : JsonValue {});
+        object.set("updateStatus"sv, Application::the().content_blocker_list_update_status(list.identifier));
         lists.must_append(move(object));
     }
     settings.as_object().set("contentBlockerLists"sv, move(lists));

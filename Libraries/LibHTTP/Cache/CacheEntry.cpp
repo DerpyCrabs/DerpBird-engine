@@ -27,6 +27,8 @@ ErrorOr<CacheHeader> CacheHeader::read_from_stream(Stream& stream)
     header.status_code = TRY(stream.read_value<u32>());
     header.reason_phrase_size = TRY(stream.read_value<u32>());
     header.reason_phrase_hash = TRY(stream.read_value<u32>());
+    header.canonical_names_size = TRY(stream.read_value<u32>());
+    header.canonical_names_hash = TRY(stream.read_value<u32>());
     return header;
 }
 
@@ -40,6 +42,8 @@ ErrorOr<void> CacheHeader::write_to_stream(Stream& stream) const
     TRY(stream.write_value(status_code));
     TRY(stream.write_value(reason_phrase_size));
     TRY(stream.write_value(reason_phrase_hash));
+    TRY(stream.write_value(canonical_names_size));
+    TRY(stream.write_value(canonical_names_hash));
     return {};
 }
 
@@ -54,6 +58,8 @@ u32 CacheHeader::hash() const
     hash = pair_int_hash(hash, status_code);
     hash = pair_int_hash(hash, reason_phrase_size);
     hash = pair_int_hash(hash, reason_phrase_hash);
+    hash = pair_int_hash(hash, canonical_names_size);
+    hash = pair_int_hash(hash, canonical_names_hash);
     return hash;
 }
 
@@ -114,7 +120,7 @@ CacheEntryWriter::CacheEntryWriter(DiskCache& disk_cache, CacheIndex& index, u64
 {
 }
 
-ErrorOr<void> CacheEntryWriter::write_status_and_reason(u32 status_code, Optional<String> reason_phrase, HeaderList const& request_headers, HeaderList const& received_response_headers)
+ErrorOr<void> CacheEntryWriter::write_status_and_reason(u32 status_code, Optional<String> reason_phrase, HeaderList const& request_headers, HeaderList const& received_response_headers, String canonical_names)
 {
     auto response_headers_without_connection_specific_fields = remove_connection_specific_fields(received_response_headers);
     auto const& response_headers = *response_headers_without_connection_specific_fields;
@@ -134,6 +140,10 @@ ErrorOr<void> CacheEntryWriter::write_status_and_reason(u32 status_code, Optiona
     }
 
     auto result = [&]() -> ErrorOr<void> {
+        if (canonical_names.byte_count() > 4096)
+            return Error::from_string_literal("Canonical names exceed cache metadata limit");
+        m_cache_header.canonical_names_size = canonical_names.byte_count();
+        m_cache_header.canonical_names_hash = canonical_names.hash();
         if (!is_cacheable(status_code, response_headers))
             return Error::from_string_literal("Response is not cacheable");
 
@@ -168,6 +178,7 @@ ErrorOr<void> CacheEntryWriter::write_status_and_reason(u32 status_code, Optiona
         TRY(m_file->write_until_depleted(m_url));
         if (reason_phrase.has_value())
             TRY(m_file->write_until_depleted(*reason_phrase));
+        TRY(m_file->write_until_depleted(canonical_names));
         m_data_offset = TRY(m_file->tell());
 
         return {};
@@ -308,6 +319,7 @@ ErrorOr<NonnullOwnPtr<CacheEntryReader>> CacheEntryReader::create(DiskCache& dis
     size_t cache_header_size { 0 };
 
     String url;
+    String canonical_names;
     Optional<String> reason_phrase;
 
     auto result = [&]() -> ErrorOr<void> {
@@ -332,6 +344,11 @@ ErrorOr<NonnullOwnPtr<CacheEntryReader>> CacheEntryReader::create(DiskCache& dis
                 return Error::from_string_literal("Reason phrase hash mismatch");
         }
 
+        if (cache_header.canonical_names_size > 4096)
+            return Error::from_string_literal("Canonical names exceed cache metadata limit");
+        canonical_names = TRY(String::from_stream(*file, cache_header.canonical_names_size));
+        if (canonical_names.hash() != cache_header.canonical_names_hash)
+            return Error::from_string_literal("Canonical names hash mismatch");
         return {};
     }();
 
@@ -340,9 +357,11 @@ ErrorOr<NonnullOwnPtr<CacheEntryReader>> CacheEntryReader::create(DiskCache& dis
         return result.release_error();
     }
 
-    auto data_offset = cache_header_size + cache_header.url_size + cache_header.reason_phrase_size;
+    auto data_offset = cache_header_size + cache_header.url_size + cache_header.reason_phrase_size + cache_header.canonical_names_size;
 
-    return adopt_own(*new CacheEntryReader { disk_cache, index, cache_key, vary_key, move(url), move(path), move(file), fd, cache_header, move(reason_phrase), move(response_headers), data_offset, data_size });
+    auto reader = adopt_own(*new CacheEntryReader { disk_cache, index, cache_key, vary_key, move(url), move(path), move(file), fd, cache_header, move(reason_phrase), move(response_headers), data_offset, data_size });
+    reader->m_canonical_host_names = move(canonical_names);
+    return reader;
 }
 
 CacheEntryReader::CacheEntryReader(DiskCache& disk_cache, CacheIndex& index, u64 cache_key, u64 vary_key, String url, LexicalPath path, NonnullOwnPtr<Core::File> file, int fd, CacheHeader cache_header, Optional<String> reason_phrase, NonnullRefPtr<HeaderList> response_headers, u64 data_offset, u64 data_size)

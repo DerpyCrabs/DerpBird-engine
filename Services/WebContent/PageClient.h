@@ -54,6 +54,14 @@ public:
     virtual Web::PageId id() const override { return m_id; }
 
     virtual bool is_headless() const override;
+    virtual void publish_derpbird_web_requests(Web::HTML::CrossProcessId, String const&, String const&, u64, JsonValue const&, bool) override;
+    virtual void derpbird_web_request_event(Web::HTML::CrossProcessId, String const&, u64, JsonValue const&) const override;
+    mutable size_t m_derpbird_web_request_events_this_turn { 0 };
+    virtual void derpbird_document_phase(Web::DOM::Document&, Web::DerpBirdScriptRunAt) override;
+    virtual void derpbird_document_destroyed(Web::DOM::Document&) override;
+    virtual bool wants_derpbird_credential_submissions() const override { return true; }
+    virtual void derpbird_credential_focus_changed(Web::DOM::Document&) override;
+    virtual void derpbird_credential_submitted(Web::DOM::Document&, String const&, String const&) override;
     static void set_is_headless(bool);
 
     virtual Web::Page& page() override { return *m_page; }
@@ -91,6 +99,7 @@ public:
     void set_maximum_frames_per_second(double maximum_frames_per_second);
     void set_frame_rate_capped(bool capped) { m_frame_rate_capped = capped; }
     virtual double maximum_frames_per_second() const override { return m_maximum_frames_per_second; }
+    void set_transparent_background(bool);
     void set_preferred_color_scheme(Web::CSS::PreferredColorScheme);
     void set_preferred_contrast(Web::CSS::PreferredContrast);
     void set_preferred_motion(Web::CSS::PreferredMotion);
@@ -174,6 +183,7 @@ public:
     void publish_accessibility_tree(bool whole_tree_requested);
 
 private:
+    HashMap<Web::HTML::CrossProcessId, double> m_credential_submission_activations;
     struct PendingDOMMutation {
         GC::Ref<Web::DOM::Node> target;
         WebView::Mutation mutation;
@@ -241,6 +251,7 @@ private:
         return screen_rect();
     }
     virtual size_t screen_count() const override { return m_all_screen_rects.size(); }
+    virtual bool has_transparent_background() const override { return m_transparent_background; }
     virtual Web::CSS::PreferredColorScheme preferred_color_scheme() const override { return m_preferred_color_scheme; }
     virtual Web::CSS::PreferredContrast preferred_contrast() const override { return m_preferred_contrast; }
     virtual Web::CSS::PreferredMotion preferred_motion() const override { return m_preferred_motion; }
@@ -270,6 +281,7 @@ private:
     virtual void page_did_click_link(Web::HTML::PreparedNavigationDescriptor, ByteString const& target, unsigned modifiers) override;
     virtual void page_did_middle_click_link(Web::HTML::PreparedNavigationDescriptor, ByteString const& target, unsigned modifiers) override;
     virtual void page_did_request_external_url(URL::URL const&, URL::Origin const& initiator_origin, bool has_transient_activation) override;
+    virtual void page_did_prepare_script_context_menu(Web::HTML::CrossProcessId, Web::HTML::CrossProcessId) override;
     virtual void page_did_request_context_menu(Web::HTML::CrossProcessId local_root_id, Web::CSSPixelPoint, Web::ContextMenuForInputEventsTarget, Optional<Utf16String> misspelled_word, GC::Ptr<Web::DOM::Range> selected_text_range) override;
     virtual void page_did_request_spelling_menu_action_for_testing(Web::SpellingMenuActionForTesting, u32 guess_index) override;
     virtual void page_did_request_link_context_menu(Web::HTML::CrossProcessId local_root_id, Web::CSSPixelPoint, Web::HTML::PreparedNavigationDescriptor, ByteString const& target, unsigned modifiers, GC::Ptr<Web::DOM::Range> selected_text_range) override;
@@ -421,7 +433,7 @@ private:
     virtual void page_did_change_accessibility_tree() override;
     virtual void page_did_take_screenshot(Gfx::ShareableBitmap const& screenshot) override;
     virtual void received_message_from_web_ui(Utf16String const& name, JS::Value data) override;
-    virtual void page_did_block_resource(URL::URL const&, StringView kind) override;
+    virtual void page_did_block_resource(URL::URL const&, StringView kind, StringView rule) override;
     virtual void page_did_start_network_request(u64 request_id, URL::URL const&, ByteString const&, Vector<HTTP::Header> const&, ReadonlyBytes, Optional<String>, String const& referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::Request::Priority) override;
     virtual void page_did_receive_network_response_headers(u64 request_id, u32 status_code, Optional<String>, Vector<HTTP::Header> const&, Requests::CacheState) override;
     virtual void page_did_receive_network_response_body(u64 request_id, ReadonlyBytes) override;
@@ -461,6 +473,7 @@ private:
     bool m_is_closed { false };
     bool m_did_start_using_gamepads { false };
 
+    bool m_transparent_background { false };
     Web::CSS::PreferredColorScheme m_preferred_color_scheme { Web::CSS::PreferredColorScheme::Auto };
     Web::CSS::PreferredContrast m_preferred_contrast { Web::CSS::PreferredContrast::NoPreference };
     Web::CSS::PreferredMotion m_preferred_motion { Web::CSS::PreferredMotion::NoPreference };

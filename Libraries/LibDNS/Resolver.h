@@ -47,6 +47,23 @@ public:
         return result;
     }
 
+    // Terminal address owners are available with either configured DNS (including
+    // DNSSEC-validated CNAME chains) or AI_CANONNAME from the system resolver.
+    // A/AAAA may have different aliases; retain each rather than guess which
+    // address Happy Eyeballs will choose. No extra query or reverse lookup.
+    Vector<Messages::DomainName> canonical_address_names() const
+    {
+        Vector<Messages::DomainName> names;
+        for (auto const& cached : m_cached_records) {
+            auto const& record = cached.record;
+            if (record.type != Messages::ResourceType::A && record.type != Messages::ResourceType::AAAA) continue;
+            if (record.name.labels.is_empty() || record.name.equals_ignoring_case(m_name)) continue;
+            auto name = record.name.canonicalized();
+            if (!names.contains_slow(name)) names.append(move(name));
+        }
+        return names;
+    }
+
     bool has_cached_addresses() const
     {
         return has_record_of_type(Messages::ResourceType::A) || has_record_of_type(Messages::ResourceType::AAAA);
@@ -524,9 +541,10 @@ public:
                     [this, name, pending_key, state = our_state, family,
                         &main_thread_event_loop]() mutable {
                         auto worker_started_at = MonotonicTime::now();
+                        ByteString canonical_name;
                         auto record_or_error = m_system_resolver_for_testing.resolve_host
                             ? m_system_resolver_for_testing.resolve_host(name, family)
-                            : Core::Socket::resolve_host(name, Core::Socket::SocketType::Stream, family);
+                            : Core::Socket::resolve_host(name, Core::Socket::SocketType::Stream, family, &canonical_name);
                         auto worker_finished_at = MonotonicTime::now();
                         PendingSystemResolution::SideTiming timing {
                             .queue_ms = (worker_started_at - state->dispatched_at).to_milliseconds(),
@@ -535,9 +553,9 @@ public:
 
                         main_thread_event_loop.deferred_invoke(
                             [this, name, pending_key, state, family,
-                                record_or_error = move(record_or_error),
+                                record_or_error = move(record_or_error), canonical_name = move(canonical_name),
                                 timing]() mutable {
-                                handle_system_resolver_completion(name, pending_key, *state, family, move(record_or_error), timing);
+                                handle_system_resolver_completion(name, pending_key, *state, family, move(record_or_error), timing, canonical_name);
                             });
                     });
             };
@@ -938,7 +956,7 @@ private:
         PendingSystemResolution& state,
         Core::Socket::AddressFamily family,
         ErrorOr<Vector<Variant<IPv4Address, IPv6Address>>> record_or_error,
-        PendingSystemResolution::SideTiming timing)
+        PendingSystemResolution::SideTiming timing, ByteString const& canonical_name)
     {
         (family == Core::Socket::AddressFamily::IPv4Only ? state.a : state.aaaa) = timing;
 
@@ -947,14 +965,16 @@ private:
         bool got_records_this_side = false;
         if (!record_or_error.is_error()) {
             constexpr u32 SYSTEM_RESOLVER_SYNTHETIC_TTL_SECONDS = 60;
+            auto owner = Messages::DomainName::from_string(canonical_name);
+            if (!owner.is_valid()) owner = {};
             for (auto const& record : record_or_error.value()) {
                 record.visit(
                     [&](IPv4Address const& address) {
-                        state.result->add_record({ .name = {}, .type = Messages::ResourceType::A, .class_ = Messages::Class::IN, .ttl = SYSTEM_RESOLVER_SYNTHETIC_TTL_SECONDS, .record = Messages::Records::A { address }, .raw = {} });
+                        state.result->add_record({ .name = owner, .type = Messages::ResourceType::A, .class_ = Messages::Class::IN, .ttl = SYSTEM_RESOLVER_SYNTHETIC_TTL_SECONDS, .record = Messages::Records::A { address }, .raw = {} });
                         got_records_this_side = true;
                     },
                     [&](IPv6Address const& address) {
-                        state.result->add_record({ .name = {}, .type = Messages::ResourceType::AAAA, .class_ = Messages::Class::IN, .ttl = SYSTEM_RESOLVER_SYNTHETIC_TTL_SECONDS, .record = Messages::Records::AAAA { address }, .raw = {} });
+                        state.result->add_record({ .name = owner, .type = Messages::ResourceType::AAAA, .class_ = Messages::Class::IN, .ttl = SYSTEM_RESOLVER_SYNTHETIC_TTL_SECONDS, .record = Messages::Records::AAAA { address }, .raw = {} });
                         got_records_this_side = true;
                     });
             }

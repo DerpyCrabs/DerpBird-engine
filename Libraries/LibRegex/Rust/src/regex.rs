@@ -118,6 +118,15 @@ impl Regex {
         vm::execute_into_with_scratch(&self.program, input, start, &self.hints, out, scratch)
     }
 
+    /// Budgeted anchored test for host features, independent of JavaScript's limit.
+    pub(crate) fn test_anchored_budgeted<I: vm::Input>(&self, input: I, start: usize, remaining: &mut u64, out: &mut [i32]) -> vm::VmResult {
+        if start > input.len() {
+            return vm::VmResult::NoMatch;
+        }
+        let scratch = &mut *self.scratch.borrow_mut();
+        vm::execute_anchored_budgeted(&self.program, input, start, scratch, remaining, out)
+    }
+
     /// Test whether the regex matches anywhere in the input.
     pub fn test(&self, input: &[u16], start: usize) -> vm::VmResult {
         self.test_input(input, start)

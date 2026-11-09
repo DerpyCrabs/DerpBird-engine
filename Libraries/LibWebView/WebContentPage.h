@@ -120,6 +120,10 @@ public:
     // Whether a document this page hosts may use the feature. The process hosting the page can act for any of them.
     bool hosts_a_document_allowed_to_use(Web::PermissionsPolicy::PolicyControlledFeature) const;
     void for_each_navigable_with_a_hosted_active_document(Function<IterationDecision(CanonicalNavigable const&)> const&) const;
+    Function<void(Web::HTML::CrossProcessId, u64, JsonValue, Optional<String>)> on_derpbird_credential_result;
+    virtual void did_focus_derpbird_credential(Web::HTML::CrossProcessId, Web::HTML::CrossProcessId, bool, Gfx::IntRect) override;
+    virtual void did_submit_derpbird_credential(Web::HTML::CrossProcessId, String, String) override;
+    virtual void did_receive_derpbird_credential_result(Web::HTML::CrossProcessId, u64, JsonValue, Optional<String>) override;
     RefPtr<CanonicalDocument> hosted_document_with_id(Web::HTML::CrossProcessId) const;
     bool hosts_a_document_with_top_level_origin(URL::Origin const&) const;
     bool document_may_use(Web::HTML::CrossProcessId, Web::Permissions::PermissionName) const;
@@ -246,7 +250,7 @@ private:
     virtual void did_cut_selected_text(u64 request_id, ByteString selection) override;
     virtual void did_execute_js_console_input(DebuggerValue result) override;
     virtual void did_output_js_console_message(ConsoleOutput console_output) override;
-    virtual void did_block_resource(URL::URL url, String kind) override;
+    virtual void did_block_resource(URL::URL url, String kind, String rule) override;
     virtual void did_start_network_request(u64 request_id, URL::URL url, ByteString method, Vector<HTTP::Header> request_headers, ByteBuffer request_body, Optional<String> initiator_type, String referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::RequestPriority priority) override;
     virtual void did_receive_network_response_body(u64 request_id, ByteBuffer data) override;
     virtual void did_finish_network_request(u64 request_id, u64 body_size, Requests::RequestTimingInfo timing_info, Optional<Requests::NetworkError> network_error) override;
@@ -323,6 +327,7 @@ private:
     virtual void changing_navigable_continuation_applied(Web::HTML::CrossProcessId operation_id, Web::HTML::CrossProcessId navigable_id, Optional<Web::HTML::HostedNavigableState> activated_navigable_state, Optional<Web::HTML::SessionHistoryEntryPersistedState> previous_entry_persisted_state) override;
     virtual void nonchanging_navigable_history_state_updated(Web::HTML::CrossProcessId operation_id, Web::HTML::CrossProcessId navigable_id) override;
     virtual void did_request_close_of_traversable(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId source_navigable_id, Web::HTML::NavigationSourceSnapshot source_snapshot) override;
+    virtual void did_derpbird_filter_selector(String url, String selector) override;
     virtual void did_inspect_dom_tree(String dom_tree) override;
     virtual void did_inspect_dom_node(DOMNodeProperties properties) override;
     virtual void did_finish_editing_dom_node(Optional<Web::UniqueNodeID> node_id) override;
@@ -360,6 +365,7 @@ private:
     virtual void did_fail_download(u64 download_id, String error) override;
     virtual void did_finish_loading(Web::HTML::CrossProcessId navigable_id, Web::HTML::CrossProcessId document_id) override;
     virtual void did_change_title(Utf16String title) override;
+    virtual void did_prepare_script_context_menu(Web::HTML::CrossProcessId, Web::HTML::CrossProcessId) override;
     virtual void did_request_context_menu(Web::HTML::CrossProcessId local_root_id, Gfx::IntPoint content_position, Web::ContextMenuForInputEventsTarget for_input_events_target, Optional<Utf16String> misspelled_word, Optional<u64> text_fragment_generation_id) override;
     virtual void did_request_link_context_menu(Web::HTML::CrossProcessId local_root_id, Gfx::IntPoint content_position, Web::HTML::PreparedNavigationDescriptor navigation, ByteString, unsigned, Optional<u64> text_fragment_generation_id) override;
     virtual void did_generate_text_fragment_url(u64 request_id, Optional<URL::URL> url) override;

@@ -13,6 +13,7 @@
 #include <LibWeb/HTML/SourceSnapshotParams.h>
 #include <LibWeb/HTML/UserNavigationInvolvement.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWebCommon/HTML/SandboxingFlagSet.h>
 
@@ -31,6 +32,7 @@ void Navigable::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_parent);
     visitor.visit(m_container);
     visitor.visit(m_page);
+    visitor.visit(m_derpbird_popup_target);
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#nav-container
@@ -215,6 +217,55 @@ WebIDL::ExceptionOr<void> Navigable::navigate(NavigateParams params)
 
             // 2. Return.
             return {};
+        }
+    }
+
+    // A user-directed navigation ends any pending opener/target relationship.
+    if (params.user_involvement != UserNavigationInvolvement::None)
+        m_derpbird_popup_target = nullptr;
+
+    // A blank auxiliary window can be assigned its real URL after window.open
+    // returns. Retain the opener context rather than matching against about:blank.
+    if (params.user_involvement == UserNavigationInvolvement::BrowserUI) {
+        m_derpbird_popup_source.clear();
+        m_derpbird_popup_target = nullptr;
+    } else if (source_document && source_document->content_blocking_enabled()) {
+        auto method = params.document_resource.has<POSTResource>() ? "POST"sv : "GET"sv;
+        if (m_derpbird_popup_source.has_value()) {
+            auto current = active_document_url();
+            if (current.has_value() && current->serialize() == "about:blank"sv) {
+                snapshots.source_snapshot_params->derpbird_popup_source = m_derpbird_popup_source;
+                snapshots.source_snapshot_params->derpbird_popup_top = m_derpbird_popup_top;
+                auto decision = ContentBlocker::the().check(params.url, *m_derpbird_popup_source, ContentBlocker::ResourceType::Popup, method, m_derpbird_popup_top);
+                if (decision.blocked) {
+                    source_document->page().client().page_did_block_resource(params.url, "Popup"sv, decision.matched_rule);
+                    return {};
+                }
+            } else {
+                m_derpbird_popup_source.clear();
+            }
+        }
+        // In a popunder the opener navigates while the newly opened page stays
+        // in front. Match the opener destination in the new page's context.
+        if (m_derpbird_popup_target && !m_derpbird_popup_target->has_been_destroyed()
+            && params.user_involvement == UserNavigationInvolvement::None) {
+            auto target = m_derpbird_popup_target->active_document_url();
+            if (target.has_value() && target->scheme().is_one_of("http"sv, "https"sv)) {
+                // Consume the candidate once, carrying its context through this
+                // transaction's redirects and process handoffs instead of keeping
+                // a stale relationship for unrelated later script navigations.
+                m_derpbird_popup_target = nullptr;
+                snapshots.source_snapshot_params->derpbird_popup_source = *target;
+                snapshots.source_snapshot_params->derpbird_popup_top = *target;
+                snapshots.source_snapshot_params->derpbird_popunder = true;
+                auto decision = ContentBlocker::the().check(params.url, *target, ContentBlocker::ResourceType::Popunder, method, *target);
+                if (decision.blocked) {
+                    source_document->page().client().page_did_block_resource(params.url, "Popunder"sv, decision.matched_rule);
+                    return {};
+                }
+            }
+        } else if (m_derpbird_popup_target && m_derpbird_popup_target->has_been_destroyed()) {
+            m_derpbird_popup_target = nullptr;
         }
     }
 

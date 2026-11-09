@@ -897,6 +897,7 @@ void HTMLImageElement::update_the_image_data(bool restart_animations, bool maybe
 // https://html.spec.whatwg.org/multipage/images.html#update-the-image-data
 void HTMLImageElement::update_the_image_data_impl(bool restart_animations, bool maybe_omit_events, u64 update_the_image_data_count)
 {
+    auto insertion_authority = derpbird_insertion_authority();
     // 1. If the element's node document is not fully active, then:
     // FIXME: This step and it's substeps is implemented by the calling `update_the_image_data` function.
     //        By the time that we reach here, the document should be fully active. However, it is possible
@@ -955,7 +956,7 @@ void HTMLImageElement::update_the_image_data_impl(bool restart_animations, bool 
             key.origin = document().origin();
 
         // 4. If the list of available images contains an entry for key, then:
-        if (auto* entry = document().list_of_available_images().get(key)) {
+        if (auto* entry = document().list_of_available_images().get(key); entry && !insertion_authority) {
             // 1. Set the ignore higher-layer caching flag for that entry.
             entry->ignore_higher_layer_caching = true;
 
@@ -1024,7 +1025,7 @@ void HTMLImageElement::update_the_image_data_impl(bool restart_animations, bool 
     }
 after_step_7:
     // 8. Queue a microtask to perform the rest of this algorithm, allowing the task that invoked this algorithm to continue.
-    queue_a_microtask(&document(), GC::create_function(GC::Heap::the(), [this, update_the_image_data_count, restart_animations, maybe_omit_events, previous_url]() mutable {
+    queue_a_microtask(&document(), GC::create_function(GC::Heap::the(), [this, update_the_image_data_count, restart_animations, maybe_omit_events, previous_url, insertion_authority]() mutable {
         // 9. If another instance of this algorithm for this img element was started after this instance
         //    (even if it aborted and is no longer running), then return.
         if (update_the_image_data_count != m_update_the_image_data_count)
@@ -1221,7 +1222,11 @@ after_step_7:
         auto image_request = ImageRequest::create();
         if (auto resource = exchange(m_resource_from_navigation_response, nullptr))
             image_request->set_current_url(*url_string, *resource);
-        else
+        else if (insertion_authority) {
+            auto parsed = document().encoding_parse_url(selected_source.value().url);
+            VERIFY(parsed.has_value());
+            image_request->set_current_url(*url_string, SharedResourceRequest::create_unshared(document(), *parsed, m_cors_setting));
+        } else
             image_request->set_current_url(document(), *url_string, m_cors_setting);
         image_request->set_current_pixel_density(pixel_density.value_or(1.0f));
 
@@ -1262,6 +1267,7 @@ after_step_7:
         // 19. Let request be the result of creating a potential-CORS request given urlString, "image",
         //     and the current state of the element's crossorigin content attribute.
         auto request = create_potential_CORS_request(*url_record, Fetch::Infrastructure::Request::Destination::Image, m_cors_setting);
+        request->set_derpbird_insertion_authority(insertion_authority);
 
         // 20. Set request's client to the element's node document's relevant settings object.
         request->set_client(document().relevant_settings_object().address());

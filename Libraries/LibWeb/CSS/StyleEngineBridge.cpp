@@ -528,6 +528,7 @@ void collect_style_sheet_resource_context(StyleSheetState& sheet, StyleSheetReso
         return;
     auto base_url = style_resource_base_url(sheet, collection);
     collection.contexts.append({
+        .derpbird_authority_id = sheet.derpbird_insertion_authority() ? sheet.derpbird_insertion_authority()->identity() : 0,
         .source_identity = sheet.native_sheet().identity(),
         .base_url = base_url.value_or(String {}),
         .has_base_url = base_url.has_value(),
@@ -581,6 +582,7 @@ void StyleEngine::gather_computation_inputs(LentComputationInputs& lent)
         entries.ensure_capacity(contexts.size());
         for (auto const& context : contexts) {
             entries.unchecked_append({
+                .derpbird_authority_id = context.derpbird_authority_id,
                 .source_identity = context.source_identity,
                 .base_url = context.base_url.bytes().data(),
                 .base_url_length = context.base_url.bytes().size(),

@@ -57,10 +57,12 @@ GC::Ref<WebIDL::CallbackType> create_lazy_load_intersection_observer_callback(DO
 void invoke_intersection_observer_callback(IntersectionObserver& observer, Vector<GC::Root<IntersectionObserverEntry>>& queue)
 {
     auto& callback = observer.callback();
-    auto& callback_realm = callback.callback_context->realm();
+    auto& callback_realm = callback.associated_realm();
 
     auto wrapped_queue = MUST(JS::Array::create(callback_realm, 0));
     auto& wrapper_world = Bindings::host_defined_wrapper_world(callback_realm);
+    if (wrapper_world.is_detached())
+        return;
     for (size_t i = 0; i < queue.size(); ++i) {
         auto& record = queue.at(i);
         auto property_index = JS::PropertyKey { i };

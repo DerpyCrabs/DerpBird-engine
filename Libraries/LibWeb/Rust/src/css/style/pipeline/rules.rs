@@ -2038,7 +2038,9 @@ impl RuleIndex {
             .get(program.sheets_in_scope(scope))?
             .iter()
             .copied()
-            .find(|group| program.layer_ranks_match(scope, &self.groups[group].layer_ranks))
+            .find(|group| {
+                program.layer_ranks_match(scope, CascadeOrigin::Author as u8, &self.groups[group].layer_ranks)
+            })
     }
 
     /// Have the shadow tree `scope`, which is in no group, join the group of the trees alike, or a
@@ -2064,7 +2066,7 @@ impl RuleIndex {
                 index: ScopeIndex::default(),
                 scopes: smallvec::smallvec![scope],
                 sheets,
-                layer_ranks: program.layer_ranks(scope),
+                layer_ranks: program.layer_ranks(scope, CascadeOrigin::Author as u8),
             },
         );
         self.group_of_scope.insert(scope, group);
@@ -2120,7 +2122,7 @@ impl RuleIndex {
         let held = self.groups.get_mut(&group).expect("a scope's group is held");
         let sheets: Box<[SheetID]> = program.sheets_in_scope(scope).into();
         let previous = std::mem::replace(&mut held.sheets, sheets.clone());
-        held.layer_ranks = program.layer_ranks(scope);
+        held.layer_ranks = program.layer_ranks(scope, CascadeOrigin::Author as u8);
         if let Some(groups) = self.groups_by_sheets.get_mut(&previous) {
             groups.retain(|&mut other| other != group);
             if groups.is_empty() {
@@ -2718,7 +2720,7 @@ impl RuleIndex {
         let placement = self.entries.place(sheet, group, version.layer, || EntryPlacement {
             origin: placement.origin,
             group,
-            layer_rank: program.layer_rank(layer_scope, version.layer),
+            layer_rank: program.layer_rank_for_origin(layer_scope, version.layer, placement.origin as u8),
             sheet_rank: placement.sheet_rank,
             layer: version.layer,
         });
@@ -2954,7 +2956,9 @@ impl RuleIndex {
             let sheets_in_scope = program.sheets_in_scope(scope);
             if let Some(group) = self.group_of_scope.get(&scope).copied() {
                 let held = &self.groups[&group];
-                if *held.sheets == *sheets_in_scope && program.layer_ranks_match(scope, &held.layer_ranks) {
+                if *held.sheets == *sheets_in_scope
+                    && program.layer_ranks_match(scope, CascadeOrigin::Author as u8, &held.layer_ranks)
+                {
                     if reordered {
                         reordered_groups.push(group);
                     }
@@ -3155,7 +3159,8 @@ impl RuleIndex {
                 // The entries take the ranks of their sheet and layers where they are placed.
                 self.entries.rank_placements_of(sheet, group, |placement| {
                     placement.sheet_rank = sheet_rank;
-                    placement.layer_rank = program.layer_rank(layer_scope, placement.layer);
+                    placement.layer_rank =
+                        program.layer_rank_for_origin(layer_scope, placement.layer, placement.origin as u8);
                 });
             }
             // NB: A sheet whose rank was only relabeled keeps its order against the others.

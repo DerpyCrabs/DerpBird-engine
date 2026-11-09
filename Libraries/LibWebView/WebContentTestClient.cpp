@@ -216,4 +216,10 @@ Messages::WebContentTestClient::GetVirtualGamepadReceivedRumbleEffectsResponse W
     return { gamepad_manager.virtual_gamepad_received_rumble_effects(m_client, handle), gamepad_manager.virtual_gamepad_received_trigger_rumble_effects(m_client, handle) };
 }
 
+void WebContentTestClient::did_probe_derpbird_values(u64 probe_id, bool success, ByteBuffer payload)
+{
+    if (on_derpbird_value_probe)
+        on_derpbird_value_probe(probe_id, success, move(payload));
+}
+
 }

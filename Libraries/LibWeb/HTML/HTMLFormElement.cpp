@@ -42,6 +42,8 @@
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/Page/DerpBirdCredentialFields.h>
+#include <LibWeb/HTML/Window.h>
 #include <LibWeb/WebIDL/ExceptionOrUtils.h>
 #include <LibWebCommon/Infra/CharacterTypes.h>
 #include <LibWebCommon/Infra/Strings.h>
@@ -135,6 +137,18 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
     if (has_flag(form_document->active_sandboxing_flag_set(), HTML::SandboxingFlagSet::SandboxedForms))
         return {};
 
+    auto notify_credential_submission = [&] {
+        auto& client = form_document->page().client();
+        if (!client.wants_derpbird_credential_submissions()
+            || !form_document->window()->has_transient_activation()
+            || method_state_from_form_element(submitter) == MethodAttributeState::Dialog)
+            return;
+        auto snapshot = DerpBirdCredentialFields::capture_form(*this, true);
+        if (snapshot.is_error()) return;
+        auto values = snapshot.release_value();
+        client.derpbird_credential_submitted(*form_document, values.values.username, values.values.password);
+    };
+
     // 5. If the submitted from submit() method flag is not set, then:
     if (!options.from_submit_binding) {
         // 1. If form's firing submission events is true, then return.
@@ -184,6 +198,9 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
         event_init.bubbles = true;
         event_init.cancelable = true;
         auto submit_event = SubmitEvent::create(EventNames::submit, event_init, HighResolutionTime::current_high_resolution_time(relevant_global_object(*this)));
+        // Preserve values before a site's submit handler clears/replaces fields.
+        // preventDefault is normal for SPA logins; the host only offers a prompt.
+        notify_credential_submission();
         bool should_continue = dispatch_event(*submit_event);
 
         // 7. Set form's firing submission events to false.
@@ -198,6 +215,11 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
         if (cannot_navigate())
             return {};
     }
+
+    // submit() intentionally skips constraint validation and the submit event.
+    // It still requires recent user activation for a credential suggestion.
+    if (options.from_submit_binding)
+        notify_credential_submission();
 
     // 6. Let encoding be the result of picking an encoding for the form.
     auto encoding = TRY_OR_THROW_OOM(vm, pick_an_encoding());
@@ -295,7 +317,7 @@ WebIDL::ExceptionOr<void> HTMLFormElement::submit_form(GC::Ref<HTMLElement> subm
 
     // 22. Let targetNavigable be the first return value of applying the rules for choosing a navigable given target,
     //     form's node navigable, and noopener.
-    auto target_navigable = form_document->navigable()->choose_a_navigable(target, no_opener).navigable;
+    auto target_navigable = form_document->navigable()->choose_a_navigable(target, no_opener, ActivateTab::Yes, {}, parsed_action, method == MethodAttributeState::GET ? "GET"sv : "POST"sv).navigable;
 
     // 23. If targetNavigable is null, then return.
     if (!target_navigable) {

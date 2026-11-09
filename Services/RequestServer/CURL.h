@@ -33,6 +33,9 @@ ByteString build_curl_resolve_list(DNS::LookupResult const& dns_result, StringVi
 // requests to the same host can be spread across the addresses it resolved to instead of all piling onto whichever
 // one libcurl would pick. Empty when there is only one address, i.e. nothing to spread over.
 Optional<ByteString> build_curl_connect_to_entry(DNS::LookupResult const& dns_result, StringView host, u16 port, u32 address_index);
+// Stable curl destination identity for an approved address set. This keeps
+// pooled connections from escaping a later DNS/address-policy decision.
+ByteString policy_connection_host(DNS::LookupResult const&, StringView host, u16 port);
 Requests::NetworkError curl_code_to_network_error(int code);
 ErrorOr<void> initialize_libcurl();
 

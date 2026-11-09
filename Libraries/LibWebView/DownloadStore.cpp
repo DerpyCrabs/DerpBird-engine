@@ -103,6 +103,22 @@ ErrorOr<Database::MigrationOutcome> DownloadStore::migrate_schema(Database::Data
                 ALTER TABLE Downloads ADD COLUMN may_replace_destination INTEGER NOT NULL DEFAULT 0;
             )#"sv,
         },
+        {
+            .version = 4u,
+            .sql = R"#(
+                CREATE TABLE DownloadHistory (
+                    id INTEGER PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    destination TEXT NOT NULL,
+                    status INTEGER NOT NULL,
+                    downloaded_size INTEGER NOT NULL,
+                    total_size INTEGER NOT NULL,
+                    error TEXT NOT NULL,
+                    created_time INTEGER NOT NULL
+                );
+                CREATE INDEX DownloadHistoryRecency ON DownloadHistory (created_time DESC, id DESC);
+            )#"sv,
+        },
     });
 
     return database.migrate("Downloads"sv, migrations, mode);
@@ -156,8 +172,21 @@ ErrorOr<NonnullOwnPtr<DownloadStore>> DownloadStore::create(Database::Database& 
 
     statements.maximum_download_id = TRY(database.prepare_statement(R"#(
         SELECT IFNULL(MAX(id), 0)
-        FROM Downloads;
+        FROM (SELECT id FROM Downloads UNION ALL SELECT id FROM DownloadHistory);
     )#"sv));
+
+    statements.save_history = TRY(database.prepare_statement(R"#(
+        INSERT INTO DownloadHistory (id, url, destination, status, downloaded_size, total_size, error, created_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET url=excluded.url, destination=excluded.destination,
+            status=excluded.status, downloaded_size=excluded.downloaded_size,
+            total_size=excluded.total_size, error=excluded.error;
+    )#"sv));
+    statements.list_history = TRY(database.prepare_statement(
+        "SELECT id,url,destination,status,downloaded_size,total_size,error,created_time FROM DownloadHistory ORDER BY id ASC"sv));
+    statements.delete_history = TRY(database.prepare_statement("DELETE FROM DownloadHistory WHERE id=?"sv));
+    statements.trim_history = TRY(database.prepare_statement(
+        "DELETE FROM DownloadHistory WHERE id IN (SELECT id FROM DownloadHistory ORDER BY created_time DESC,id DESC LIMIT -1 OFFSET 5000)"sv));
 
     return adopt_own(*new DownloadStore { database, move(statements) });
 }
@@ -206,6 +235,7 @@ void DownloadStore::remove_download(i64 id)
         return;
 
     m_database->execute_statement(m_statements.delete_download, {}, id);
+    m_database->execute_statement(m_statements.delete_history, {}, id);
 }
 
 Vector<DownloadRecord> DownloadStore::resumable_downloads()
@@ -268,6 +298,36 @@ i64 DownloadStore::maximum_download_id()
         });
 
     return maximum_id;
+}
+
+void DownloadStore::save_history(DownloadHistoryRecord const& record)
+{
+    if (!m_database || record.id < 0 || record.status < 2 || record.status > 4
+        || record.downloaded_size < 0 || record.total_size < -1)
+        return;
+    m_database->execute_statement(m_statements.save_history, {}, record.id, record.url,
+        record.destination, record.status, record.downloaded_size, record.total_size, record.error, record.created_time);
+    m_database->execute_statement(m_statements.trim_history, {});
+}
+
+Vector<DownloadHistoryRecord> DownloadStore::download_history()
+{
+    Vector<DownloadHistoryRecord> records;
+    if (!m_database) return records;
+    m_database->execute_statement(m_statements.list_history, [&](auto statement) -> ErrorOr<void> {
+        auto id = m_database->result_i64_checked(statement, 0);
+        auto status = m_database->result_i64_checked(statement, 3);
+        auto size = m_database->result_i64_checked(statement, 4);
+        auto total = m_database->result_i64_checked(statement, 5);
+        if (id.is_error() || status.is_error() || size.is_error() || total.is_error()
+            || id.value() < 0 || status.value() < 2 || status.value() > 4 || size.value() < 0 || total.value() < -1)
+            return {};
+        records.append({ id.value(), m_database->result_column<String>(statement, 1),
+            m_database->result_column<String>(statement, 2), static_cast<u8>(status.value()), size.value(), total.value(),
+            m_database->result_column<String>(statement, 6), m_database->result_column<UnixDateTime>(statement, 7) });
+        return {};
+    });
+    return records;
 }
 
 }

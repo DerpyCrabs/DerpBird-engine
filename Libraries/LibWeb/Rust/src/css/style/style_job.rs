@@ -117,6 +117,7 @@ impl SealedStyleInputs {
                 let base_url = resource_context_urls[offset..].as_ptr();
                 offset += entry.base_url_length;
                 FfiStyleSheetResourceContextEntry {
+                    derpbird_authority_id: entry.derpbird_authority_id,
                     source_identity: entry.source_identity,
                     base_url,
                     base_url_length: entry.base_url_length,

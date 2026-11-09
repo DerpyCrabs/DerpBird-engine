@@ -4817,10 +4817,20 @@ void TabWidget::rebuild_page_column()
     add_page_to_page_column();
 }
 
+QWidget* TabWidget::detach_page_stack(QWidget* parent)
+{
+    m_page_stack_detached = true;
+    m_page_column_layout->removeWidget(m_stacked_widget);
+    m_stacked_widget->setParent(parent);
+    return m_stacked_widget;
+}
+
 // The bookmarks bar heads the page, unless it only shows over the page while the pointer is near the toolbar. The tab
 // performance monitor's row ends the column.
 void TabWidget::add_page_to_page_column()
 {
+    if (m_page_stack_detached)
+        return;
     if (!m_bookmarks_bar->shows_over_page())
         m_page_column_layout->addWidget(m_bookmarks_bar);
     m_page_column_layout->addWidget(m_stacked_widget, 1);

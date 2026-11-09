@@ -125,6 +125,7 @@ void MemoryCache::create_entry(URL::URL const& url, StringView method, HeaderLis
     }
 
     auto response_headers_copy = HeaderList::create();
+    response_headers_copy->set_canonical_host_names(received_response_headers.canonical_host_names());
     store_header_and_trailer_fields(response_headers_copy, response_headers);
 
     Entry cache_entry {

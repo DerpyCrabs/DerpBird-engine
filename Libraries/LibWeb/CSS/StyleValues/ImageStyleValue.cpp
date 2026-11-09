@@ -144,6 +144,7 @@ ImageStyleValue::ImageStyleValue(StyleValueFFI::StyleValueData const* data)
     : AbstractImageStyleValue(Type::Image, data)
 {
     auto const& context = data->image._0->resource_context;
+    m_derpbird_insertion_authority = DerpBirdInsertionAuthority::resolve(context.derpbird_authority_id);
     if (context.has_base_url)
         m_style_resource_base_url = DOMURL::parse(url_text_from_rust_data(context.base_url));
     if (context.has_parent_style_sheet_origin_clean)
@@ -173,6 +174,7 @@ GC::Ptr<HTML::SharedResourceRequest> ImageStyleValue::fetch_image(DOM::Document&
         .value = RuleOrDeclaration::Rule {},
         .style_resource_base_url = m_style_resource_base_url,
         .parent_style_sheet_origin_clean = m_parent_style_sheet_origin_clean,
+        .derpbird_insertion_authority = m_derpbird_insertion_authority,
     };
 
     return fetch_an_external_image_for_a_stylesheet(request_url, rule_or_declaration, document);
@@ -195,7 +197,8 @@ void ImageStyleValue::load_any_resources(DOM::Document& document)
 ImageStyleValueResource* ImageStyleValue::resource_registered_by_clients(DOM::Document const& document) const
 {
     for (auto const* client : m_clients) {
-        if (client->m_resource && client->document().ptr() == &document)
+        if (client->m_resource && client->document().ptr() == &document
+            && client->m_resource->key().derpbird_insertion_authority == m_derpbird_insertion_authority)
             return client->m_resource;
     }
     return nullptr;
@@ -203,6 +206,7 @@ ImageStyleValueResource* ImageStyleValue::resource_registered_by_clients(DOM::Do
 
 void ImageStyleValue::set_style_sheet(StyleSheetState* style_sheet)
 {
+    m_derpbird_insertion_authority = nullptr;
     m_style_resource_base_url.clear();
     m_resolved_url.clear();
     m_parent_style_sheet_origin_clean.clear();
@@ -216,6 +220,7 @@ void ImageStyleValue::set_style_sheet(StyleSheetState* style_sheet)
 
 void ImageStyleValue::update_style_sheet_resource_context(StyleSheetState const& style_sheet)
 {
+    m_derpbird_insertion_authority = style_sheet.derpbird_insertion_authority();
     m_style_resource_base_url = style_sheet.style_resource_base_url();
     m_resolved_url.clear();
     m_parent_style_sheet_origin_clean = style_sheet.is_origin_clean();
@@ -306,8 +311,10 @@ Optional<ImageStyleValueResourceKey> ImageStyleValue::resource_key(DOM::Document
 
     // OPTIMIZATION: Most url() values have no request modifiers, so don't rebuild the URL value for those.
     if (m_value->image._0->url_modifiers.length == 0)
-        return ImageStyleValueResourceKey { .url = resolved_url.release_value(), .cross_origin = {}, .integrity = {}, .referrer_policy = {} };
-    return ImageStyleValueResourceKey::create(resolved_url.release_value(), url_value());
+        return ImageStyleValueResourceKey { .url = resolved_url.release_value(), .cross_origin = {}, .integrity = {}, .referrer_policy = {}, .derpbird_insertion_authority = m_derpbird_insertion_authority };
+    auto key = ImageStyleValueResourceKey::create(resolved_url.release_value(), url_value());
+    key.derpbird_insertion_authority = m_derpbird_insertion_authority;
+    return key;
 }
 
 ::URL::URL ImageStyleValue::style_resource_base_url(DOM::Document const& document) const

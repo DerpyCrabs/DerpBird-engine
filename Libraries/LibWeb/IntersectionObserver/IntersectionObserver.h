@@ -103,6 +103,6 @@ private:
 };
 
 GC::Ref<WebIDL::CallbackType> create_lazy_load_intersection_observer_callback(DOM::Document&);
-void invoke_intersection_observer_callback(IntersectionObserver&, Vector<GC::Root<IntersectionObserverEntry>>&);
+WEB_API void invoke_intersection_observer_callback(IntersectionObserver&, Vector<GC::Root<IntersectionObserverEntry>>&);
 
 }

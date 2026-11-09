@@ -82,6 +82,16 @@ MatchResult ECMAScriptRegex::test(Utf16View input, size_t start_pos) const
     return MatchResult::NoMatch;
 }
 
+MatchResult ECMAScriptRegex::test_anchored_budgeted(Utf16View input, size_t start_pos, u64& remaining) const
+{
+    auto result = m_impl->rust_regex.test_anchored_budgeted(input, start_pos, remaining);
+    if (result == 1)
+        return MatchResult::Match;
+    if (result == -1)
+        return MatchResult::LimitExceeded;
+    return MatchResult::NoMatch;
+}
+
 unsigned int ECMAScriptRegex::capture_count() const
 {
     return m_impl->rust_regex.capture_count();

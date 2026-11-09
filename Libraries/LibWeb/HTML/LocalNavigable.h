@@ -80,6 +80,7 @@ class WEB_API LocalNavigable : public Navigable {
     GC_DECLARE_ALLOCATOR(LocalNavigable);
 
 public:
+    Optional<URL::URL> derpbird_click_to_load_url;
     virtual ~LocalNavigable() override;
 
     using NullOrError = NavigationParamsNullOrError;
@@ -178,7 +179,7 @@ public:
         WindowType window_type;
     };
 
-    ChosenNavigable choose_a_navigable(Utf16View name, TokenizedFeature::NoOpener no_opener, ActivateTab = ActivateTab::Yes, Optional<TokenizedFeature::Map const&> window_features = {});
+    ChosenNavigable choose_a_navigable(Utf16View name, TokenizedFeature::NoOpener no_opener, ActivateTab = ActivateTab::Yes, Optional<TokenizedFeature::Map const&> window_features = {}, Optional<URL::URL> popup_url = {}, StringView popup_method = "GET"sv);
 
     GC::Ptr<Navigable> find_a_navigable_by_target_name(Utf16View name);
     bool is_familiar_with(Navigable&);

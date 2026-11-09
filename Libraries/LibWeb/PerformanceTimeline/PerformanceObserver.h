@@ -43,7 +43,7 @@ public:
 
     Vector<PerformanceObserverInit> const& options_list() const { return m_options_list; }
     WebIDL::CallbackType& callback() { return *m_callback; }
-    JS::Completion invoke_callback(GC::Ref<PerformanceObserverEntryList>, Optional<u64> dropped_entries_count);
+    WEB_API JS::Completion invoke_callback(GC::Ref<PerformanceObserverEntryList>, Optional<u64> dropped_entries_count);
     static JS::Value supported_entry_types(JS::VM&);
 
     void append_to_observer_buffer(Badge<HTML::WindowOrWorkerGlobalScopeMixin>, GC::Ref<PerformanceTimeline::PerformanceEntry>);

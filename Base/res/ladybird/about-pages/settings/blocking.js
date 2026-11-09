@@ -20,6 +20,7 @@ const maximumCustomFilterSize = 4 * 1024 * 1024;
 
 let updateTimer;
 let savedCustomFilters = "";
+const listRows = new Map();
 
 function createListRow(list, removable = false) {
     const row = document.querySelector("#filter-list-row").content.firstElementChild.cloneNode(true);
@@ -51,7 +52,26 @@ function createListRow(list, removable = false) {
         remove.remove();
     }
 
+    const status = document.createElement("span");
+    status.className = "description list-update-status";
+    label.append(status);
+    updateListRow(row, list);
     return row;
+}
+
+function updateListRow(row, list) {
+    const setText = (element, text) => { if (element.textContent !== text) element.textContent = text; };
+    row.querySelector("input").checked = list.enabled;
+    setText(row.querySelector(".label"), list.name ?? list.url);
+    setText(row.querySelector(".description"), list.description || (list.url ? new URL(list.url).host : "Local file"));
+    const update = list.updateStatus ?? {};
+    const timestamp = Number.isFinite(list.lastUpdatedAt) ? new Date(list.lastUpdatedAt).toLocaleString() : null;
+    const messages = [];
+    if (update.state === "updating") messages.push("Updating…");
+    else if (update.state === "queued") messages.push("Waiting to update…");
+    if (update.error) messages.push(update.error);
+    messages.push(timestamp ? `Last updated: ${timestamp}` : list.url ? "Not downloaded yet" : "No local data");
+    setText(row.querySelector(".list-update-status"), messages.join(" · "));
 }
 
 function createDisabledSiteRow(site) {
@@ -95,12 +115,25 @@ function loadSettings(settings) {
     }
 
     if (Object.hasOwn(settings, "contentBlockerLists")) {
-        contentBlockerLists.replaceChildren();
-        languageLists.replaceChildren();
-
+        const retained = new Set();
+        const positions = new Map([[contentBlockerLists, 0], [languageLists, 0]]);
         for (const list of settings.contentBlockerLists) {
             const container = list.builtIn && list.languageSpecific ? languageLists : contentBlockerLists;
-            container.append(createListRow(list, !list.builtIn));
+            let row = listRows.get(list.identifier);
+            if (!row) {
+                row = createListRow(list, !list.builtIn);
+                listRows.set(list.identifier, row);
+            } else {
+                updateListRow(row, list);
+            }
+            retained.add(list.identifier);
+            const position = positions.get(container);
+            if (container.children[position] !== row)
+                container.insertBefore(row, container.children[position] ?? null);
+            positions.set(container, position + 1);
+        }
+        for (const [identifier, row] of listRows) {
+            if (!retained.has(identifier)) { row.remove(); listRows.delete(identifier); }
         }
     }
 

@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <LibWeb/Page/DerpBirdInsertionAuthority.h>
 #include <AK/HashMap.h>
 #include <AK/HashTable.h>
 #include <AK/Optional.h>
@@ -91,6 +92,7 @@ public:
     virtual bool is_paintable(GC::Ptr<HTML::DecodedImageData> decoded_image_data) const override { return !!decoded_image_data; }
 
 private:
+    RefPtr<DerpBirdInsertionAuthority> m_derpbird_insertion_authority;
     friend class ImageStyleValueResource;
     friend class Client;
     friend class StyleSheetState;

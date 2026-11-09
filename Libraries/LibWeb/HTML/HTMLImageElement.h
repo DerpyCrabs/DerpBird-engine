@@ -84,7 +84,7 @@ public:
     void react_to_changes_in_the_environment();
 
     // https://html.spec.whatwg.org/multipage/images.html#update-the-image-data
-    void update_the_image_data(bool restart_the_animations = false, bool maybe_omit_events = false);
+    WEB_API void update_the_image_data(bool restart_the_animations = false, bool maybe_omit_events = false);
 
     // https://html.spec.whatwg.org/multipage/images.html#use-srcset-or-picture
     [[nodiscard]] bool uses_srcset_or_picture() const;

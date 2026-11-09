@@ -30,7 +30,10 @@ JS::ThrowCompletionOr<DOM::NodeFilter::Result> accept_node(JS::Realm& realm, DOM
 {
     auto& callback = filter.callback();
     auto& callback_realm = callback.associated_realm();
-    auto wrapped_node = Bindings::wrap(Bindings::host_defined_wrapper_world(callback_realm), callback_realm, GC::Ref { node });
+    auto& world = Bindings::host_defined_wrapper_world(callback_realm);
+    if (world.is_detached())
+        return throw_completion(realm, WebIDL::InvalidStateError::create("NodeFilter execution world is closed"_utf16));
+    auto wrapped_node = Bindings::wrap(world, callback_realm, GC::Ref { node });
     auto result = WebIDL::call_user_object_operation(callback, "acceptNode"_utf16_fly_string, {}, { { wrapped_node } });
     if (result.is_abrupt())
         return result;

@@ -27,6 +27,8 @@ class QWidget;
 namespace Ladybird {
 
 class ProcessManagerWindow;
+class DerpBirdStyleStore;
+class DerpBirdCredentialManager;
 
 struct WindowConfiguration {
     Optional<Web::DevicePixels> x {};
@@ -35,6 +37,9 @@ struct WindowConfiguration {
     Optional<Web::DevicePixels> height {};
     Optional<bool> maximized {};
 };
+
+class DerpBirdScriptStore;
+class DerpBirdValueHost;
 
 enum class ShowWindow {
     No,
@@ -48,7 +53,11 @@ class Application final
 
 public:
     virtual ~Application() override;
+    ErrorOr<DerpBirdStyleStore*> derpbird_style_store();
+    void derpbird_credentials_request(JsonValue const&, bool is_private, Function<void(ErrorOr<JsonValue>)>);
 
+    JsonArray derpbird_script_commands(WebView::WebContentPage const&, Optional<Web::HTML::CrossProcessId> = {});
+    ErrorOr<void> invoke_derpbird_script_command(WebView::WebContentPage const&, String const&, JsonObject const&, Optional<Web::HTML::CrossProcessId> = {});
     Function<void(URL::URL)> on_open_file;
 
     // A page's initial navigation, when there is one, starts in place of the first initial URL.
@@ -61,6 +70,8 @@ public:
     void offer_to_restore_unexpectedly_closed_tabs(BrowserWindow&);
     void open_startup_tabs(BrowserWindow&, Vector<URL::URL> const&);
     virtual WebView::SessionLaunchPolicy launch_restore_policy() const override;
+
+    ErrorOr<DerpBirdScriptStore*> derpbird_script_store();
 
     void open_new_tab();
     void open_new_window(WebView::IsPrivate);
@@ -217,13 +228,18 @@ private:
     virtual void on_recently_closed_entries_changed() const override;
 
     OwnPtr<QApplication> m_application;
+    OwnPtr<DerpBirdValueHost> m_derpbird_values;
+    OwnPtr<DerpBirdCredentialManager> m_derpbird_credentials;
     BrowserWindow* m_active_window { nullptr };
     OwnPtr<ProcessManagerWindow> m_process_manager_window;
+    OwnPtr<DerpBirdStyleStore> m_derpbird_style_store;
 
     bool m_private_session_restart_in_progress { false };
     bool m_quit_in_progress { false };
     bool m_quit_is_finishing { false };
     Vector<QPointer<BrowserWindow>> m_windows_awaiting_quit_preflight;
+    OwnPtr<DerpBirdScriptStore> m_derpbird_script_store;
+
 };
 
 }

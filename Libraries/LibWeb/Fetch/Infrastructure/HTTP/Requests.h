@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <LibWeb/Page/DerpBirdInsertionAuthority.h>
 #include <AK/ByteBuffer.h>
 #include <AK/ByteString.h>
 #include <AK/Error.h>
@@ -49,6 +50,12 @@ class Response;
 // https://fetch.spec.whatwg.org/#concept-request
 class WEB_API Request final : public RefCounted<Request> {
 public:
+    Optional<URL::URL> derpbird_approved_navigation_url;
+    bool derpbird_subframe_navigation { false };
+    Optional<URL::URL> derpbird_popup_source {};
+    Optional<URL::URL> derpbird_popup_top {};
+    bool derpbird_popunder { false };
+
     enum class CredentialsMode {
         Omit,
         SameOrigin,
@@ -261,6 +268,9 @@ public:
 
     [[nodiscard]] Utf16String const& integrity_metadata() const { return m_integrity_metadata; }
     void set_integrity_metadata(Utf16String integrity_metadata) { m_integrity_metadata = move(integrity_metadata); }
+
+    RefPtr<DerpBirdInsertionAuthority> const& derpbird_insertion_authority() const { return m_derpbird_insertion_authority; }
+    void set_derpbird_insertion_authority(RefPtr<DerpBirdInsertionAuthority> authority) { m_derpbird_insertion_authority = move(authority); }
 
     [[nodiscard]] Utf16String const& cryptographic_nonce_metadata() const { return m_cryptographic_nonce_metadata; }
     void set_cryptographic_nonce_metadata(Utf16String cryptographic_nonce_metadata) { m_cryptographic_nonce_metadata = move(cryptographic_nonce_metadata); }
@@ -503,6 +513,7 @@ private:
     // https://fetch.spec.whatwg.org/#concept-request-nonce-metadata
     // A request has associated cryptographic nonce metadata (a string). Unless stated otherwise, it is the empty
     // string.
+    RefPtr<DerpBirdInsertionAuthority> m_derpbird_insertion_authority;
     Utf16String m_cryptographic_nonce_metadata;
 
     // https://fetch.spec.whatwg.org/#concept-request-parser-metadata

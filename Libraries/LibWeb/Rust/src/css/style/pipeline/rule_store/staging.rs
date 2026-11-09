@@ -132,7 +132,7 @@ pub(in crate::css::style) struct ProgramStaging {
     rule_in_a_layer: StagedField<RuleID, bool>,
     rule_gated_by_container_query: StagedField<RuleID, bool>,
     rule_liveness: StagedField<RuleID, bool>,
-    layer_orders: StagedField<TreeScopeID, HashMap<CascadeLayerID, u32>>,
+    layer_orders: StagedField<(TreeScopeID, u8), HashMap<CascadeLayerID, u32>>,
     scopes_using_document_sheets: StagedField<TreeScopeID, bool>,
     sheets_in_scope: StagedField<TreeScopeID, Vec<SheetID>>,
     sheet_rule_replacements: Column<Option<SheetRuleReplacement>>,
@@ -271,33 +271,45 @@ impl StyleEngine {
     }
 
     /// Put the qualified layer names in the order one tree scope declares them in.
+    #[cfg(test)]
     pub fn set_layer_order(&mut self, scope: TreeScopeID, layers: &[CascadeLayerID]) {
+        self.set_layer_order_for_origin(scope, layers, CascadeOrigin::Author as u8);
+    }
+    pub fn set_layer_order_for_origin(&mut self, scope: TreeScopeID, layers: &[CascadeLayerID], origin: u8) {
         let ranks = RuleStore::layer_ranks_in_order(layers);
-        let pending_order = self.host.program_staging.layer_orders.after(scope);
+        let pending_order = self.host.program_staging.layer_orders.after((scope, origin));
         if pending_order.map_or_else(
-            || self.retained.rules.layer_ranks_match(scope, &ranks),
+            || self.retained.rules.layer_ranks_match(scope, origin, &ranks),
             |pending| pending == &ranks,
         ) {
             return;
         }
-        self.host
-            .program_staging
-            .layer_orders
-            .stage(scope, || self.retained.rules.layer_ranks(scope), ranks);
+        self.host.program_staging.layer_orders.stage(
+            (scope, origin),
+            || self.retained.rules.layer_ranks(scope, origin),
+            ranks,
+        );
     }
 
     /// The dense layer rank consumed by the C++ property cascade and non-style rule lookup.
     #[must_use]
     pub fn layer_index(&self, scope: TreeScopeID, layer: CascadeLayerID) -> u32 {
-        self.host.program_staging.layer_orders.after(scope).map_or_else(
-            || self.retained.rules.layer_index(scope, layer),
-            |ranks| {
-                ranks
-                    .get(&layer)
-                    .copied()
-                    .unwrap_or_else(|| u32::try_from(ranks.len()).expect("cascade layer count exhausted"))
-            },
-        )
+        self.layer_index_for_origin(scope, layer, CascadeOrigin::Author as u8)
+    }
+    pub fn layer_index_for_origin(&self, scope: TreeScopeID, layer: CascadeLayerID, origin: u8) -> u32 {
+        self.host
+            .program_staging
+            .layer_orders
+            .after((scope, origin))
+            .map_or_else(
+                || self.retained.rules.layer_index_for_origin(scope, layer, origin),
+                |ranks| {
+                    ranks
+                        .get(&layer)
+                        .copied()
+                        .unwrap_or_else(|| u32::try_from(ranks.len()).expect("cascade layer count exhausted"))
+                },
+            )
     }
 
     /// The declaration block `rule` holds, as this transaction staged it.
@@ -588,11 +600,15 @@ impl StyleEngine {
         changes.sheets.sort_unstable();
         changes.sheets.dedup();
 
-        changes.layered_scopes = moved(staging.layer_orders.pairs()).collect();
+        changes.layered_scopes = moved(staging.layer_orders.pairs()).map(|(scope, _)| scope).collect();
+        changes.layered_scopes.sort_unstable();
+        changes.layered_scopes.dedup();
         // NB: A scope's first layer order places no layered rule that was there before it.
-        changes
-            .reordered_scopes
-            .extend(moved(staging.layer_orders.pairs()).filter(|&scope| program.layer_order_is_initialized(scope)));
+        changes.reordered_scopes.extend(
+            moved(staging.layer_orders.pairs())
+                .filter(|&(scope, origin)| program.layer_order_is_initialized_for_origin(scope, origin))
+                .map(|(scope, _)| scope),
+        );
         changes.reordered_scopes.sort_unstable();
         changes.reordered_scopes.dedup();
         changes
@@ -655,8 +671,8 @@ impl StyleEngine {
         let layer_orders = self.host.program_staging.layer_orders.take_dirty();
         let scopes = self.host.program_staging.scopes_using_document_sheets.take_dirty();
         if !layer_orders.is_empty() || !scopes.is_empty() {
-            for (scope, ranks) in layer_orders {
-                self.retained.rules.set_layer_ranks(scope, ranks);
+            for ((scope, origin), ranks) in layer_orders {
+                self.retained.rules.set_layer_ranks(scope, origin, ranks);
             }
             for (scope, uses_document_sheets) in scopes {
                 if uses_document_sheets {

@@ -129,7 +129,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             app->offer_to_restore_unexpectedly_closed_tabs(*restored_window);
         } else {
             auto& window = app->new_window(browser_options.urls, configuration);
-            window.setWindowTitle(BROWSER_PRODUCT_NAME);
+            window.setWindowTitle("DerpBird");
             app->offer_to_restore_unexpectedly_closed_tabs(window);
         }
     }

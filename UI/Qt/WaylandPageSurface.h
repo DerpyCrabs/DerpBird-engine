@@ -18,6 +18,7 @@
 #include <QPoint>
 #include <QPointer>
 #include <QRect>
+#include <QRectF>
 #include <QSize>
 
 #include <sys/types.h>
@@ -60,12 +61,14 @@ public:
         u64 page_id { 0 };
         i32 bitmap_id { -1 };
         // The part of the dma-buf to show, in its pixels.
-        QRect source;
+        QRectF source;
         // Where to show it, in the logical coordinates of the window's surface.
         QPoint position;
         QSize destination;
         // Whether the backing store may hold different pixels than when it was last presented.
         bool has_new_content { true };
+        bool is_opaque { true };
+        wl_surface* above { nullptr };
     };
 
     enum class PresentResult {
@@ -77,6 +80,7 @@ public:
         Failed,
     };
     PresentResult present(QWindow& parent, Frame const&);
+    wl_surface* surface() const { return m_surface; }
     // Whether the frame would show a different part of its buffer, or show it somewhere else, than the surface does.
     bool would_change_placement(Frame const&) const;
     // Whether the last present takes effect only once the parent commits, because it moved the surface or because the
@@ -176,7 +180,9 @@ private:
     Optional<QPoint> m_position;
     bool m_position_needs_parent_commit { false };
     Buffer const* m_presented_buffer { nullptr };
-    QRect m_presented_source;
+    QRectF m_presented_source;
+    wl_surface* m_above { nullptr };
+    bool m_presented_opaque { true };
     QSize m_presented_destination;
     bool m_is_synchronized { false };
     bool m_is_attached { false };

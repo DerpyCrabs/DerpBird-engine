@@ -184,7 +184,9 @@ NonnullRefPtr<Response> Response::clone() const
     new_response->set_aborted(m_aborted);
     new_response->set_url_list(m_url_list);
     new_response->set_status(m_status);
+    new_response->set_derpbird_click_to_load(m_derpbird_click_to_load);
     new_response->set_status_message(m_status_message);
+    new_response->header_list()->set_canonical_host_names(m_header_list->canonical_host_names());
     for (auto const& header : *m_header_list)
         new_response->header_list()->append(header);
     new_response->set_cache_state(m_cache_state);

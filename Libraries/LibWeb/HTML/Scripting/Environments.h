@@ -220,7 +220,7 @@ private:
     Vector<GC::Ref<WorkerAgentParent>> m_owned_worker_agents;
 };
 
-RunScriptDecision can_run_script(EnvironmentSettingsObject const&);
+WEB_API RunScriptDecision can_run_script(EnvironmentSettingsObject const&);
 bool is_scripting_enabled(EnvironmentSettingsObject const&);
 bool is_scripting_disabled(EnvironmentSettingsObject const&);
 void prepare_to_run_script(EnvironmentSettingsObject&);

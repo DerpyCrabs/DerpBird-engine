@@ -30,6 +30,7 @@ members = [
     "Tests/LibIPC/RustEchoServer",
 ]
 exclude = [
+    "Libraries/LibWeb/ContentBlocker/Rust/adblock",
     "Libraries/LibJS/Flap",
 ]
 resolver = "2"

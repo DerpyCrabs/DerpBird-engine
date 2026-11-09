@@ -306,7 +306,11 @@ ErrorOr<SessionStore::PersistedStorage> SessionStore::PersistedStorage::create(D
     if (database.options().foreign_keys != Database::Database::ForeignKeys::Yes)
         return Error::from_string_literal("Session storage relies on cascading deletes; open the connection with foreign keys enabled");
 
+    auto tree_schema = TRY(database.prepare_statement("CREATE TABLE IF NOT EXISTS DerpBirdTabTree (tab_id INTEGER PRIMARY KEY REFERENCES SessionTabs(id) ON DELETE CASCADE, parent_id INTEGER REFERENCES SessionTabs(id) ON DELETE SET NULL, CHECK(tab_id != parent_id));"sv));
+    TRY(database.try_execute_statement(tree_schema, {}));
     Statements statements {};
+    statements.tree_parent = TRY(database.prepare_statement("SELECT (SELECT parent_id FROM DerpBirdTabTree WHERE tab_id = :id) AS parent_id;"sv));
+    statements.set_tree_parent = TRY(database.prepare_statement("INSERT INTO DerpBirdTabTree(tab_id, parent_id) VALUES (:id, :parent) ON CONFLICT(tab_id) DO UPDATE SET parent_id = excluded.parent_id;"sv));
     statements.insert_session = TRY(database.prepare_statement("INSERT INTO Sessions (id, kind, closed_time, close_sequence, source_window_id, source_tab_index, origin, active_tab_index) VALUES (:id, :kind, :closed_time, :close_sequence, :source_window_id, :source_tab_index, :origin, :active_tab_index);"sv));
     statements.insert_tab = TRY(database.prepare_statement("INSERT INTO SessionTabs (id, session_id, tab_ordinal, active_url, current_used_step_index) VALUES (:id, :session_id, :tab_ordinal, :active_url, :current_used_step_index);"sv));
     statements.insert_tab_if_missing = TRY(database.prepare_statement("INSERT OR IGNORE INTO SessionTabs (id, session_id, tab_ordinal, active_url, current_used_step_index) VALUES (:id, :session_id, :tab_ordinal, :active_url, :current_used_step_index);"sv));
@@ -1819,6 +1823,36 @@ ErrorOr<void> SessionStore::tab_pinned_changed(SessionTabId tab_id, bool pinned)
     return drain_window_metadata();
 }
 
+ErrorOr<Optional<SessionTabId>> SessionStore::tab_tree_parent(SessionTabId id)
+{
+    if (!m_persisted_storage.has_value()) {
+        auto found = m_private_tab_tree.find(id);
+        if (found == m_private_tab_tree.end()) return Optional<SessionTabId> {};
+        return Optional<SessionTabId> { found->value };
+    }
+    auto& storage = *m_persisted_storage;
+    return storage.database->try_execute_bound_statement_one<Optional<SessionTabId>>(storage.statements.tree_parent,
+        [&](auto& bind) -> ErrorOr<void> { return bind("id"sv, id); },
+        [](Database::ResultRow& row) { return row.read_optional_integer<SessionTabId>("parent_id"sv); });
+}
+
+ErrorOr<void> SessionStore::set_tab_tree_parent(SessionTabId id, Optional<SessionTabId> parent)
+{
+    if (parent == id) return Error::from_string_literal("A tab cannot contain itself");
+    if (m_persisted_storage.has_value()) {
+        auto& storage = *m_persisted_storage;
+        TRY(storage.database->try_execute_bound_statement(storage.statements.set_tree_parent, [&](auto& bind) -> ErrorOr<void> {
+            TRY(bind("id"sv, id));
+            TRY(bind("parent"sv, parent));
+            return {};
+        }));
+    } else {
+        if (parent.has_value()) m_private_tab_tree.set(id, *parent);
+        else m_private_tab_tree.remove(id);
+    }
+    return {};
+}
+
 void SessionStore::tab_moved(TabMoved moved)
 {
     auto ordinal = index_as_size(moved.ordinal);
@@ -1937,8 +1971,12 @@ ErrorOr<void> SessionStore::finish_tab_close(PendingTabClose const& pending)
 ErrorOr<void> SessionStore::finish_window_close(PendingWindowClose const& pending)
 {
     bool any_tab_worth_keeping = false;
-    for (auto const& member : pending.members)
+    for (auto const& member : pending.members) {
         any_tab_worth_keeping |= is_tab_worth_keeping(member.tab.url);
+        // An explicitly created group is meaningful even before its tabs navigate.
+        if (!any_tab_worth_keeping)
+            any_tab_worth_keeping |= TRY(tab_tree_parent(member.tab_id)).has_value();
+    }
 
     if (pending.members.is_empty() || !any_tab_worth_keeping) {
         if (m_persisted_storage.has_value())

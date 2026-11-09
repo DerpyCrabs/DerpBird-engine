@@ -71,6 +71,8 @@ namespace Web::ContentSecurityPolicy {
 // https://w3c.github.io/webappsec-csp/#report-for-request
 void report_content_security_policy_violations_for_request(Fetch::Infrastructure::Request const& request, ViolationReporter const& report_violation)
 {
+    if (request.derpbird_insertion_authority()) return;
+
     // 1. Let CSP list be request’s policy container's CSP list.
     auto const& csp_list = request.policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list;
 
@@ -93,6 +95,9 @@ void report_content_security_policy_violations_for_request(Fetch::Infrastructure
 // https://w3c.github.io/webappsec-csp/#should-block-request
 Directives::Directive::Result should_request_be_blocked_by_content_security_policy(Fetch::Infrastructure::Request const& request, ViolationReporter const& report_violation)
 {
+    if (request.derpbird_insertion_authority())
+        return request.derpbird_insertion_authority()->active() ? Directives::Directive::Result::Allowed : Directives::Directive::Result::Blocked;
+
     // 1. Let CSP list be request’s policy container's CSP list.
     auto const& csp_list = request.policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list;
 
@@ -126,6 +131,9 @@ Directives::Directive::Result should_request_be_blocked_by_content_security_poli
 // https://w3c.github.io/webappsec-csp/#should-block-response
 Directives::Directive::Result should_response_to_request_be_blocked_by_content_security_policy(Fetch::Infrastructure::Response const& response, Fetch::Infrastructure::Request const& request, ViolationReporter const& report_violation)
 {
+    if (request.derpbird_insertion_authority())
+        return request.derpbird_insertion_authority()->active() ? Directives::Directive::Result::Allowed : Directives::Directive::Result::Blocked;
+
     // 1. Let CSP list be request’s policy container's CSP list.
     auto const& csp_list = request.policy_container().get<NonnullRefPtr<HTML::PolicyContainer const>>()->csp_list;
 

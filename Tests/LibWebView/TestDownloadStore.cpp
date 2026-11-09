@@ -277,3 +277,72 @@ TEST_CASE(migrating_an_already_migrated_schema_is_a_no_op)
     EXPECT_EQ(MUST(WebView::DownloadStore::migrate_schema(database)), Database::MigrationOutcome::Success);
     EXPECT_EQ(MUST(WebView::DownloadStore::migrate_schema(database, Database::MigrationMode::CheckOnly)), Database::MigrationOutcome::Success);
 }
+
+TEST_CASE(terminal_history_round_trip_clear_and_id_allocation)
+{
+    auto database = create_database();
+    auto store = create_store(database);
+    store->save_download(example_download(7));
+    WebView::DownloadHistoryRecord record {
+        .id = 9,
+        .url = "https://example.com/download"_string,
+        .destination = "/tmp/completed.bin"_string,
+        .status = 4,
+        .downloaded_size = 12,
+        .total_size = -1,
+        .error = "Interrupted"_string,
+        .created_time = UnixDateTime::from_seconds_since_epoch(1234),
+    };
+    store->save_history(record);
+    auto reopened = MUST(WebView::DownloadStore::create(database));
+    auto history = reopened->download_history();
+    EXPECT_EQ(history.size(), 1u);
+    EXPECT_EQ(history[0].status, 4u);
+    EXPECT_EQ(history[0].total_size, -1);
+    EXPECT_EQ(history[0].downloaded_size, 12);
+    EXPECT_EQ(history[0].error, "Interrupted"_string);
+    EXPECT_EQ(history[0].destination, record.destination);
+    EXPECT_EQ(history[0].created_time, record.created_time);
+    EXPECT_EQ(reopened->maximum_download_id(), 9);
+    EXPECT_EQ(reopened->resumable_downloads().size(), 1u);
+    record.status = 2;
+    record.total_size = 12;
+    record.error = {};
+    reopened->save_history(record);
+    EXPECT_EQ(reopened->download_history().size(), 1u);
+    EXPECT_EQ(reopened->download_history()[0].status, 2u);
+    EXPECT(reopened->download_history()[0].error.is_empty());
+    reopened->remove_download(9);
+    EXPECT(reopened->download_history().is_empty());
+    EXPECT_EQ(reopened->maximum_download_id(), 7);
+    auto disabled = WebView::DownloadStore::create_disabled();
+    disabled->save_history(record);
+    EXPECT(disabled->download_history().is_empty());
+}
+
+TEST_CASE(terminal_history_rejects_live_states_and_bounds_retention)
+{
+    auto database = create_database();
+    auto store = create_store(database);
+    WebView::DownloadHistoryRecord record {
+        .url = "https://example.com/download"_string,
+        .destination = "/tmp/completed.bin"_string,
+        .error = {},
+        .created_time = UnixDateTime::from_seconds_since_epoch(0),
+    };
+    for (u8 status : { 0, 1, 5 }) {
+        record.status = status;
+        store->save_history(record);
+    }
+    EXPECT(store->download_history().is_empty());
+    record.status = 3;
+    for (i64 id = 0; id <= 5000; ++id) {
+        record.id = id;
+        record.created_time = UnixDateTime::from_seconds_since_epoch(id);
+        store->save_history(record);
+    }
+    auto history = store->download_history();
+    EXPECT_EQ(history.size(), 5000u);
+    EXPECT_EQ(history.first().id, 1);
+    EXPECT_EQ(history.last().id, 5000);
+}

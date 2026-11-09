@@ -3542,6 +3542,14 @@ void Internals::update_style()
     window().associated_document().update_style();
 }
 
+bool Internals::set_derpbird_user_styles(Utf16String const& source)
+{
+    auto json = JsonValue::from_string(source.to_utf8());
+    if (json.is_error())
+        return false;
+    return !page().set_derpbird_user_styles(json.value()).is_error();
+}
+
 void Internals::set_user_style(Utf16String const& source)
 {
     page().set_user_style(source);

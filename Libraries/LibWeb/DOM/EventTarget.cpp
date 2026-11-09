@@ -19,6 +19,7 @@
 #include <LibJS/Runtime/VM.h>
 #include <LibJS/Runtime/Value.h>
 #include <LibJS/ScriptCompilation.h>
+#include <LibWeb/Bindings/WrapperWorld.h>
 #include <LibWeb/Bindings/EventTarget.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/Bindings/Wrappable.h>
@@ -174,6 +175,9 @@ void report_exception_for_callback(WebIDL::CallbackType& callback, JS::Value exc
 JS::Completion invoke_event_listener(WebIDL::CallbackType& callback, DOM::Event& event)
 {
     auto& callback_realm = callback.associated_realm();
+    // A detached extension world must not receive events or allocate wrappers.
+    if (host_defined_wrapper_world(callback_realm).is_detached())
+        return JS::js_undefined();
     auto this_value = current_target_wrapper(callback_realm, event);
     auto& event_realm = this_value ? this_value->shape().realm() : callback_realm;
     auto wrapped_event = Bindings::event(event_realm, GC::Ref { event });
@@ -200,6 +204,9 @@ JS::Completion invoke_event_handler(WebIDL::CallbackType& callback, DOM::Event& 
     }
 
     auto& callback_realm = callback.associated_realm();
+    // A detached extension world must not receive events or allocate wrappers.
+    if (host_defined_wrapper_world(callback_realm).is_detached())
+        return JS::js_undefined();
     auto this_value = current_target_wrapper(callback_realm, event);
     auto& event_realm = this_value ? this_value->shape().realm() : callback_realm;
     auto wrapped_event = Bindings::event(event_realm, GC::Ref { event });

@@ -41,6 +41,7 @@ public:
     int capture_slot(unsigned int slot) const { return m_capture_buffer[slot]; }
     /// Test for a match. Returns 1 on match, 0 on no match, -1 on limit exceeded.
     int test(Utf16View input, size_t start_pos = 0) const;
+    int test_anchored_budgeted(Utf16View input, size_t start_pos, u64& remaining) const;
     unsigned int capture_count() const;
     /// Total number of capture groups including group 0.
     unsigned int total_groups() const;

@@ -24,6 +24,8 @@ class WEBVIEW_API WebContentTestClient final
 public:
     WebContentTestClient(NonnullOwnPtr<IPC::Transport>, WebContentClient&);
     ~WebContentTestClient();
+    Function<void(u64, bool, ByteBuffer)> on_derpbird_value_probe;
+    virtual void did_probe_derpbird_values(u64, bool, ByteBuffer) override;
 
 private:
     virtual ErrorOr<OwnPtr<IPC::MessageBuffer>> handle(NonnullOwnPtr<IPC::Message>) override;

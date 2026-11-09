@@ -418,7 +418,7 @@ pub struct RuleStore {
     sheets_by_scope: Column<Vec<SheetID>>,
     /// Qualified layer-name ranks in each tree scope. Important declarations reverse the rank
     /// through the cascade-priority operator rather than maintaining a second order.
-    layer_ranks: Column<Option<HashMap<CascadeLayerID, u32>>>,
+    layer_ranks: Column<[Option<HashMap<CascadeLayerID, u32>>; 4]>,
 
     scopes_using_document_sheets: BitColumn,
     /// The `@scope` levels the scoped style rules are inside, by the scope their versions name,
@@ -510,8 +510,14 @@ impl RuleStore {
                 .sum::<usize>();
         let sheets_by_scope =
             self.sheets_by_scope.heap_size() + self.sheets_by_scope.iter().map(vec_bytes).sum::<usize>();
-        let layer_ranks =
-            self.layer_ranks.heap_size() + self.layer_ranks.iter().flatten().map(map_bytes).sum::<usize>();
+        let layer_ranks = self.layer_ranks.heap_size()
+            + self
+                .layer_ranks
+                .iter()
+                .flatten()
+                .flatten()
+                .map(map_bytes)
+                .sum::<usize>();
         sheets
             + self.rules.heap_size(sizer, |_, _| 0)
             + vec_bytes(&self.rule_children)
@@ -552,7 +558,7 @@ impl RuleStore {
                 atoms.extend(leased.iter().copied());
             }
         }
-        for ranks in self.layer_ranks.iter().flatten() {
+        for ranks in self.layer_ranks.iter().flatten().flatten() {
             visited += u64::try_from(ranks.len()).expect("layer rank count exceeds u64");
             atoms.extend(
                 ranks
@@ -1167,45 +1173,67 @@ impl RuleStore {
     }
 
     #[must_use]
-    pub fn layer_ranks_match(&self, scope: TreeScopeID, ranks: &HashMap<CascadeLayerID, u32>) -> bool {
+    pub fn layer_ranks_match(&self, scope: TreeScopeID, origin: u8, ranks: &HashMap<CascadeLayerID, u32>) -> bool {
         self.layer_ranks
             .get(scope.0 as usize)
+            .and_then(|origins| origins.get(origin as usize))
             .and_then(Option::as_ref)
             .map_or(ranks.is_empty(), |current| current == ranks)
     }
 
-    pub(crate) fn set_layer_ranks(&mut self, scope: TreeScopeID, ranks: HashMap<CascadeLayerID, u32>) -> bool {
+    pub(crate) fn set_layer_ranks(
+        &mut self,
+        scope: TreeScopeID,
+        origin: u8,
+        ranks: HashMap<CascadeLayerID, u32>,
+    ) -> bool {
         let index = scope.0 as usize;
         self.layer_ranks.ensure(index);
-        let initialized = self.layer_ranks[index].is_some();
-        if !initialized && ranks.is_empty() {
+        let current = &mut self.layer_ranks[index][origin as usize];
+        if current.is_none() && ranks.is_empty() {
             return false;
         }
-        if self.layer_ranks[index].as_ref() == Some(&ranks) {
+        if current.as_ref() == Some(&ranks) {
             return false;
         }
-        self.layer_ranks[index] = Some(ranks);
-
+        *current = Some(ranks);
         true
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn layer_order_is_initialized(&self, scope: TreeScopeID) -> bool {
-        self.layer_ranks.get(scope.0 as usize).is_some_and(Option::is_some)
+        self.layer_order_is_initialized_for_origin(scope, CascadeOrigin::Author as u8)
+    }
+    #[must_use]
+    pub fn layer_order_is_initialized_for_origin(&self, scope: TreeScopeID, origin: u8) -> bool {
+        self.layer_ranks
+            .get(scope.0 as usize)
+            .and_then(|origins| origins.get(origin as usize))
+            .is_some_and(Option::is_some)
     }
 
-    /// The comparable rank of a layer. A topology change rewrites these ranks without touching any
-    /// rule that references the layer.
     #[must_use]
     pub fn layer_rank(&self, scope: TreeScopeID, layer: CascadeLayerID) -> u64 {
         u64::from(self.layer_index(scope, layer))
     }
+    #[must_use]
+    pub fn layer_rank_for_origin(&self, scope: TreeScopeID, layer: CascadeLayerID, origin: u8) -> u64 {
+        u64::from(self.layer_index_for_origin(scope, layer, origin))
+    }
 
-    /// The dense rank C++ cascade consumers use. The implicit outer layer and an as-yet undeclared
-    /// name sort after every named layer in the scope.
     #[must_use]
     pub fn layer_index(&self, scope: TreeScopeID, layer: CascadeLayerID) -> u32 {
-        let Some(ranks) = self.layer_ranks.get(scope.0 as usize).and_then(Option::as_ref) else {
+        self.layer_index_for_origin(scope, layer, CascadeOrigin::Author as u8)
+    }
+    #[must_use]
+    pub fn layer_index_for_origin(&self, scope: TreeScopeID, layer: CascadeLayerID, origin: u8) -> u32 {
+        let Some(ranks) = self
+            .layer_ranks
+            .get(scope.0 as usize)
+            .and_then(|origins| origins.get(origin as usize))
+            .and_then(Option::as_ref)
+        else {
             return 0;
         };
         if layer != CascadeLayerID::UNLAYERED
@@ -1217,9 +1245,10 @@ impl RuleStore {
     }
 
     #[must_use]
-    pub fn layer_ranks(&self, scope: TreeScopeID) -> HashMap<CascadeLayerID, u32> {
+    pub fn layer_ranks(&self, scope: TreeScopeID, origin: u8) -> HashMap<CascadeLayerID, u32> {
         self.layer_ranks
             .get(scope.0 as usize)
+            .and_then(|origins| origins.get(origin as usize))
             .and_then(Option::as_ref)
             .cloned()
             .unwrap_or_default()
@@ -1571,8 +1600,11 @@ impl RuleStore {
     /// The parser publishes qualified name identities rather than ranks. This table is the one
     /// place that derives ranks, so shadow scopes can order the same spelling independently.
     pub fn set_layer_order(&mut self, scope: TreeScopeID, layers: &[CascadeLayerID]) -> bool {
+        self.set_layer_order_for_origin(scope, layers, CascadeOrigin::Author as u8)
+    }
+    pub fn set_layer_order_for_origin(&mut self, scope: TreeScopeID, layers: &[CascadeLayerID], origin: u8) -> bool {
         let ranks = Self::layer_ranks_in_order(layers);
-        self.set_layer_ranks(scope, ranks)
+        self.set_layer_ranks(scope, origin, ranks)
     }
 }
 

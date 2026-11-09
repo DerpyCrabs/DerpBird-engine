@@ -608,6 +608,12 @@ void ViewImplementation::open_url_in_new_tab(URL::URL const& url, Web::HTML::Act
         return;
     }
 
+    if (on_new_tab) {
+        if (auto* view = on_new_tab(activate_tab)) {
+            view->load(url);
+            return;
+        }
+    }
     Application::the().open_url_in_new_tab(url, activate_tab);
 }
 
@@ -623,6 +629,12 @@ void ViewImplementation::open_navigation_in_new_tab(Web::HTML::PreparedNavigatio
         return;
     }
 
+    if (on_new_tab) {
+        if (auto* view = on_new_tab(activate_tab)) {
+            view->load(move(navigation));
+            return;
+        }
+    }
     Application::the().open_navigation_in_new_tab(move(navigation), activate_tab);
 }
 
@@ -1543,6 +1555,15 @@ Web::CSS::PreferredColorScheme ViewImplementation::preferred_color_scheme_for_pa
     return m_preferred_color_scheme;
 }
 
+void ViewImplementation::set_transparent_background(bool transparent)
+{
+    m_transparent_background = transparent;
+    set_page_background_color(preferred_canvas_background_color());
+    traversable().for_each_hosting_page([&](WebContentPage& page) {
+        page.async_set_transparent_background(transparent);
+    });
+}
+
 void ViewImplementation::set_preferred_color_scheme(Web::CSS::PreferredColorScheme color_scheme)
 {
     m_preferred_color_scheme = color_scheme;
@@ -1615,6 +1636,7 @@ static void send_force_dark(WebContentPage const& page)
 void ViewImplementation::send_preferences_to_page(WebContentPage& page)
 {
     send_system_theme_to_page(page);
+    page.async_set_transparent_background(m_transparent_background);
     page.async_set_preferred_color_scheme(preferred_color_scheme_for_page(page));
     page.async_set_preferred_contrast(m_preferred_contrast);
     page.async_set_preferred_motion(m_preferred_motion);
@@ -2697,8 +2719,32 @@ static StringView known_blocked_resource_kind(StringView kind)
     return "Request"sv;
 }
 
-void ViewImplementation::did_block_resource(Badge<WebContentPage>, URL::URL const& url, StringView kind)
+void ViewImplementation::append_request_log(URL::URL const& url, StringView kind, String const& rule)
 {
+    // Keep individual events independently of the deduplicated site popover.
+    // Ring insertion is O(1), memory is bounded, and nothing is persisted.
+    auto safe_url = url;
+    safe_url.set_username(""sv);
+    safe_url.set_password(""sv);
+    safe_url.set_fragment({});
+    auto address = safe_url.serialize();
+    if (address.bytes().size() > 2048)
+        address = MUST(String::formatted("{}…", address.bytes_as_string_view().substring_view(0, 2048)));
+    m_blocking_log.enqueue(BlockingLogEntry { ++m_blocking_log_sequence, move(address), MUST(String::from_utf8(kind)), rule.bytes().size() <= 4096 ? rule : String {} });
+}
+
+void ViewImplementation::did_start_logged_request(Badge<WebContentPage>, URL::URL const& url, StringView kind)
+{
+    if (m_request_logging) append_request_log(url, kind, {});
+}
+
+void ViewImplementation::did_block_resource(Badge<WebContentPage>, URL::URL const& url, StringView kind, String const& rule)
+{
+    if (kind.is_one_of("Filter: rewrite"sv, "Filter: allow"sv, "Filter: response"sv, "Filter: CSP"sv, "Filter: permissions"sv)) {
+        if (m_request_logging) append_request_log(url, kind, rule);
+        return;
+    }
+    append_request_log(url, kind, rule);
     if (m_blocked_resources.size() >= MAX_BLOCKED_RESOURCES)
         return;
 
@@ -2715,6 +2761,11 @@ void ViewImplementation::did_block_resource(Badge<WebContentPage>, URL::URL cons
 void ViewImplementation::reset_blocked_resources()
 {
     m_blocked_resources.clear();
+    // A navigation commits after its response policies have already run. Keep
+    // those events in an explicitly enabled journal; the bounded ring spans
+    // navigations, while the site popover still resets for the new document.
+    if (!m_request_logging)
+        clear_blocking_log();
     notify_content_blocking_changed();
 }
 
@@ -2949,12 +3000,14 @@ void ViewImplementation::insert_clipboard_item(Web::Clipboard::SystemClipboardIt
     Application::the().insert_clipboard_item(move(item));
 }
 
-void ViewImplementation::toggle_page_mute_state()
+void ViewImplementation::toggle_page_mute_state(bool from_userscript)
 {
+    m_derpbird_muted_by_script = from_userscript;
     m_mute_state = Web::HTML::invert_mute_state(m_mute_state);
     traversable().for_each_hosting_page([&](WebContentPage& page) {
         page.client().set_audio_playback_mute_state(page.id(), m_mute_state);
     });
+    if (Application::the().on_derpbird_audio_changed) Application::the().on_derpbird_audio_changed(*this);
 }
 
 void ViewImplementation::update_audibility()
@@ -2964,7 +3017,9 @@ void ViewImplementation::update_audibility()
         if (page.audibility() == Audio::Audibility::Audible)
             audible = true;
     });
+    bool changed = audible != is_playing_audio();
     m_tab_indicators.set_active(TabIndicator::PlayingAudio, audible, MonotonicTime::now());
+    if (changed && Application::the().on_derpbird_audio_changed) Application::the().on_derpbird_audio_changed(*this);
 }
 
 void ViewImplementation::reset_page_media_state()
@@ -3020,6 +3075,8 @@ void ViewImplementation::set_page_background_color(Gfx::Color color)
 
 Gfx::Color ViewImplementation::preferred_canvas_background_color() const
 {
+    if (m_transparent_background)
+        return Gfx::Color::Transparent;
     if (m_preferred_color_scheme == Web::CSS::PreferredColorScheme::Dark)
         return Web::CSS::SystemColor::canvas(Web::CSS::PreferredColorScheme::Dark);
     if (m_preferred_color_scheme == Web::CSS::PreferredColorScheme::Light)

@@ -648,7 +648,8 @@ Optional<DisplayListRecording> start_rust_display_list_recording(Layout::BegunRe
             opaque_canvas = document.navigable()->container_state().used_color_scheme != color_scheme;
         }
         inputs.canvas_fill_rect = config.canvas_fill_rect;
-        inputs.canvas_color = CSS::SystemColor::canvas(color_scheme);
+        inputs.canvas_color = document.navigable()->is_top_level_traversable() && document.page().client().has_transparent_background()
+            ? Gfx::Color::Transparent : CSS::SystemColor::canvas(color_scheme);
         inputs.opaque_canvas = opaque_canvas;
         Gfx::IntRect bitmap_rect { {}, device_viewport_rect.size().to_type<int>() };
         inputs.bitmap_rect = bitmap_rect;

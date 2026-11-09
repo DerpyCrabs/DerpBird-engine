@@ -64,7 +64,7 @@ public:
         HTTP::Cookie::IncludeCredentials include_credentials,
         Optional<Requests::RequestTransferLeaseKey>,
         Optional<u32> address_selection_hint,
-        bool notify_on_cache_miss);
+        bool notify_on_cache_miss, bool suppress_response_cookies = false, u8 query_response_policy = 0);
 
     static NonnullOwnPtr<Request> connect(
         u64 request_id,
@@ -85,7 +85,7 @@ public:
         ByteString method,
         NonnullRefPtr<HTTP::HeaderList> request_headers,
         ByteBuffer request_body,
-        HTTP::Cookie::IncludeCredentials include_credentials);
+        HTTP::Cookie::IncludeCredentials include_credentials, bool suppress_response_cookies = false, u8 query_response_policy = 0);
 
     static NonnullOwnPtr<Request> import(
         u64 request_id,
@@ -125,6 +125,9 @@ public:
     virtual void notify_request_unblocked(Badge<HTTP::DiskCache>) override;
     virtual Optional<MonotonicTime> last_activity_time() const override { return m_last_activity_time; }
     bool notify_retrieved_http_cookie(Badge<ControlConnectionFromClient>, u64 cookie_request_id, StringView cookie);
+    void resolve_request_header_policy(Badge<ConnectionFromClient>, u64 generation, bool allowed);
+    void resolve_canonical_url_policy(Badge<ConnectionFromClient>, u64 generation, bool allowed);
+    void resolve_response_header_policy(Badge<ConnectionFromClient>, u64 generation, u8 policy);
     bool notify_stored_response_cookies_and_hsts_policy(Badge<ControlConnectionFromClient>, u64 store_request_id);
     void notify_fetch_complete(Badge<ConnectionFromClient>, int result_code);
 
@@ -228,6 +231,15 @@ private:
     void handle_failed_cache_only_state();
     void handle_serve_substitution_state();
     void handle_dns_lookup_state();
+    void complete_canonical_url_policy(u64 generation, bool allowed);
+    void check_canonical_urls_before_connect();
+    bool decode_canonical_hosts(StringView);
+    void query_canonical_urls();
+    String m_canonical_host_names;
+    String m_imported_policy_ip_addresses;
+    bool m_cache_canonical_policy_done { false };
+    void resolve_connection_host(ByteString host);
+    bool m_resolving_canonical_origin { false };
     void continue_after_dns_lookup();
     StringView connect_host() const;
     void reset_for_retry();
@@ -235,6 +247,9 @@ private:
     bool should_retry_without_alternative_service(int curl_result_code) const;
     u16 connect_port() const;
     void handle_retrieve_cookie_state();
+    String policy_ip_addresses() const;
+    void query_request_headers();
+    void complete_request_header_policy(u64 generation, bool allowed);
     void handle_connect_state();
     void handle_fetch_state();
     void handle_read_imported_state();
@@ -356,6 +371,22 @@ private:
     u64 m_reported_request_body_bytes { 0 };
     Optional<MonotonicTime> m_last_request_body_report_time;
 
+    void complete_response_header_policy(u64 generation, u8 policy);
+    Vector<URL::URL> m_pending_canonical_urls;
+    Vector<String> m_pending_ip_addresses;
+    u64 m_canonical_policy_generation { 0 };
+    RefPtr<Core::Timer> m_canonical_policy_timer;
+    u8 m_query_response_policy { 0 };
+    bool m_response_policy_done { false };
+    u64 m_request_policy_generation { 0 };
+    bool m_request_policy_pending { false };
+    bool m_request_policy_done { false };
+    bool m_request_policy_for_cache { false };
+    RefPtr<Core::Timer> m_request_policy_timer;
+    u64 m_response_policy_generation { 0 };
+    Function<void()> m_response_policy_continuation;
+    RefPtr<Core::Timer> m_response_policy_timer;
+    bool m_suppress_response_cookies { false };
     HTTP::Cookie::IncludeCredentials m_include_credentials { HTTP::Cookie::IncludeCredentials::Yes };
 
     Optional<AlternativeService> m_alternative_service;
@@ -380,6 +411,7 @@ private:
 
     Optional<Requests::NetworkError> m_network_error;
     bool m_content_decoding_disabled { false };
+    bool m_generated_accept_encoding { false };
 
     Optional<u32> m_address_selection_hint;
 

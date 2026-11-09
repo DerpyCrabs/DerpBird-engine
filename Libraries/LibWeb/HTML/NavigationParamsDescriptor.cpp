@@ -81,6 +81,7 @@ static NavigationResponseDescriptor create_navigation_response_descriptor(Fetch:
         .url_list = response.url_list(),
         .status = response.status(),
         .status_message = response.status_message(),
+        .derpbird_click_to_load = response.record()->derpbird_click_to_load(),
         .headers = move(headers),
         .network_error_message = response.network_error_message(),
         .timing_allow_passed = response.timing_allow_passed(),
@@ -272,6 +273,7 @@ static ErrorOr<GC::Ref<Fetch::Infrastructure::ResponseView>> create_navigation_r
     response->set_url_list(move(descriptor.url_list));
     response->set_status(descriptor.status);
     response->set_status_message(move(descriptor.status_message));
+    response->set_derpbird_click_to_load(descriptor.derpbird_click_to_load);
     response->set_header_list(HTTP::HeaderList::create(move(descriptor.headers)));
     response->set_timing_allow_passed(descriptor.timing_allow_passed);
     response->set_cache_state(descriptor.cache_state);

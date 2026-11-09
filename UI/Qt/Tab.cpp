@@ -22,6 +22,7 @@
 #include <UI/Qt/Application.h>
 #include <UI/Qt/BookmarkPopover.h>
 #include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/DerpBirdChrome.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/Icon.h>
 #include <UI/Qt/JavaScriptDialog.h>
@@ -263,6 +264,10 @@ void Tab::initialize(Optional<WebView::CanonicalTraversable&> traversable)
     QObject::connect(bookmark_action, &QAction::triggered, this, [this] { show_bookmark_popover(); });
     m_location_edit->set_trailing_action(bookmark_action);
     m_location_edit->set_zoom_action(create_application_action(*m_location_edit, view().reset_zoom_action(), IncludeActionIcon::No));
+    connect(&view(), &WebContentView::zoom_level_changed, this, [this] {
+        if (auto* chrome = m_window->derpbird_chrome())
+            chrome->queue_snapshot();
+    });
     // The translate button shows the page's translation menu, rather than translating the page at once.
     m_translate_action = create_application_action(*m_location_edit, view().page_translation().translate_action());
     m_location_edit->set_translate_action(m_translate_action);
@@ -1023,6 +1028,10 @@ void Tab::clear_session_tab_id()
 
 void Tab::focus_location_editor(FocusRingTransition focus_ring_transition)
 {
+    if (auto* chrome = m_window->derpbird_chrome()) {
+        chrome->focus_address();
+        return;
+    }
     if (!is_loaded())
         return;
 
@@ -1483,10 +1492,12 @@ void Tab::show_bookmark_popover()
     }
     m_bookmark_popover->update_chrome_style(palette());
     m_bookmark_popover->set_bookmark(bookmark->id, just_added);
-    auto& anchor = m_location_edit->trailing_action_button();
-    move_popover_below(*m_bookmark_popover, anchor);
+    auto* chrome = m_window->derpbird_chrome();
+    auto& anchor = chrome ? static_cast<QWidget&>(*chrome) : m_location_edit->trailing_action_button();
+    auto anchor_rect = chrome ? Optional<QRect> { QRect(60, 0, qMax(1, chrome->width() - 120), 52) } : Optional<QRect> {};
+    move_popover_below(*m_bookmark_popover, anchor, PopoverAlignment::Trailing, anchor_rect);
     m_bookmark_popover->show();
-    move_popover_below(*m_bookmark_popover, anchor);
+    move_popover_below(*m_bookmark_popover, anchor, PopoverAlignment::Trailing, anchor_rect);
 }
 
 void Tab::close_popovers()
@@ -1548,9 +1559,11 @@ void Tab::show_site_settings_popover()
         .content_blocking = view().content_blocking_snapshot(),
         .permissions = view().site_permission_rows(),
     });
-    move_popover_below(*m_site_settings_popover, site_settings_anchor(), PopoverAlignment::Leading);
+    move_popover_below(*m_site_settings_popover, site_settings_anchor(), PopoverAlignment::Leading,
+        m_window->derpbird_chrome() ? Optional<QRect> { QRect(60, 0, 36, 52) } : Optional<QRect> {});
     m_site_settings_popover->show();
-    move_popover_below(*m_site_settings_popover, site_settings_anchor(), PopoverAlignment::Leading);
+    move_popover_below(*m_site_settings_popover, site_settings_anchor(), PopoverAlignment::Leading,
+        m_window->derpbird_chrome() ? Optional<QRect> { QRect(60, 0, 36, 52) } : Optional<QRect> {});
     m_site_settings_popover->raise();
 }
 
@@ -1558,6 +1571,7 @@ void Tab::show_site_settings_popover()
 // such button.
 QWidget& Tab::site_settings_anchor() const
 {
+    if (auto* chrome = m_window->derpbird_chrome()) return *chrome;
     auto& button = m_location_edit->site_settings_button();
     return button.isVisible() ? button : static_cast<QWidget&>(*m_location_edit);
 }

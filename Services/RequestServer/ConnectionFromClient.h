@@ -75,7 +75,7 @@ public:
     // frame site of nothing stands for documents with opaque origins.
     void bind_to_site(Badge<ControlConnectionFromClient>, Utf16String const& top_level_site, Optional<Utf16String> const& frame_site);
 
-    void start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey, ByteString method, URL::URL, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials);
+    void start_revalidation_request(Badge<Request>, HTTP::NetworkIsolationKey, ByteString method, URL::URL, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials, bool suppress_response_cookies, Optional<u64> policy_parent, u8 query_response_policy);
     void request_complete(Badge<Request>, Request const&);
     void fetch_aia_intermediate(Badge<Request>, ByteString const& url, u64 for_request_id);
 
@@ -86,7 +86,10 @@ private:
 
     virtual Messages::RequestServer::IsSupportedProtocolResponse is_supported_protocol(ByteString) override;
     virtual Messages::RequestServer::GetClientIdResponse get_client_id() override;
-    virtual void start_request(u64 request_id, ByteString, URL::URL, Vector<HTTP::Header>, ByteBuffer, HTTP::CacheMode, Optional<HTTP::NetworkIsolationKey>, HTTP::Cookie::IncludeCredentials, bool create_transfer_lease, Optional<u32> address_selection_hint, bool notify_on_cache_miss, i32 originating_process_id, u64 originating_page_id) override;
+    virtual void resolve_request_header_policy(u64, u64, bool, bool) override;
+    virtual void resolve_canonical_url_policy(u64, u64, bool, bool) override;
+    virtual void resolve_response_header_policy(u64 request_id, u64 generation, u8 policy, bool background) override;
+    virtual void start_request(u64 request_id, ByteString, URL::URL, Vector<HTTP::Header>, ByteBuffer, HTTP::CacheMode, Optional<HTTP::NetworkIsolationKey>, HTTP::Cookie::IncludeCredentials, bool create_transfer_lease, Optional<u32> address_selection_hint, bool notify_on_cache_miss, i32 originating_process_id, u64 originating_page_id, bool suppress_response_cookies, u8 query_response_policy) override;
     virtual void adopt_request(int source_client_id, u64 source_request_id, u64 target_request_id, bool preserve_transfer_lease) override;
     virtual void release_request_transfer_lease(int source_client_id, u64 source_request_id) override;
     virtual Messages::RequestServer::StopRequestResponse stop_request(u64 request_id) override;
@@ -95,7 +98,7 @@ private:
     virtual void ensure_connection(u64 request_id, URL::URL url, ::RequestServer::CacheLevel cache_level) override;
     virtual void resolve_host(u64 lookup_id, ByteString host) override;
 
-    virtual void websocket_connect(u64 websocket_id, URL::URL, Optional<HTTP::NetworkIsolationKey>, ByteString, Vector<ByteString>, Vector<ByteString>, Vector<HTTP::Header>) override;
+    virtual void websocket_connect(u64 websocket_id, URL::URL, Optional<HTTP::NetworkIsolationKey>, ByteString, Vector<ByteString>, Vector<ByteString>, Vector<HTTP::Header>, u8 query_canonical_policy) override;
     virtual void websocket_send(u64 websocket_id, bool, ByteBuffer) override;
     virtual void websocket_send_shared(u64 websocket_id, bool, Core::AnonymousBuffer) override;
     virtual void websocket_close(u64 websocket_id, u16, ByteString) override;
@@ -144,6 +147,16 @@ private:
     // AIA URLs whose DNS lookup is still outstanding, mapped to the requests waiting on them. Keeps a second
     // request asking for the same URL from starting a duplicate lookup before m_aia_fetches has an entry.
     HashMap<ByteString, Vector<u64>> m_pending_aia_lookups;
+    virtual void resolve_websocket_canonical_policy(u64 websocket_id, u64 generation, bool allowed) override;
+    void complete_websocket_canonical_policy(u64 websocket_id, u64 generation, bool allowed);
+    struct WebSocketCanonicalPolicy {
+        u64 generation;
+        NonnullRefPtr<Core::Timer> timer;
+        Function<void()> connect;
+    };
+    u64 m_next_websocket_policy_generation { 0 };
+    HashMap<u64, u8> m_websocket_policy_enabled;
+    HashMap<u64, WebSocketCanonicalPolicy> m_websocket_policies;
     HashTable<u64> m_pending_websockets;
 
     struct WebSocketCookieRequest {

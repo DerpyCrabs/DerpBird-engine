@@ -17,6 +17,7 @@ pub struct FfiPublishedAnimationEffect {
     /// The effect's keyframes come from a style sheet, which their URLs resolve against: its base
     /// URL is the range of the base URL buffer below.
     pub has_resource_context: bool,
+    pub derpbird_authority_id: u64,
     pub resource_context_is_origin_clean: bool,
     pub first_keyframe: u32,
     pub keyframe_count: u32,

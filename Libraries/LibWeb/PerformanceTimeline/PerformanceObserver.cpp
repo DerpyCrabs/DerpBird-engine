@@ -267,12 +267,14 @@ Vector<GC::Root<PerformanceTimeline::PerformanceEntry>> PerformanceObserver::tak
 JS::Completion PerformanceObserver::invoke_callback(GC::Ref<PerformanceObserverEntryList> entry_list, Optional<u64> dropped_entries_count)
 {
     auto& callback = this->callback();
-    auto& realm = callback.callback_context->realm();
+    auto& realm = callback.associated_realm();
+    auto& wrapper_world = Bindings::host_defined_wrapper_world(realm);
+    if (wrapper_world.is_detached())
+        return JS::js_undefined();
     auto callback_options = JS::Object::create(realm, realm.intrinsics().object_prototype());
     if (dropped_entries_count.has_value())
         MUST(callback_options->create_data_property("droppedEntriesCount"_utf16_fly_string, JS::Value(dropped_entries_count.value())));
 
-    auto& wrapper_world = Bindings::host_defined_wrapper_world(realm);
     auto wrapped_observer_entry_list = Bindings::wrap(wrapper_world, realm, entry_list);
     auto wrapped_observer = Bindings::wrap(wrapper_world, realm, GC::Ref { *this });
     return WebIDL::invoke_callback(callback, wrapped_observer, { { wrapped_observer_entry_list, wrapped_observer, callback_options } });

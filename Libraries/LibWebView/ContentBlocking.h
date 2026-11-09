@@ -28,6 +28,13 @@ struct BlockedResource {
     StringView kind;
 };
 
+struct BlockingLogEntry {
+    u64 sequence;
+    String url;
+    String kind;
+    String rule;
+};
+
 struct ContentBlockingSnapshot {
     Optional<String> site;
     ContentBlockingState state { ContentBlockingState::Unavailable };

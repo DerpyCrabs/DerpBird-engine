@@ -223,7 +223,11 @@ pub(crate) enum RuleWrite {
     /// Whether the conditions of each rule hold.
     RuleConditions(Box<[(u64, bool)]>),
     /// The order of the cascade layers of a tree scope, by qualified name, the unnamed outer layer as an empty one.
-    LayerOrder { tree_scope: u32, names: Vec<Vec<u16>> },
+    LayerOrder {
+        tree_scope: u32,
+        origin: u8,
+        names: Vec<Vec<u16>>,
+    },
 }
 
 impl RuleWrite {
@@ -271,7 +275,11 @@ impl RuleWrite {
                     }
                 }
             }
-            Self::LayerOrder { tree_scope, names } => {
+            Self::LayerOrder {
+                tree_scope,
+                origin,
+                names,
+            } => {
                 let layers: Vec<_> = names
                     .iter()
                     .map(|name| {
@@ -282,7 +290,7 @@ impl RuleWrite {
                         })
                     })
                     .collect();
-                engine.set_layer_order(TreeScopeID(tree_scope), &layers);
+                engine.set_layer_order_for_origin(TreeScopeID(tree_scope), &layers, origin);
             }
         }
     }

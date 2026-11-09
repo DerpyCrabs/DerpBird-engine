@@ -1,3 +1,4 @@
+#include <LibWeb/Page/DerpBirdWebRequestRegistration.h>
 /*
  * Copyright (c) 2022-2023, Linus Groh <linusg@serenityos.org>
  * Copyright (c) 2023, Luke Wilde <lukew@serenityos.org>
@@ -67,6 +68,7 @@
 #include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/Infra/SerializedURL.h>
 #include <LibWeb/Loader/LoadRequest.h>
+#include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Loader/LoaderConfig.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/MixedContent/AbstractOperations.h>
@@ -2343,6 +2345,16 @@ GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastru
             //       source is null as only a single body is needed in that case. E.g., when request’s body’s source
             //       is null, redirects and authentication will end up failing the fetch.
             http_request = request->clone();
+            // Preserve native insertion authority only for this internal HTTP
+            // transaction. Public/SW request clones intentionally omit it.
+            http_request->set_derpbird_insertion_authority(request->derpbird_insertion_authority());
+            // These privileges belong only to this internal HTTP transaction.
+            // Request::clone() intentionally omits them for script/SW clones.
+            http_request->derpbird_subframe_navigation = request->derpbird_subframe_navigation;
+            http_request->derpbird_popup_source = request->derpbird_popup_source;
+            http_request->derpbird_popup_top = request->derpbird_popup_top;
+            http_request->derpbird_popunder = request->derpbird_popunder;
+            http_request->derpbird_approved_navigation_url = request->derpbird_approved_navigation_url;
             // NB: Existing interception overrides still apply after subscriptions or intercepts are removed.
             http_request->set_webdriver_bidi_network_request(request->webdriver_bidi_network_request());
 
@@ -2571,7 +2583,51 @@ GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastru
             stored_response = select_response_from_cache(*http_cache, *http_request);
 
             // 2. If storedResponse is non-null, then:
+            auto& page = Bindings::principal_host_defined_page(realm);
+            Optional<URL::URL> policy_top_level_url;
+            if (auto const& reserved = http_request->reserved_client_snapshot()) policy_top_level_url = reserved->top_level_creation_url;
+            else if (auto const& client = http_request->client_snapshot()) policy_top_level_url = client->top_level_creation_url;
+            if (http_request->derpbird_popup_source.has_value()
+                || DerpBirdWebRequestRegistration::has_rules(page)
+                || (page.content_blocking_enabled_for_url(policy_top_level_url) && ContentBlocker::the().has_request_header_filters())) stored_response = nullptr;
             if (stored_response) {
+                // WebContent's optional memory cache bypasses ResourceLoader and
+                // RequestServer; apply the same response condition before using it.
+                auto& page = Bindings::principal_host_defined_page(realm);
+                Optional<URL::URL> top_level_url;
+                if (auto const& reserved = http_request->reserved_client_snapshot()) top_level_url = reserved->top_level_creation_url;
+                else if (auto const& client = http_request->client_snapshot()) top_level_url = client->top_level_creation_url;
+                if (page.content_blocking_enabled_for_url(top_level_url)) {
+                    auto source = http_request->current_url();
+                    if (auto const& client = http_request->client_snapshot(); client && (http_request->destination() != Infrastructure::Request::Destination::Document || http_request->derpbird_subframe_navigation))
+                        source = client->content_blocker_source_url;
+                    auto type = ContentBlocker::resource_type_from_fetch_metadata(http_request->destination(), http_request->initiator_type(), http_request->mode());
+                    if (http_request->derpbird_subframe_navigation) type = ContentBlocker::ResourceType::Subdocument;
+                    auto direct = ContentBlocker::the().check(http_request->current_url(), source, type, http_request->method(), top_level_url);
+                    if (direct.blocked && !direct.substitute.has_value()) {
+                        page.client().page_did_block_resource(http_request->current_url(), "Request (cache)"sv, direct.matched_rule);
+                        return PendingResponse::create(fetch_params, Infrastructure::Response::network_error("Cached request blocked by content filter"_string));
+                    }
+                    auto canonical = ContentBlocker::the().check_canonical_hosts(http_request->current_url(), source, type, http_request->method(), stored_response->header_list()->canonical_host_names(), top_level_url);
+                    if (direct.substitute.has_value() || direct.rewritten_url.has_value() || canonical.substitute.has_value() || canonical.rewritten_url.has_value()
+                        || !ContentBlocker::the().csp_for_response(http_request->current_url(), source, type, http_request->method(), top_level_url).is_empty()
+                        || !ContentBlocker::the().response_replacements(http_request->current_url(), source, type, http_request->method(), top_level_url).is_empty()
+                        || !ContentBlocker::the().response_modifiers(http_request->current_url(), source, type, http_request->method(), true, top_level_url).is_empty()) {
+                        // Re-enter the transport policy path so local replacements and
+                        // query redirects use Fetch's ordinary response machinery.
+                        stored_response = nullptr;
+                    } else if (direct.blocked || canonical.blocked) {
+                        page.client().page_did_block_resource(http_request->current_url(), direct.blocked ? "Request (cache)"sv : "CNAME (cache)"sv, direct.blocked ? direct.matched_rule : canonical.matched_rule);
+                        return PendingResponse::create(fetch_params, Infrastructure::Response::network_error("Cached response blocked by canonical content filter"_string));
+                    }
+                    if (stored_response) {
+                        auto decision = ContentBlocker::the().check_response(http_request->current_url(), source, type, http_request->method(), *stored_response->header_list(), top_level_url);
+                        if (decision.blocked) {
+                            page.client().page_did_block_resource(http_request->current_url(), "Response header (cache)"sv, decision.matched_rule);
+                            return PendingResponse::create(fetch_params, Infrastructure::Response::network_error("Response blocked by content filter"_string));
+                        }
+                    }
+                }
                 // 1. If cache mode is "default", storedResponse is a stale-while-revalidate response, and httpRequest’s
                 //    client is non-null, then:
                 // 2. Otherwise:
@@ -2585,8 +2641,10 @@ GC::Ref<PendingResponse> http_network_or_cache_fetch(JS::Realm& realm, Infrastru
                 //     3. Otherwise, set response to storedResponse and set response’s cache state to "local".
 
                 // NB: We only cache fresh responses in WebContent. Revalidation is handled by RequestServer.
-                response = stored_response;
-                response->set_cache_state(Infrastructure::Response::CacheState::Local);
+                if (stored_response) {
+                    response = stored_response;
+                    response->set_cache_state(Infrastructure::Response::CacheState::Local);
+                }
             }
         }
     }
@@ -2641,7 +2699,7 @@ static void log_response(auto const& status_code, auto const& headers, auto cons
 
 static URL::URL content_blocker_source_url_for_request(Infrastructure::Request& request)
 {
-    if (request.destination().has_value() && request.destination().value() == Infrastructure::Request::Destination::Document)
+    if (request.destination().has_value() && request.destination().value() == Infrastructure::Request::Destination::Document && !request.derpbird_subframe_navigation)
         return request.current_url();
 
     if (auto const& client = request.client_snapshot())
@@ -2805,6 +2863,12 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     load_request.set_request_mode(request->mode());
     load_request.set_referrer_policy(request->referrer_policy());
     load_request.set_is_navigation_request(request->is_navigation_request());
+    if (request->is_navigation_request()) load_request.derpbird_navigation_state = make_ref_counted<LoadRequest::DerpBirdNavigationState>();
+    load_request.derpbird_subframe_navigation = request->derpbird_subframe_navigation;
+    load_request.derpbird_popup_source = request->derpbird_popup_source;
+    load_request.derpbird_popup_top = request->derpbird_popup_top;
+    load_request.derpbird_popunder = request->derpbird_popunder;
+    load_request.derpbird_approved_navigation = request->is_navigation_request() && request->derpbird_approved_navigation_url.has_value() && *request->derpbird_approved_navigation_url == request->current_url();
     load_request.set_priority(request->priority());
     load_request.set_source_url(content_blocker_source_url_for_request(*request));
     load_request.set_network_isolation_key(Infrastructure::determine_the_network_partition_key(*request));
@@ -2845,7 +2909,7 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
     // A load without a RequestServer request, such as one for a file: URL, hands over its whole body at once.
     auto whole_body_transport = create_whole_body_transport(*delivery_gate, *channel);
 
-    auto on_headers_received = GC::create_function(GC::Heap::the(), [fetch_params = NonnullRefPtr { fetch_params }, pending_response, request, body_pump, channel, delivery_gate, whole_body_transport, http_cache](Engine::NetworkTransportHandle* network_transport, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Requests::CacheState cache_state) {
+    auto on_headers_received = GC::create_function(GC::Heap::the(), [fetch_params = NonnullRefPtr { fetch_params }, pending_response, request, body_pump, channel, delivery_gate, whole_body_transport, http_cache, derpbird_state = load_request.derpbird_navigation_state](Engine::NetworkTransportHandle* network_transport, HTTP::HeaderList const& response_headers, Optional<u32> status_code, Optional<String> const& reason_phrase, Requests::CacheState cache_state) {
         if (pending_response->is_resolved()) {
             // RequestServer will send us the response headers twice, the second time being for HTTP trailers. This
             // fetch algorithm is not interested in trailers, so just drop them here.
@@ -2858,6 +2922,7 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
 
         auto response = Infrastructure::Response::create();
         response->set_status(status_code.value_or(200));
+        response->set_derpbird_click_to_load(derpbird_state && derpbird_state->click_to_load);
 
         if (reason_phrase.has_value())
             response->set_status_message(reason_phrase->to_byte_string());
@@ -2898,6 +2963,7 @@ GC::Ref<PendingResponse> nonstandard_resource_loader_file_or_http_network_fetch(
             log_response(status_code, response_headers, ReadonlyBytes {});
         }
 
+        response->header_list()->set_canonical_host_names(response_headers.canonical_host_names());
         for (auto const& [name, value] : response_headers.headers())
             response->header_list()->append({ name, value });
 

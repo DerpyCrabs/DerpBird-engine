@@ -105,6 +105,8 @@ public:
         return *m_view;
     }
 
+    void set_derpbird_script_parent(Tab* tab) { m_derpbird_script_parent = tab; }
+    Tab* derpbird_script_parent() const { return m_derpbird_script_parent; }
     bool is_loaded() const { return m_view != nullptr; }
     // Builds the tab's view and toolbar, and restores its history, if it hasn't loaded yet.
     void ensure_loaded();
@@ -148,6 +150,7 @@ public:
     // A tab in the background whose title changes after it has loaded has news, until it is selected.
     bool needs_attention() const { return m_needs_attention; }
     void clear_attention() { m_needs_attention = false; }
+    void request_attention() { m_needs_attention = true; update_tab_title(); }
     QString title() const;
 
     QMenu* context_menu() const { return m_context_menu; }
@@ -232,6 +235,7 @@ private:
     QPointer<QMenu> m_translation_menu;
     QPointer<BookmarkPopover> m_bookmark_popover;
     QPointer<Tab> m_tab_to_activate_on_close;
+    QPointer<Tab> m_derpbird_script_parent;
     QPointer<LocationEdit> m_location_edit;
     WebContentView* m_view { nullptr };
     FindInPageWidget* m_find_in_page { nullptr };

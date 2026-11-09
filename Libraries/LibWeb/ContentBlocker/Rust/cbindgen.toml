@@ -21,7 +21,7 @@ parse_deps = false
 all_features = false
 
 [export]
-include = ["ContentBlockerString"]
+include = ["ContentBlockerString", "ContentBlockerDecision"]
 # Opaque to C++, which names it by a void pointer (see below).
 exclude = ["ContentBlockerEngine"]
 

@@ -328,6 +328,13 @@ Directives::Directive::Result should_elements_inline_type_behavior_be_blocked_by
     // 1. Assert: element is not null.
     // NOTE: Already done by only accepting a GC::Ref.
 
+    // Only the exact node being synchronously inserted by a granted native
+    // userscript operation is privileged. Event/style attributes and later
+    // page mutations retain normal CSP checks.
+    if (element->derpbird_userscript_insertion_active()
+        && (type == Directives::Directive::InlineType::Script || type == Directives::Directive::InlineType::Style))
+        return Directives::Directive::Result::Allowed;
+
     // AD-HOC: The spec has no notion of the user agent's own content.
     if (is_in_shadow_tree_with_user_agent_content(*element))
         return Directives::Directive::Result::Allowed;

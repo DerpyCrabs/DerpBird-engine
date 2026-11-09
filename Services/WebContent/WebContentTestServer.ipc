@@ -2,5 +2,6 @@
 
 endpoint WebContentTestServer
 {
+    probe_derpbird_values(Web::PageId page_id, u64 probe_id, bool unknown_document, ByteBuffer payload) =|
     reset_state_for_testing(Web::PageId page_id) =|
 }

@@ -8,6 +8,7 @@
 #include <AK/Array.h>
 #include <AK/ScopeGuard.h>
 #include <LibCore/Environment.h>
+#include <LibCore/Directory.h>
 #include <LibCore/File.h>
 #include <LibCore/Process.h>
 #include <LibCore/Socket.h>
@@ -17,6 +18,7 @@
 #include <LibFileSystem/FileSystem.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/Process.h>
+#include <LibWebView/Profile.h>
 #include <LibWebView/ProcessManager.h>
 
 #include <fcntl.h>
@@ -422,6 +424,18 @@ ErrorOr<Process::ProcessPaths> Process::paths_for_process(StringView process_nam
     auto socket_path = ByteString::formatted("{}/{}.socket", runtime_directory, process_name);
     auto pid_path = ByteString::formatted("{}/{}.pid", runtime_directory, process_name);
 
+#if defined(AK_OS_LINUX)
+    if (!Core::SocketAddress::local(socket_path).to_sockaddr_un().has_value()) {
+        // Profile data can live at arbitrarily deep paths, but sockaddr_un
+        // cannot. Both endpoints derive the same route; the startup lock stays
+        // in the canonical profile runtime directory.
+        auto directory = LexicalPath::join(TRY(Core::StandardPaths::runtime_directory()), "derpbird-ipc"sv).string();
+        TRY(Core::Directory::create(directory, Core::Directory::CreateDirectories::Yes, 0700));
+        auto route = Profile::routing_identifier(socket_path);
+        socket_path = ByteString::formatted("{}/{}.socket", directory, route);
+        pid_path = ByteString::formatted("{}/{}.pid", directory, route);
+    }
+#endif
     return ProcessPaths { move(socket_path), move(pid_path) };
 }
 

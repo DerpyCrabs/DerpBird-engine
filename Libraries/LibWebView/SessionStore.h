@@ -172,6 +172,9 @@ public:
     // with the window's tab order: Launch restore depends on both. And a write that fails leaves the window's metadata
     // dirty, for the next flush to retry.
     ErrorOr<void> tab_pinned_changed(SessionTabId, bool pinned);
+    ErrorOr<Optional<SessionTabId>> tab_tree_parent(SessionTabId);
+    ErrorOr<void> set_tab_tree_parent(SessionTabId, Optional<SessionTabId>);
+
     void active_tab_changed(SessionTabId);
     void application_quitting();
     void application_quit_aborted();
@@ -231,6 +234,9 @@ private:
     };
 
     struct Statements {
+        Database::StatementID tree_parent;
+        Database::StatementID set_tree_parent;
+
         Database::StatementID insert_session;
         Database::StatementID insert_tab;
         Database::StatementID insert_tab_if_missing;
@@ -551,6 +557,7 @@ private:
     static bool is_tab_worth_keeping(URL::URL const&);
     static u32 max_closed_units(UnitKind);
 
+    HashMap<SessionTabId, SessionTabId> m_private_tab_tree;
     Optional<PersistedStorage> m_persisted_storage;
     TransientStorage m_transient_storage;
     RefPtr<Core::Timer> m_flush_timer;

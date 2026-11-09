@@ -17,6 +17,7 @@ struct ScriptFetchOptions {
     AK_ALLOC_WITH_KMALLOC;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-script-fetch-options-nonce
+    RefPtr<DerpBirdInsertionAuthority> derpbird_insertion_authority {};
     Utf16String cryptographic_nonce {};
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#concept-script-fetch-options-integrity
