@@ -1,0 +1,524 @@
+/*
+ * Copyright (c) 2021-2023, Andreas Kling <andreas@ladybird.org>
+ * Copyright (c) 2025, Ryszard Goc <ryszardgoc@gmail.com>
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include <AK/Assertions.h>
+#include <AK/Atomic.h>
+#include <AK/Checked.h>
+#include <AK/NeverDestroyed.h>
+#include <AK/Platform.h>
+#include <AK/Try.h>
+#include <AK/Vector.h>
+#include <LibCore/System.h>
+#include <LibGC/BlockAllocator.h>
+#include <LibGC/HeapBlock.h>
+#include <LibGC/HeapRegion.h>
+#include <LibThreading/Thread.h>
+#include <sys/mman.h>
+
+#ifdef HAS_ADDRESS_SANITIZER
+#    include <sanitizer/asan_interface.h>
+#    include <sanitizer/lsan_interface.h>
+#endif
+
+#if defined(AK_OS_WINDOWS)
+#    include <AK/Windows.h>
+#    include <memoryapi.h>
+#else
+#    include <sched.h>
+#    include <unistd.h>
+#endif
+
+extern "C" {
+GC_API FlatPtr js_heap_region_base = 0;
+}
+
+namespace GC {
+
+// Every BlockAllocator takes 2 MiB chunks from one process-wide reserved
+// region, and carves 16 KiB HeapBlock slots out of those chunks.
+//
+// Per-block madvise() is deferred to a single global background "decommit
+// worker" so it never costs us GC pause time, and slots that are recycled
+// before the worker sees them skip the madvise pair entirely.
+static constexpr size_t CHUNK_SIZE = 2 * MiB;
+static constexpr size_t BLOCKS_PER_CHUNK = CHUNK_SIZE / HeapBlock::BLOCK_SIZE;
+static_assert((HeapBlock::BLOCK_SIZE & (HeapBlock::BLOCK_SIZE - 1)) == 0);
+static_assert(CHUNK_SIZE % HeapBlock::BLOCK_SIZE == 0);
+static_assert(BLOCKS_PER_CHUNK == 128);
+static_assert(HEAP_REGION_LOW_GUARD_SIZE % CHUNK_SIZE == 0);
+static_assert(HEAP_REGION_HIGH_GUARD_SIZE % CHUNK_SIZE == 0);
+
+class HeapRegion {
+public:
+    static constexpr size_t size = HEAP_REGION_SIZE;
+
+    HeapRegion()
+    {
+        static_assert(sizeof(FlatPtr) >= sizeof(u64));
+        Checked<size_t> reservation_size = size;
+        reservation_size += size;
+        VERIFY(!reservation_size.has_overflow());
+
+        auto* reservation = MUST(Core::System::reserve_address_space(reservation_size.value(), Core::System::MemoryTag::GarbageCollector));
+        auto reservation_start = reinterpret_cast<FlatPtr>(reservation);
+        auto aligned_start = align_up_to(reservation_start, size);
+        auto reservation_end = reservation_start + reservation_size.value();
+        auto head_size = aligned_start - reservation_start;
+        auto tail_size = reservation_end - (aligned_start + size);
+
+#if !defined(AK_OS_WINDOWS)
+        if (head_size != 0)
+            MUST(Core::System::release_address_space(reservation, head_size));
+        if (tail_size != 0)
+            MUST(Core::System::release_address_space(reinterpret_cast<void*>(aligned_start + size), tail_size));
+#else
+        // VirtualFree with MEM_RELEASE can only release the complete
+        // reservation, so keep the inaccessible head and tail on Windows.
+        (void)head_size;
+        (void)tail_size;
+#endif
+
+        m_base = reinterpret_cast<u8*>(aligned_start);
+        VERIFY(reinterpret_cast<FlatPtr>(m_base) % size == 0);
+        publish_base(reinterpret_cast<FlatPtr>(m_base));
+    }
+
+    static void register_base_copy(HeapRegionBaseCopyRegistration& registration)
+    {
+        MutexLocker locker(base_copies_mutex());
+        registration.m_next = exchange(s_base_copies, &registration);
+        if (js_heap_region_base)
+            *registration.m_copy = js_heap_region_base;
+    }
+
+    // This process-global region is shared by every Heap. GC block allocation is single-threaded per process, but the
+    // decommit worker prepares the next chunk ahead of time, so the chunk bookkeeping is under a lock.
+    void* allocate_chunk()
+    {
+        u8* chunk = nullptr;
+        {
+            MutexLocker locker(m_mutex);
+            chunk = exchange(m_prepared_chunk, nullptr);
+            if (!chunk)
+                chunk = commit_next_chunk();
+        }
+        request_prepared_chunk();
+        return chunk;
+    }
+
+    // Commits the next chunk and faults its pages in, so that the first touches of its blocks take no page faults
+    // on the thread that allocates them. Runs on the decommit worker.
+    void prepare_chunk()
+    {
+        u8* chunk = nullptr;
+        {
+            MutexLocker locker(m_mutex);
+            // NB: Running out of the region is left to allocate_chunk(), on the thread that needs another chunk.
+            if (m_prepared_chunk || m_next_chunk_offset > LAST_CHUNK_OFFSET)
+                return;
+            chunk = commit_next_chunk();
+        }
+#if defined(MADV_POPULATE_WRITE)
+        // NB: This only fails if the kernel is too old to know it, which leaves the faults to the first touches.
+        (void)madvise(chunk, CHUNK_SIZE, MADV_POPULATE_WRITE);
+#endif
+        MutexLocker locker(m_mutex);
+        m_prepared_chunk = chunk;
+    }
+
+    FlatPtr start() const { return reinterpret_cast<FlatPtr>(m_base); }
+    FlatPtr end() const { return start() + size; }
+
+    FlatPtr committed_end()
+    {
+        MutexLocker locker(m_mutex);
+        return start() + m_next_chunk_offset;
+    }
+
+private:
+    static void request_prepared_chunk();
+
+    static void publish_base(FlatPtr base)
+    {
+        MutexLocker locker(base_copies_mutex());
+        js_heap_region_base = base;
+        for (auto* registration = s_base_copies; registration; registration = registration->m_next)
+            *registration->m_copy = base;
+    }
+
+    // NB: Static initialization registers copies, possibly before that of this file has run, so the list starts out
+    //     constant-initialized and its mutex is set up on first use.
+    static Mutex& base_copies_mutex()
+    {
+        static AK::NeverDestroyed<Mutex> mutex;
+        return *mutex;
+    }
+
+    static constinit inline HeapRegionBaseCopyRegistration* s_base_copies { nullptr };
+
+    // The guards at either end of the region are never committed.
+    static constexpr size_t FIRST_CHUNK_OFFSET = HEAP_REGION_LOW_GUARD_SIZE;
+    static constexpr size_t LAST_CHUNK_OFFSET = size - HEAP_REGION_HIGH_GUARD_SIZE - CHUNK_SIZE;
+
+    u8* commit_next_chunk()
+    {
+        VERIFY(m_next_chunk_offset >= FIRST_CHUNK_OFFSET);
+        VERIFY(m_next_chunk_offset <= LAST_CHUNK_OFFSET);
+        auto* chunk = m_base + m_next_chunk_offset;
+        MUST(Core::System::commit_memory(chunk, CHUNK_SIZE, Core::System::MemoryTag::GarbageCollector));
+        m_next_chunk_offset += CHUNK_SIZE;
+        return chunk;
+    }
+
+    u8* m_base { nullptr };
+    Mutex m_mutex;
+    size_t m_next_chunk_offset { FIRST_CHUNK_OFFSET };
+    // A committed chunk whose pages are faulted in already, which the next allocate_chunk() takes.
+    u8* m_prepared_chunk { nullptr };
+};
+
+static HeapRegion& heap_region()
+{
+    static AK::NeverDestroyed<HeapRegion> region;
+    return *region;
+}
+
+static void madvise_block_for_decommit(void* block)
+{
+#if defined(AK_OS_WINDOWS)
+    // NB: DiscardVirtualMemory() validates its range with VirtualQuery(), which makes the kernel check every page in
+    //     the run of identical pages that starts at the block. All chunks are committed back to back in one
+    //     reservation, so that run is the whole committed heap. MEM_RESET drops the contents without that walk, and
+    //     VirtualUnlock() on pages that are not locked takes them out of the working set right away.
+    if (!VirtualAlloc(block, HeapBlock::BLOCK_SIZE, MEM_RESET, PAGE_READWRITE)) {
+        warnln("{}", Error::from_windows_error());
+        VERIFY_NOT_REACHED();
+    }
+    (void)VirtualUnlock(block, HeapBlock::BLOCK_SIZE);
+#elif defined(MADV_FREE_REUSE) && defined(MADV_FREE_REUSABLE)
+    // macOS uses the FREE_REUSABLE/FREE_REUSE paired protocol, which integrates
+    // with its RSS accounting properly.
+    if (madvise(block, HeapBlock::BLOCK_SIZE, MADV_FREE_REUSABLE) < 0) {
+        perror("madvise(MADV_FREE_REUSABLE)");
+        VERIFY_NOT_REACHED();
+    }
+#elif defined(MADV_FREE)
+    // MADV_FREE keeps the pages mapped until the kernel needs them, so a block reused before then takes no page fault.
+    if (madvise(block, HeapBlock::BLOCK_SIZE, MADV_FREE) < 0) {
+        perror("madvise(MADV_FREE)");
+        VERIFY_NOT_REACHED();
+    }
+#elif defined(MADV_DONTNEED)
+    if (madvise(block, HeapBlock::BLOCK_SIZE, MADV_DONTNEED) < 0) {
+        perror("madvise(MADV_DONTNEED)");
+        VERIFY_NOT_REACHED();
+    }
+#endif
+}
+
+static void sleep_before_decommit()
+{
+#if defined(AK_OS_WINDOWS)
+    Sleep(50);
+#else
+    usleep(50 * 1000);
+#endif
+}
+
+static void yield_during_decommit()
+{
+#if defined(AK_OS_WINDOWS)
+    Sleep(0);
+#else
+    sched_yield();
+#endif
+}
+
+class DecommitWorker {
+public:
+    static DecommitWorker& the();
+    static DecommitWorker* the_if_started() { return s_the.load(AK::MemoryOrder::memory_order_acquire); }
+
+    void register_pending(BlockAllocator&);
+    void deregister(BlockAllocator&);
+    void kick();
+    void request_prepared_chunk();
+
+    DecommitWorker();
+
+private:
+    void run();
+    void process_one(BlockAllocator&);
+
+    Mutex m_mutex;
+    ConditionVariable m_cv { m_mutex };
+    RefPtr<Threading::Thread> m_thread;
+    Vector<BlockAllocator*> m_pending;
+    bool m_kicked { false };
+    bool m_chunk_requested { false };
+
+    static Atomic<DecommitWorker*> s_the;
+};
+
+Atomic<DecommitWorker*> DecommitWorker::s_the { nullptr };
+
+void HeapRegion::request_prepared_chunk()
+{
+    // NB: Preparing a chunk only pays off where its pages can be faulted in ahead of time. And only a worker that is
+    //     already running prepares chunks: starting it here could start a second thread before the process is
+    //     sandboxed, which some sandboxes do not allow.
+#if defined(MADV_POPULATE_WRITE)
+    if (auto* worker = DecommitWorker::the_if_started())
+        worker->request_prepared_chunk();
+#endif
+}
+
+DecommitWorker& DecommitWorker::the()
+{
+    static AK::NeverDestroyed<DecommitWorker> instance;
+    return *instance;
+}
+
+DecommitWorker::DecommitWorker()
+{
+    m_thread = Threading::Thread::construct("DecommitWorker"sv, [this] {
+        run();
+        return static_cast<intptr_t>(0);
+    });
+    m_thread->start();
+    m_thread->detach();
+    s_the.store(this, AK::MemoryOrder::memory_order_release);
+}
+
+void DecommitWorker::register_pending(BlockAllocator& a)
+{
+    MutexLocker locker(m_mutex);
+    m_pending.append(&a);
+}
+
+void DecommitWorker::deregister(BlockAllocator& a)
+{
+    MutexLocker locker(m_mutex);
+    m_pending.remove_first_matching([&](auto* p) { return p == &a; });
+}
+
+void DecommitWorker::kick()
+{
+    {
+        MutexLocker locker(m_mutex);
+        m_kicked = true;
+    }
+    m_cv.signal();
+}
+
+void DecommitWorker::request_prepared_chunk()
+{
+    {
+        MutexLocker locker(m_mutex);
+        m_chunk_requested = true;
+    }
+    m_cv.signal();
+}
+
+void DecommitWorker::run()
+{
+    while (true) {
+        Vector<BlockAllocator*> snapshot;
+        bool chunk_requested = false;
+        {
+            MutexLocker locker(m_mutex);
+            while (!m_kicked && !m_chunk_requested)
+                m_cv.wait();
+            chunk_requested = exchange(m_chunk_requested, false);
+            if (m_kicked) {
+                m_kicked = false;
+                snapshot = move(m_pending);
+                // Pin every allocator we're about to process so destructors
+                // block until we drop our reference.
+                for (auto* a : snapshot)
+                    a->m_worker_refcount.fetch_add(1);
+            }
+        }
+
+        if (chunk_requested)
+            heap_region().prepare_chunk();
+
+        if (snapshot.is_empty())
+            continue;
+
+        // Stagger: give the JS thread some breathing room after the kick
+        // (typically right after sweep ends) before we consume CPU and
+        // syscall bandwidth.
+        sleep_before_decommit();
+
+        for (auto* a : snapshot) {
+            process_one(*a);
+            int prev_refcount = a->m_worker_refcount.fetch_sub(1);
+            if (prev_refcount == 1) {
+                MutexLocker locker(a->m_mutex);
+                a->m_worker_cv.broadcast();
+            }
+        }
+    }
+}
+
+void DecommitWorker::process_one(BlockAllocator& a)
+{
+    Vector<void*> to_process;
+    {
+        MutexLocker locker(a.m_mutex);
+        a.m_in_decommit_registry = false;
+        to_process = move(a.m_freshly_freed);
+    }
+
+    // Madvise each slot outside the per-allocator lock so the JS thread can
+    // continue to allocate/free; yield every 64 slots to avoid hogging the
+    // kernel's mm subsystem.
+    constexpr size_t BATCH = 64;
+    for (size_t i = 0; i < to_process.size(); ++i) {
+        madvise_block_for_decommit(to_process[i]);
+        if ((i + 1) % BATCH == 0)
+            yield_during_decommit();
+    }
+
+    {
+        MutexLocker locker(a.m_mutex);
+        for (auto* slot : to_process)
+            a.m_blocks.append(slot);
+    }
+}
+
+void BlockAllocator::wake_decommit_worker_async()
+{
+    DecommitWorker::the().kick();
+}
+
+BlockAllocator::BlockAllocator()
+    : m_worker_cv(m_mutex)
+{
+}
+
+BlockAllocator::~BlockAllocator()
+{
+    // Chunks are permanent -- we never tear them down. The destructor only
+    // exists to make sure the global decommit worker has finished any
+    // in-flight processing of *this before our storage goes away.
+    DecommitWorker::the().deregister(*this);
+
+    MutexLocker locker(m_mutex);
+    while (m_worker_refcount.load() != 0)
+        m_worker_cv.wait();
+}
+
+size_t BlockAllocator::block_count()
+{
+    MutexLocker locker(m_mutex);
+    return m_blocks.size();
+}
+
+HeapRegionBaseCopyRegistration::HeapRegionBaseCopyRegistration(FlatPtr& copy)
+    : m_copy(&copy)
+{
+    HeapRegion::register_base_copy(*this);
+}
+
+FlatPtr BlockAllocator::heap_region_start()
+{
+    return heap_region().start();
+}
+
+FlatPtr BlockAllocator::heap_region_end()
+{
+    return heap_region().end();
+}
+
+FlatPtr BlockAllocator::heap_region_committed_end()
+{
+    return heap_region().committed_end();
+}
+
+void* BlockAllocator::allocate_block([[maybe_unused]] char const* name)
+{
+    void* block = nullptr;
+    bool needs_madvise_reuse = false;
+
+    {
+        MutexLocker locker(m_mutex);
+
+        // Prefer m_freshly_freed: those slots were never madvised, so we
+        // can hand them back out with zero syscalls. This is the deferred-
+        // decommit payoff -- hot recycle skips both MADV_FREE_REUSABLE
+        // and MADV_FREE_REUSE.
+        if (!m_freshly_freed.is_empty()) {
+            block = m_freshly_freed.take_last();
+        } else if (!m_blocks.is_empty()) {
+            block = m_blocks.take_last();
+            needs_madvise_reuse = true;
+        }
+    }
+
+    if (block == nullptr) {
+        // Both pools empty: commit a fresh 2 MiB chunk and slice it.
+        auto* chunk_base = heap_region().allocate_chunk();
+
+#if defined(MADV_FREE_REUSE) && defined(MADV_FREE_REUSABLE)
+        // Mark the whole chunk reusable upfront so MADV_FREE_REUSE pairs
+        // symmetrically when slots are popped from m_blocks later. (Linux
+        // and Windows fall through with no-op.)
+        if (madvise(chunk_base, CHUNK_SIZE, MADV_FREE_REUSABLE) < 0) {
+            perror("madvise(MADV_FREE_REUSABLE)");
+            VERIFY_NOT_REACHED();
+        }
+#endif
+
+        ASAN_POISON_MEMORY_REGION(chunk_base, CHUNK_SIZE);
+
+        MutexLocker locker(m_mutex);
+        for (size_t i = 0; i < BLOCKS_PER_CHUNK; ++i)
+            m_blocks.append(static_cast<u8*>(chunk_base) + i * HeapBlock::BLOCK_SIZE);
+        block = m_blocks.take_last();
+        needs_madvise_reuse = true;
+    }
+
+    ASAN_UNPOISON_MEMORY_REGION(block, HeapBlock::BLOCK_SIZE);
+    LSAN_REGISTER_ROOT_REGION(block, HeapBlock::BLOCK_SIZE);
+#if defined(MADV_FREE_REUSE) && defined(MADV_FREE_REUSABLE)
+    if (needs_madvise_reuse) {
+        if (madvise(block, HeapBlock::BLOCK_SIZE, MADV_FREE_REUSE) < 0) {
+            perror("madvise(MADV_FREE_REUSE)");
+            VERIFY_NOT_REACHED();
+        }
+    }
+#else
+    (void)needs_madvise_reuse;
+#endif
+    return block;
+}
+
+void BlockAllocator::deallocate_block(void* block, DeferDecommit defer_decommit)
+{
+    VERIFY(block);
+
+    // Fast path: bookkeep only. The actual madvise is deferred to the
+    // global decommit worker, which the GC kicks at the end of sweep.
+    ASAN_POISON_MEMORY_REGION(block, HeapBlock::BLOCK_SIZE);
+    LSAN_UNREGISTER_ROOT_REGION(block, HeapBlock::BLOCK_SIZE);
+
+    bool need_to_register = false;
+    {
+        MutexLocker locker(m_mutex);
+        m_freshly_freed.append(block);
+        if (defer_decommit == DeferDecommit::Yes && !m_in_decommit_registry) {
+            m_in_decommit_registry = true;
+            need_to_register = true;
+        }
+    }
+    if (need_to_register && defer_decommit == DeferDecommit::Yes)
+        DecommitWorker::the().register_pending(*this);
+}
+
+}

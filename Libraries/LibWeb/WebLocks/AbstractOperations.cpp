@@ -1,0 +1,48 @@
+/*
+ * Copyright (c) 2026-present, the Ladybird developers.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include <AK/NeverDestroyed.h>
+#include <LibGC/Function.h>
+#include <LibJS/HostClassBuilder.h>
+#include <LibJS/Runtime/Realm.h>
+#include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
+#include <LibWeb/WebIDL/CallbackType.h>
+
+namespace Web::WebLocks {
+
+extern "C" {
+void web_locks_queue_task(JS::Realm*, GC::Cell*, void (*steps)(JSVM*, void*));
+void web_locks_queue_callback_task(WebIDL::CallbackType*, GC::Cell*, void (*steps)(JSVM*, void*));
+}
+
+// https://w3c.github.io/web-locks/#lock-task-queue
+static HTML::ParallelQueue& lock_task_queue()
+{
+    // A user agent has a lock task queue which is the result of starting a new parallel queue.
+    static NeverDestroyed<NonnullRefPtr<HTML::ParallelQueue>> queue { HTML::ParallelQueue::create() };
+    return **queue;
+}
+
+void web_locks_queue_task(JS::Realm* realm, GC::Cell* cell, void (*steps)(JSVM*, void*))
+{
+    lock_task_queue().enqueue(GC::create_function(realm->heap(), [realm = GC::Ref { *realm }, cell = GC::Ref { *cell }, steps] {
+        HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+        steps(JS::HostABI::vm_to_abi(realm->vm()), cell.ptr());
+    }));
+}
+
+void web_locks_queue_callback_task(WebIDL::CallbackType* callback, GC::Cell* cell, void (*steps)(JSVM*, void*))
+{
+    auto& callback_context = callback->callback_context;
+    HTML::queue_global_task(HTML::Task::Source::WebLocks, callback_context->global_object(), GC::create_function(callback_context->realm().heap(), [callback = GC::Ref { *callback }, cell = GC::Ref { *cell }, steps] {
+        HTML::TemporaryExecutionContext execution_context { callback->callback_context, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+        steps(JS::HostABI::vm_to_abi(callback->callback_context->realm().vm()), cell.ptr());
+    }));
+}
+
+}

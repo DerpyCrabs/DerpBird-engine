@@ -1,0 +1,229 @@
+/*
+ * Copyright (c) 2024, Andrew Kaster <akaster@serenityos.org>
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#pragma once
+
+#include <AK/ByteString.h>
+#include <AK/Function.h>
+#include <AK/Platform.h>
+#include <LibURL/URL.h>
+#include <LibWebCommon/Page/PageId.h>
+#include <LibWebView/Application.h>
+#include <LibWebView/BrowsingSession.h>
+#include <LibWebView/CrashReportOutbox.h>
+#include <UI/Qt/BrowserWindow.h>
+
+#include <QApplication>
+#include <QPointer>
+
+class QAction;
+class QMenu;
+class QMenuBar;
+class QWidget;
+
+namespace Ladybird {
+
+class ProcessManagerWindow;
+
+struct WindowConfiguration {
+    Optional<Web::DevicePixels> x {};
+    Optional<Web::DevicePixels> y {};
+    Optional<Web::DevicePixels> width {};
+    Optional<Web::DevicePixels> height {};
+    Optional<bool> maximized {};
+};
+
+enum class ShowWindow {
+    No,
+    Yes,
+};
+
+class Application final
+    : public WebView::Application
+    , public WebView::CrashReportOutboxObserver {
+    WEB_VIEW_APPLICATION(Application)
+
+public:
+    virtual ~Application() override;
+
+    Function<void(URL::URL)> on_open_file;
+
+    // A page's initial navigation, when there is one, starts in place of the first initial URL.
+    BrowserWindow& new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& = {}, BrowserWindow::IsPopupWindow is_popup_window = BrowserWindow::IsPopupWindow::No, WebView::IsPrivate = WebView::IsPrivate::No, Tab* parent_tab = nullptr, Optional<WebView::CanonicalTraversable&> traversable = {}, ShowWindow = ShowWindow::Yes, Optional<Web::HTML::PreparedNavigationDescriptor> initial_navigation = {});
+    WindowConfiguration configuration_for_new_window() const;
+
+    // Opens the windows startup recovery kept open, and returns the frontmost one, if any.
+    BrowserWindow* restore_previous_session(WindowConfiguration const& frontmost_window_configuration);
+    // After the last run ended unexpectedly, offers to restore the tabs it left open that didn't come back by themselves.
+    void offer_to_restore_unexpectedly_closed_tabs(BrowserWindow&);
+    void open_startup_tabs(BrowserWindow&, Vector<URL::URL> const&);
+    virtual WebView::SessionLaunchPolicy launch_restore_policy() const override;
+
+    void open_new_tab();
+    void open_new_window(WebView::IsPrivate);
+    enum class ReopenClosedWindow {
+        InNewWindow,
+        InTargetWindow,
+    };
+    // Reopens the given closed tab or window, or else the one closed most recently.
+    void reopen_recently_closed_tab(BrowserWindow* target_window, Optional<WebView::SessionWindowId> = {}, ReopenClosedWindow = ReopenClosedWindow::InNewWindow);
+    void open_file();
+
+    void restart_private_browsing_session();
+    void focus_location_editor();
+    void show_process_manager();
+    // Asks every window's pages if they may unload, one window at a time. Once all of them agree, it confirms stopping
+    // the downloads and quits; if a page refuses or the downloads are kept, the quit is canceled and no window closes.
+    void quit();
+    bool is_quit_in_progress() const { return m_quit_in_progress; }
+    bool is_finishing_quit() const { return m_quit_is_finishing; }
+    bool confirm_stop_active_downloads(QWidget* parent = nullptr);
+
+    void update_feedback_buttons();
+
+    BrowserWindow& active_window() const { return *m_active_window; }
+    void set_active_window(BrowserWindow& window) { m_active_window = &window; }
+    BrowserWindow* active_window_if_any() const { return m_active_window; }
+    BrowserWindow* non_private_window_if_any() const;
+
+    Tab* active_tab() const { return m_active_window ? m_active_window->current_tab() : nullptr; }
+    void update_reopen_recently_closed_actions() const;
+
+    enum class ForBrowserWindow : u8 {
+        No,
+        Yes,
+    };
+    QMenuBar* create_application_menu_bar(ForBrowserWindow);
+
+    QMenu* bookmarks_menu();
+    QMenu* history_menu();
+    QMenu* inspect_menu();
+    QMenu* debug_menu();
+    QMenu* help_menu();
+
+    QAction* new_tab_action();
+    QAction* new_window_action();
+    QAction* new_private_window_action();
+    QAction* reopen_recently_closed_tab_action();
+    QAction* close_current_tab_action();
+    QAction* open_next_tab_action();
+    QAction* open_previous_tab_action();
+    QAction* search_tabs_action();
+    QAction* move_focus_action();
+    QAction* open_file_action();
+    QAction* open_settings_action();
+    QAction* open_downloads_action();
+    QAction* toggle_bookmark_bar_action();
+    QAction* find_in_page_action();
+    QAction* zoom_in_action();
+    QAction* zoom_out_action();
+    QAction* reset_zoom_action();
+    QAction* quit_action();
+
+private:
+    void present_window(BrowserWindow&, WindowConfiguration const&, ShowWindow);
+    explicit Application();
+
+    void ask_next_window_to_close_for_private_session_restart();
+    void finish_private_session_restart();
+    void cancel_private_session_restart();
+
+    void ask_next_window_to_close_for_quit();
+    bool ask_windows_yet_to_agree_to_quit();
+    void finish_quit();
+    void cancel_quit();
+
+    virtual Core::EventLoop& create_platform_event_loop() override;
+    virtual void create_platform_actions() override;
+    virtual NonnullOwnPtr<WebView::MicrophoneAuthorizer> create_microphone_authorizer() override;
+
+    virtual Optional<String> ui_font_family() const override;
+    virtual Web::CSS::PreferredColorScheme interface_color_scheme() const override;
+    virtual void toggle_bookmark_for_view(WebView::ViewImplementation&) override;
+#if !defined(AK_OS_MACOS)
+    virtual Optional<String> system_font_family() const override;
+#endif
+
+    virtual NonnullOwnPtr<WebView::NotificationBackend> create_notification_backend() override;
+    virtual void focus_page_from_notification(WebView::WebContentPage&) override;
+    virtual void open_url_in_new_tab_from_notification(URL::URL const&, Web::PageId originating_page, WebView::CanonicalTraversable*, WebView::IsPrivate) override;
+
+    virtual bool supports_picture_in_picture() const override { return true; }
+    virtual OwnPtr<WebView::PictureInPictureWindow> create_picture_in_picture_window(WebView::WebContentPage& requesting_page, WebView::CanonicalTraversable&, Gfx::IntSize video_size) override;
+
+    virtual Optional<WebView::ViewImplementation&> active_web_view() const override;
+    virtual Vector<WebView::BookmarkItem::Bookmark> bookmarks_for_all_tabs_in_current_window() const override;
+    virtual Optional<WebView::ViewImplementation&> activate_tab_with_url(URL::URL const&, URL::ExcludeFragment) const override;
+
+    virtual Optional<WebView::ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const override;
+    virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const override;
+    virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const override;
+    virtual void open_url_in_new_window(URL::URL const&, WebView::IsPrivate) override;
+    virtual void open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor, Web::HTML::ActivateTab) const override;
+    virtual void open_navigation_in_new_window(Web::HTML::PreparedNavigationDescriptor, WebView::IsPrivate) override;
+
+    virtual void resolve_external_url_handler(URL::URL const&, WebView::ExternalURLHandlerCallback) const override;
+
+    virtual NonnullRefPtr<Core::Promise<ByteString>> ask_user_for_download_path(ByteString const& file) const override;
+    virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const override;
+    virtual void display_error_dialog(StringView error_message) const override;
+    virtual void open_download(WebView::FileDownloader::Download const&) const override;
+    virtual void show_download_in_folder(WebView::FileDownloader::Download const&) const override;
+
+    virtual void crash_reports_changed() override;
+    virtual bool captures_browser_crashes() const override { return true; }
+
+    virtual bool supports_clipboard_type(ClipboardType) const override;
+    virtual Utf16String clipboard_text(ClipboardType) const override;
+    virtual void set_clipboard_text(String, ClipboardType = ClipboardType::Text) override;
+
+    virtual Web::Clipboard::SystemClipboardItem clipboard_item() const override;
+    virtual void insert_clipboard_item(Web::Clipboard::SystemClipboardItem) override;
+
+    virtual bool supports_system_menu_bar() const override;
+    virtual bool supports_vertical_tabs() const override { return true; }
+    virtual bool supports_private_browsing_windows() const override { return true; }
+    virtual bool supports_client_side_window_decorations() const override
+    {
+#if defined(AK_OS_MACOS)
+        return false;
+#else
+        return true;
+#endif
+    }
+
+    virtual bool platform_reports_scroll_momentum() const override;
+    virtual bool platform_scrolls_elastically() const override;
+    virtual bool platform_scrollbar_track_press_jumps() const override;
+    virtual Vector<String> platform_preferred_languages() const override;
+    virtual Optional<Gfx::GpuDeviceIdentity> platform_presentation_gpu_device() const override;
+    virtual Vector<u64> platform_presentation_drm_format_modifiers() const override;
+
+    virtual void update_tabs_display() const override;
+
+    virtual void rebuild_bookmarks_menu() const override;
+    virtual void show_bookmark_context_menu(Gfx::IntPoint, Optional<WebView::BookmarkItem const&>, Optional<String const&> target_folder_id, Optional<String const&> parent_folder_id) override;
+    virtual Optional<BookmarkID> bookmark_item_id_for_context_menu() const override;
+    virtual NonnullRefPtr<BookmarkPromise> display_add_bookmark_dialog(Optional<String const&> target_folder_id = {}) const override;
+    virtual NonnullRefPtr<BookmarkPromise> display_edit_bookmark_dialog(WebView::BookmarkItem const& current_bookmark, Optional<String const&> parent_folder_id) const override;
+    virtual NonnullRefPtr<BookmarkPromise> display_add_bookmark_folder_dialog(Optional<String const&> default_title = {}, Optional<String const&> target_folder_id = {}) const override;
+    virtual NonnullRefPtr<BookmarkPromise> display_edit_bookmark_folder_dialog(WebView::BookmarkItem const& current_folder, Optional<String const&> parent_folder_id) const override;
+
+    virtual void on_devtools_enabled() const override;
+    virtual void on_devtools_disabled() const override;
+    virtual void on_recently_closed_entries_changed() const override;
+
+    OwnPtr<QApplication> m_application;
+    BrowserWindow* m_active_window { nullptr };
+    OwnPtr<ProcessManagerWindow> m_process_manager_window;
+
+    bool m_private_session_restart_in_progress { false };
+    bool m_quit_in_progress { false };
+    bool m_quit_is_finishing { false };
+    Vector<QPointer<BrowserWindow>> m_windows_awaiting_quit_preflight;
+};
+
+}

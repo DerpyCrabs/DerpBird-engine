@@ -1,0 +1,643 @@
+/*
+ * Copyright (c) 2026-present, the Ladybird developers.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+use crate::css::css_pixels::CssPixelRect;
+use crate::css::css_pixels::CssPixels;
+use crate::layout::node_data::NodeSlotId;
+use crate::layout::node_facts;
+use crate::painting::paint_read::PaintRead;
+use crate::painting::paintable_data::FragmentRecord;
+use crate::painting::paintable_geometry;
+
+pub(crate) fn containing_block_paintable_of_node(
+    layout_arena: &impl PaintRead,
+    node: NodeSlotId,
+) -> Option<NodeSlotId> {
+    if layout_arena.paintable_row_is_populated(node) {
+        let block = layout_arena.paintable_data(node).containing_block;
+        return layout_arena.paintable_row_is_populated(block).then_some(block);
+    }
+    let block = layout_arena.node_containing_block_if_live(node)?;
+    layout_arena.paintable_row_is_populated(block).then_some(block)
+}
+
+pub(crate) fn containing_block_paintable(
+    layout_arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+) -> Option<NodeSlotId> {
+    containing_block_paintable_of_node(layout_arena, fragment.layout_node)
+}
+
+pub(crate) fn absolute_rect(layout_arena: &impl PaintRead, fragment: &FragmentRecord) -> CssPixelRect {
+    let rect = rect_in_containing_block(fragment);
+    match containing_block_paintable(layout_arena, fragment) {
+        Some(block) => rect.translated_by(paintable_geometry::absolute_line_root_position(
+            layout_arena,
+            block,
+            fragment.line_index as usize,
+        )),
+        None => rect,
+    }
+}
+
+/// The fragment's rect relative to its containing block, which is the box whose line boxes hold it.
+pub(crate) fn rect_in_containing_block(fragment: &FragmentRecord) -> CssPixelRect {
+    let (x, y) = fragment.offset();
+    let (width, height) = fragment.size();
+    CssPixelRect {
+        x: x + fragment.relpos_delta.x,
+        y: y + fragment.relpos_delta.y,
+        width,
+        height,
+    }
+}
+
+pub(crate) fn absolute_line_box_rect(
+    layout_arena: &impl PaintRead,
+    owner: NodeSlotId,
+    fragment: &FragmentRecord,
+) -> CssPixelRect {
+    let side = layout_arena.committed_side_data(owner);
+    let lines = &side.lines();
+    let Some(line) = lines.get(fragment.line_index as usize) else {
+        return CssPixelRect::default();
+    };
+    let mut rect = CssPixelRect::from(line.rect);
+    if let Some(block) = containing_block_paintable(layout_arena, fragment) {
+        rect = rect.translated_by(paintable_geometry::absolute_line_root_position(
+            layout_arena,
+            block,
+            fragment.line_index as usize,
+        ));
+    }
+    rect
+}
+
+pub(crate) fn is_horizontal(fragment: &FragmentRecord) -> bool {
+    fragment.writing_mode == crate::css::css_enums::writing_mode::HORIZONTAL_TB
+}
+
+pub(crate) fn fragment_is_horizontal(fragment: &FragmentRecord) -> bool {
+    is_horizontal(fragment)
+}
+
+fn primary_size(rect: CssPixelRect, horizontal: bool) -> CssPixels {
+    if horizontal { rect.width } else { rect.height }
+}
+
+fn secondary_size(rect: CssPixelRect, horizontal: bool) -> CssPixels {
+    if horizontal { rect.height } else { rect.width }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionOffsets {
+    pub start: usize,
+    pub end: usize,
+}
+
+pub(crate) fn range_rect(
+    layout_arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+    selection_state: u8,
+    start_offset_in_code_units: usize,
+    end_offset_in_code_units: usize,
+) -> CssPixelRect {
+    match compute_selection_offsets(
+        layout_arena,
+        fragment,
+        selection_state,
+        start_offset_in_code_units,
+        end_offset_in_code_units,
+    ) {
+        Some(offsets) => rect_for_selection_offsets(layout_arena, fragment, offsets, || {
+            first_available_font(layout_arena, fragment)
+        }),
+        None => CssPixelRect::default(),
+    }
+}
+
+pub(crate) fn compute_selection_offsets(
+    layout_arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+    selection_state: u8,
+    start_offset_in_code_units: usize,
+    end_offset_in_code_units: usize,
+) -> Option<SelectionOffsets> {
+    let length_with_trailing_whitespace =
+        fragment.length_in_code_units + fragment.trailing_whitespace_length_in_code_units;
+    let dom_start = fragment.dom_start_offset_in_node;
+    let dom_end = fragment.dom_end_offset_with_trailing_whitespace;
+    let rendered_offset_for_dom_offset = |dom_offset, boundary| {
+        let rendered_offset =
+            layout_arena.rendered_text_offset_for_dom_offset(fragment.layout_node, dom_offset, boundary);
+        rendered_offset.clamp(fragment.start, fragment.start + length_with_trailing_whitespace) - fragment.start
+    };
+    match selection_state {
+        crate::painting::paintable_data::SELECTION_STATE_NONE => None,
+        crate::painting::paintable_data::SELECTION_STATE_FULL => Some(SelectionOffsets {
+            start: 0,
+            end: length_with_trailing_whitespace,
+        }),
+        crate::painting::paintable_data::SELECTION_STATE_START_AND_END => selection_offsets_for_dom_range(
+            layout_arena,
+            fragment,
+            start_offset_in_code_units,
+            end_offset_in_code_units,
+        ),
+        crate::painting::paintable_data::SELECTION_STATE_START => {
+            if dom_end < start_offset_in_code_units {
+                return None;
+            }
+            Some(SelectionOffsets {
+                start: rendered_offset_for_dom_offset(
+                    start_offset_in_code_units,
+                    crate::layout::RenderedTextBoundary::Start,
+                ),
+                end: length_with_trailing_whitespace,
+            })
+        }
+        crate::painting::paintable_data::SELECTION_STATE_END => {
+            if dom_start > end_offset_in_code_units {
+                return None;
+            }
+            Some(SelectionOffsets {
+                start: 0,
+                end: rendered_offset_for_dom_offset(end_offset_in_code_units, crate::layout::RenderedTextBoundary::End),
+            })
+        }
+        _ => unreachable!("invalid selection state"),
+    }
+}
+
+pub(crate) fn for_each_fragment_of_nodes(
+    layout_arena: &impl PaintRead,
+    node_slots: &[NodeSlotId],
+    mut callback: impl FnMut(NodeSlotId, u32, &FragmentRecord) -> bool,
+) {
+    // OPTIMIZATION: Up to this many fragments, a scan costs less than building an index would.
+    const MAX_FRAGMENTS_TO_SCAN: usize = 32;
+
+    for &node in node_slots {
+        let Some(block) = containing_block_paintable_of_node(layout_arena, node) else {
+            continue;
+        };
+        let side_data = layout_arena.committed_side_data(block);
+        let fragments = side_data.fragments();
+        if fragments.len() <= MAX_FRAGMENTS_TO_SCAN {
+            for (index, fragment) in fragments.iter().enumerate() {
+                if fragment.layout_node == node && !callback(block, index as u32, fragment) {
+                    return;
+                }
+            }
+            continue;
+        }
+        for &index in side_data.fragment_indices_of(node) {
+            if !callback(block, index, &fragments[index as usize]) {
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaretMatch {
+    None,
+    Direct,
+    SoftWrapFallback,
+}
+
+pub(crate) fn caret_match(fragment: &FragmentRecord, offset: usize, affinity_is_downstream: bool) -> CaretMatch {
+    let dom_start = fragment.dom_start_offset_in_node;
+    let dom_end_with_trailing_whitespace = fragment.dom_end_offset_with_trailing_whitespace;
+    if offset < dom_start || offset > dom_end_with_trailing_whitespace {
+        return CaretMatch::None;
+    }
+    if affinity_is_downstream && offset == dom_end_with_trailing_whitespace {
+        return CaretMatch::SoftWrapFallback;
+    }
+    CaretMatch::Direct
+}
+
+pub(crate) fn selection_offsets_for_dom_range(
+    layout_arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+    start_offset_in_code_units: usize,
+    end_offset_in_code_units: usize,
+) -> Option<SelectionOffsets> {
+    let length_with_trailing_whitespace =
+        fragment.length_in_code_units + fragment.trailing_whitespace_length_in_code_units;
+    let dom_start = fragment.dom_start_offset_in_node;
+    let dom_end = fragment.dom_end_offset_with_trailing_whitespace;
+    if dom_start > end_offset_in_code_units || dom_end < start_offset_in_code_units {
+        return None;
+    }
+    let rendered_start = layout_arena.rendered_text_offset_for_dom_offset(
+        fragment.layout_node,
+        start_offset_in_code_units,
+        crate::layout::RenderedTextBoundary::Start,
+    );
+    let rendered_end = layout_arena.rendered_text_offset_for_dom_offset(
+        fragment.layout_node,
+        end_offset_in_code_units,
+        crate::layout::RenderedTextBoundary::End,
+    );
+    Some(SelectionOffsets {
+        start: rendered_start.clamp(fragment.start, fragment.start + length_with_trailing_whitespace) - fragment.start,
+        end: rendered_end.clamp(fragment.start, fragment.start + length_with_trailing_whitespace) - fragment.start,
+    })
+}
+
+/// Calls `callback` with each cluster of a fragment's glyph run, in glyph order: the code units it covers
+/// (`cluster_start..cluster_end`) and its advance. Each glyph that covers code units starts a cluster, even one with no
+/// advance (e.g. a soft hyphen's), and a glyph that covers none (another glyph of the same cluster) adds its advance to
+/// the cluster before it. Stops early when `callback` returns false.
+fn for_each_cluster_in_glyph_run(
+    glyphs: &[libgfx_rust::text_layout::DrawGlyph],
+    fragment_length_in_code_units: usize,
+    mut callback: impl FnMut(usize, usize, f32) -> bool,
+) {
+    let mut cursor = 0usize;
+    // The cluster whose glyphs are still being added up, and the advance of glyphs that came before any code unit.
+    let mut pending: Option<(usize, usize, f32)> = None;
+    let mut leading_advance = 0.0f32;
+    for glyph in glyphs {
+        if glyph.length_in_code_units() == 0 {
+            match &mut pending {
+                Some((_, _, width)) => *width += glyph.advance,
+                None => leading_advance += glyph.advance,
+            }
+            continue;
+        }
+        let cluster_start = cursor;
+        let cluster_end = (cursor + glyph.length_in_code_units()).min(fragment_length_in_code_units);
+        cursor = cluster_end;
+        if let Some((start, end, width)) = pending.take()
+            && !callback(start, end, width)
+        {
+            return;
+        }
+        if cluster_end > cluster_start {
+            pending = Some((
+                cluster_start,
+                cluster_end,
+                glyph.advance + std::mem::take(&mut leading_advance),
+            ));
+        }
+    }
+    if let Some((start, end, width)) = pending {
+        callback(start, end, width);
+    }
+}
+
+/// Calls `callback` with each DOM offset (in UTF-16 code units) that the horizontal `fragment` renders, from its first
+/// offset through the one past its last, along with the document-absolute x coordinate where that offset's character
+/// starts (or, for the last one, where the fragment's text ends). The advances come from the fragment's shaped glyph
+/// run, so kerning and ligatures are reflected; a cluster's advance is split evenly among its code units.
+pub(crate) fn for_each_dom_offset_x(
+    layout_arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+    mut callback: impl FnMut(usize, f32),
+) {
+    if !is_horizontal(fragment) {
+        return;
+    }
+    let Some(run) = &fragment.glyph_run else {
+        return;
+    };
+    // FIXME: Report the positions of right-to-left text. Its glyphs are in visual order, so an advance accumulated in
+    //        glyph order doesn't belong to the character at the same logical offset.
+    if run.glyphs.placed().any(|placed| placed.is_rtl) {
+        return;
+    }
+    let Some(rendered_text) = layout_arena.rendered_text(fragment.layout_node) else {
+        return;
+    };
+    let length = fragment.length_in_code_units;
+    // advance_before[i] is the advance of the fragment's rendered text before its rendered offset i.
+    let mut advance_before = vec![0.0f32; length + 1];
+    let mut cursor = 0usize;
+    for_each_cluster_in_glyph_run(&run.glyphs, length, |cluster_start, cluster_end, cluster_width| {
+        let per_unit_advance = cluster_width / (cluster_end - cluster_start) as f32;
+        for offset in cluster_start..cluster_end {
+            advance_before[offset + 1] = advance_before[offset] + per_unit_advance;
+        }
+        cursor = cluster_end;
+        true
+    });
+    // Code units past the last cluster take the end position.
+    for offset in cursor..length {
+        advance_before[offset + 1] = advance_before[offset];
+    }
+    let x = absolute_rect(layout_arena, fragment).x.to_float();
+    rendered_text.for_each_rendered_text_offset_of_dom_offsets(
+        fragment.dom_start_offset_in_node,
+        fragment.dom_end_offset_in_node,
+        crate::layout::RenderedTextBoundary::End,
+        |dom_offset, rendered_offset| {
+            let offset_in_fragment = rendered_offset.clamp(fragment.start, fragment.start + length) - fragment.start;
+            callback(dom_offset, x + advance_before[offset_in_fragment]);
+        },
+    );
+}
+
+pub(crate) fn rect_for_selection_offsets(
+    layout_arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+    offsets: SelectionOffsets,
+    first_available_font: impl FnOnce() -> Option<libgfx_rust::font::FontHandle>,
+) -> CssPixelRect {
+    let horizontal = is_horizontal(fragment);
+    let mut rect = absolute_rect(layout_arena, fragment);
+    let length = fragment.length_in_code_units;
+
+    let font = match &fragment.glyph_run {
+        Some(run) => Some(run.font.clone()),
+        None => first_available_font(),
+    };
+
+    let start_in_text = offsets.start.min(length);
+    let end_in_text = offsets.end.min(length);
+
+    let mut pixel_offset;
+    let mut pixel_width;
+    if start_in_text == 0 && end_in_text == length && length > 0 {
+        pixel_offset = CssPixels::from_raw(0);
+        pixel_width = primary_size(rect, horizontal);
+    } else {
+        let mut offset_accumulator = 0.0f32;
+        let mut width_accumulator = 0.0f32;
+        if let Some(run) = &fragment.glyph_run {
+            for_each_cluster_in_glyph_run(&run.glyphs, length, |cluster_start, cluster_end, cluster_width| {
+                if cluster_end <= start_in_text {
+                    offset_accumulator += cluster_width;
+                    return true;
+                }
+                if cluster_start >= end_in_text {
+                    return true;
+                }
+                let per_unit_advance = cluster_width / (cluster_end - cluster_start) as f32;
+                if cluster_start < start_in_text {
+                    offset_accumulator += per_unit_advance * (start_in_text - cluster_start) as f32;
+                }
+                let in_sel_start = cluster_start.max(start_in_text);
+                let in_sel_end = cluster_end.min(end_in_text);
+                width_accumulator += per_unit_advance * (in_sel_end - in_sel_start) as f32;
+                true
+            });
+        }
+        pixel_offset = CssPixels::nearest_value_for_f32(offset_accumulator);
+        pixel_width = CssPixels::nearest_value_for_f32(width_accumulator);
+    }
+
+    if offsets.start > length || offsets.end > length {
+        let space_width = match &font {
+            Some(font) => CssPixels::nearest_value_for_f32(font.glyph_width(' ' as u32)),
+            None => CssPixels::from_raw(0),
+        };
+        let trailing_units_before_start = offsets.start.saturating_sub(length);
+        let trailing_units_before_end = offsets.end.saturating_sub(length);
+        pixel_offset += space_width * trailing_units_before_start;
+        pixel_width += space_width * (trailing_units_before_end - trailing_units_before_start);
+    }
+
+    if offsets.start == offsets.end {
+        pixel_width = CssPixels::from_integer(1);
+    }
+
+    if horizontal {
+        rect.x += pixel_offset;
+        rect.width = pixel_width;
+    } else {
+        rect.y += pixel_offset;
+        rect.height = pixel_width;
+    }
+
+    if let Some(font) = &font {
+        let ascent_f = font.facts().ascent;
+        let descent_f = font.facts().descent;
+        if ascent_f > 0.0 || descent_f > 0.0 {
+            let ascent = CssPixels::nearest_value_for_f32(ascent_f);
+            let descent = CssPixels::nearest_value_for_f32(descent_f);
+            let zero = CssPixels::from_raw(0);
+            let overflow_top = (ascent - fragment.baseline).max(zero);
+            let overflow_bottom = (descent - secondary_size(rect, horizontal) + fragment.baseline).max(zero);
+            if horizontal {
+                rect.inflate(overflow_top, zero, overflow_bottom, zero);
+            } else {
+                rect.inflate(zero, overflow_bottom, zero, overflow_top);
+            }
+        }
+    }
+    rect
+}
+
+pub(crate) fn whole_range_rect(
+    layout_arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+    first_available_font: impl FnOnce() -> Option<libgfx_rust::font::FontHandle>,
+) -> CssPixelRect {
+    let offsets = SelectionOffsets {
+        start: 0,
+        end: fragment.length_in_code_units,
+    };
+    rect_for_selection_offsets(layout_arena, fragment, offsets, first_available_font)
+}
+
+pub(crate) fn is_block_level_box(layout_arena: &impl PaintRead, fragment: &FragmentRecord) -> bool {
+    layout_arena
+        .node_style_if_live(fragment.layout_node)
+        .is_some_and(|style| style.display().is_block_outside())
+}
+
+pub(crate) fn style_source(_layout_arena: &impl PaintRead, fragment: &FragmentRecord) -> NodeSlotId {
+    fragment.style_source
+}
+
+pub(crate) fn first_available_font(
+    layout_arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+) -> Option<libgfx_rust::font::FontHandle> {
+    let source = style_source(layout_arena, fragment);
+    layout_arena
+        .node_style_if_live(source)
+        .map(|style| style.first_available_font())
+}
+
+struct GraphemeEdgeTracker {
+    target_width: f32,
+    left_edge: usize,
+    right_edge: usize,
+    width_to_left_edge: f32,
+    width_to_right_edge: f32,
+}
+
+impl GraphemeEdgeTracker {
+    fn new(target_width: f32) -> Self {
+        Self {
+            target_width,
+            left_edge: 0,
+            right_edge: 0,
+            width_to_left_edge: 0.0,
+            width_to_right_edge: 0.0,
+        }
+    }
+
+    fn update(&mut self, grapheme_length_in_code_units: usize, grapheme_width: f32) -> bool {
+        if grapheme_width == 0.0 {
+            return true;
+        }
+        self.right_edge += grapheme_length_in_code_units;
+        self.width_to_right_edge += grapheme_width;
+        if self.width_to_right_edge >= self.target_width {
+            return false;
+        }
+        self.left_edge = self.right_edge;
+        self.width_to_left_edge = self.width_to_right_edge;
+        true
+    }
+
+    fn resolve(&self) -> usize {
+        if (self.target_width - self.width_to_left_edge) < (self.width_to_right_edge - self.target_width) {
+            return self.left_edge;
+        }
+        self.right_edge
+    }
+}
+
+pub(crate) fn physical_edge_offset(
+    arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+    left: bool,
+) -> Option<(usize, bool)> {
+    let run = fragment.glyph_run.as_ref()?;
+    let placed = run
+        .glyphs
+        .placed()
+        .filter(|placed| placed.glyph.length_in_code_units() > 0 && placed.glyph.advance > 0.0)
+        .min_by(|a, b| {
+            if left {
+                a.x.total_cmp(&b.x)
+            } else {
+                (b.x + b.glyph.advance).total_cmp(&(a.x + a.glyph.advance))
+            }
+        })?;
+    let boundary = placed.cluster_start as usize
+        + if left == placed.is_rtl {
+            placed.glyph.length_in_code_units()
+        } else {
+            0
+        };
+    Some((
+        arena.dom_offset_for_rendered_text_offset(
+            fragment.layout_node,
+            fragment.start + boundary,
+            crate::layout::RenderedTextBoundary::End,
+        ),
+        left == placed.is_rtl,
+    ))
+}
+
+pub(crate) fn caret_inline_offset(fragment: &FragmentRecord, offset: usize, downstream: bool) -> Option<f32> {
+    let run = fragment.glyph_run.as_ref()?;
+    let mut fallback = None;
+    for placed in run
+        .glyphs
+        .placed()
+        .filter(|placed| placed.glyph.length_in_code_units() > 0)
+    {
+        let start = placed.cluster_start as usize;
+        let length = placed.glyph.length_in_code_units();
+        let end = start + length;
+        if offset < start || offset > end {
+            continue;
+        }
+        let fraction = (offset - start) as f32 / length as f32;
+        let coordinate = placed.x + placed.glyph.advance * if placed.is_rtl { 1.0 - fraction } else { fraction };
+        if (offset > start && offset < end) || (downstream && offset == start) || (!downstream && offset == end) {
+            return Some(coordinate);
+        }
+        fallback = Some(coordinate);
+    }
+    fallback
+}
+
+pub(crate) fn index_in_node_for_point(
+    layout_arena: &impl PaintRead,
+    fragment: &FragmentRecord,
+    position: crate::css::css_pixels::CssPixelPoint,
+) -> usize {
+    if !layout_arena
+        .node_kind_if_live(fragment.layout_node)
+        .is_some_and(node_facts::kind_is_text)
+    {
+        return 0;
+    }
+
+    let rect = absolute_rect(layout_arena, fragment);
+    let relative_inline_offset = if is_horizontal(fragment) {
+        (position.x - rect.x).to_float()
+    } else {
+        (position.y - rect.y).to_float()
+    };
+    if relative_inline_offset < 0.0 {
+        return 0;
+    }
+
+    let mut tracker = GraphemeEdgeTracker::new(relative_inline_offset);
+    let mut reached_target = false;
+
+    if let Some(run) = &fragment.glyph_run {
+        layout_arena.with_grapheme_segmenter(fragment.layout_node, |segmenter| {
+            for_each_cluster_in_glyph_run(
+                &run.glyphs,
+                fragment.length_in_code_units,
+                |cluster_start, cluster_end, cluster_width| {
+                    let per_unit_advance = cluster_width / (cluster_end - cluster_start) as f32;
+                    let mut grapheme_start = fragment.start + cluster_start;
+                    let cluster_absolute_end = fragment.start + cluster_end;
+                    while grapheme_start < cluster_absolute_end {
+                        let grapheme_end = segmenter
+                            .next_boundary(grapheme_start, false)
+                            .unwrap_or(cluster_absolute_end)
+                            .min(cluster_absolute_end);
+                        if grapheme_end <= grapheme_start {
+                            break;
+                        }
+                        let grapheme_units = grapheme_end - grapheme_start;
+                        let grapheme_width = per_unit_advance * grapheme_units as f32;
+                        if !tracker.update(grapheme_units, grapheme_width) {
+                            reached_target = true;
+                            return false;
+                        }
+                        grapheme_start = grapheme_end;
+                    }
+                    true
+                },
+            );
+        });
+    }
+
+    if !reached_target && fragment.trailing_whitespace_length_in_code_units > 0 {
+        let font = match &fragment.glyph_run {
+            Some(run) => Some(run.font.clone()),
+            None => first_available_font(layout_arena, fragment),
+        };
+        if let Some(font) = font {
+            let space_width = font.glyph_width(' ' as u32);
+            for _ in 0..fragment.trailing_whitespace_length_in_code_units {
+                if !tracker.update(1, space_width) {
+                    break;
+                }
+            }
+        }
+    }
+
+    layout_arena.dom_offset_for_rendered_text_offset(
+        fragment.layout_node,
+        fragment.start + tracker.resolve(),
+        crate::layout::RenderedTextBoundary::End,
+    )
+}
