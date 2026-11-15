@@ -42,6 +42,7 @@ public:
     void focus_address();
     void update_display_metadata(double device_pixel_ratio, Optional<u64> display_id, double refresh_rate);
     Tab* tree_parent(Tab&) const;
+    void group_tab_from_view(Tab& child, Optional<u64> source_view_id);
     ErrorOr<void> detach_tree_tab(Tab&);
     ErrorOr<void> move_tree_tab(Tab&, Tab& target, StringView placement);
     bool reordering_tree() const { return m_reordering_tree; }
@@ -78,6 +79,13 @@ private:
     ErrorOr<JsonValue> request(JsonValue const&);
     ErrorOr<void> command(JsonValue const&);
     void place_content();
+    struct Split { QPointer<Tab> first; QPointer<Tab> second; bool vertical { false }; double ratio { .5 }; };
+    QVector<Split> m_splits;
+    Split* split_for(Tab*);
+    void remove_split(Tab*);
+    void save_split(Split const&);
+    void restore_splits();
+    bool m_placing_content { false };
     void release_observation(Tab*);
     QSet<bool> m_source_scans;
     QHash<bool, QStringList> m_source_watch_paths;

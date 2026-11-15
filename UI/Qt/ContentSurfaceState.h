@@ -21,13 +21,17 @@ public:
     {
         m_viewport = {};
         m_overlays.clear();
+        m_capture_input = false;
     }
 
-    void accept(QRect viewport, QVector<QRect> overlays)
+    void accept(QRect viewport, QVector<QRect> overlays, bool capture_input = false)
     {
+        m_capture_input = capture_input;
         m_viewport = viewport;
         m_overlays = std::move(overlays);
     }
+
+    bool captures_input() const { return m_capture_input; }
 
     Placement placement(QRect bounds) const
     {
@@ -39,6 +43,7 @@ public:
     }
 
 private:
+    bool m_capture_input { false };
     QRect m_viewport;
     QVector<QRect> m_overlays;
 };

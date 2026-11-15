@@ -1,3 +1,4 @@
+#include <UI/Qt/PlainText.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <LibURL/Parser.h>
@@ -12,6 +13,9 @@
 #include <UI/Qt/DerpBirdPageSources.h>
 #include <QFileDialog>
 #include <QRegion>
+#include <QLayout>
+#include <QScopedValueRollback>
+#include <cmath>
 #include <QBuffer>
 #include <LibWebView/URL.h>
 #include <QResizeEvent>
@@ -548,8 +552,9 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     m_shell->on_load_finish = [this](auto const&) { queue_snapshot(); };
     m_content = window.tab_widget().detach_page_stack(this);
     m_content->hide();
+    m_content->layout()->setEnabled(false);
     connect(&window.tab_widget(), &TabWidget::current_tab_changed, this,
-        [this] { clear_autofill(); if (m_credential_fill) m_credential_fill->cancel(); m_credential_proposal.clear(); queue_snapshot(); });
+        [this] { clear_autofill(); if (m_credential_fill) m_credential_fill->cancel(); m_credential_proposal.clear(); place_content(); queue_snapshot(); });
     connect(window.tab_widget().tab_bar(), &QTabBar::tabMoved, this,
         [this] { queue_snapshot(); });
     for (int i = 0; i < window.tab_count(); ++i)
@@ -675,7 +680,9 @@ void DerpBirdChrome::observe_tab(Tab& tab)
                 });
         };
         connect(&tab.location_edit(), &QLineEdit::textChanged, scope, [this] { queue_snapshot(); });
-        connect(&tab.view(), &WebContentView::native_surface_changed, scope, [this] { place_content(); });
+        // Native surfaces can change while QStackedWidget is removing a page,
+        // before its stack and tab bar have matching indices again.
+        connect(&tab.view(), &WebContentView::native_surface_changed, scope, [this] { place_content(); }, Qt::QueuedConnection);
         auto back = make<NavigationObserver>(*this);
         observation.back = back.ptr();
         tab.view().navigate_back_action().add_observer(AK::move(back));
@@ -723,6 +730,7 @@ void DerpBirdChrome::release_observation(Tab* tab)
 void DerpBirdChrome::unobserve_tab(Tab& tab)
 {
     if (tab.session_tab_id().has_value()) m_tree_tabs.remove(*tab.session_tab_id());
+    remove_split(&tab);
     m_favicon_cache.remove(&tab);
     release_observation(&tab);
     queue_snapshot();
@@ -751,6 +759,13 @@ ErrorOr<void> DerpBirdChrome::set_tree_parent(Tab& tab, Tab* parent)
 
 ErrorOr<void> DerpBirdChrome::detach_tree_tab(Tab& tab)
 {
+    // Closing or extracting a half leaves its partner selected as an ordinary tab.
+    if (auto* split = split_for(&tab)) {
+        auto* survivor = split->first == &tab ? split->second.data() : split->first.data();
+        if (m_window.current_tab() == &tab && survivor) m_window.activate_tab(m_window.tab_index(survivor));
+        remove_split(&tab);
+        place_content();
+    }
     // Every close path (including Ctrl+W, script close and native menus) promotes children.
     for (int i = 0; i < m_window.tab_count(); ++i) {
         auto* child = m_window.tab_at(i);
@@ -769,16 +784,39 @@ void DerpBirdChrome::normalize_tree_order()
         auto* tab = m_window.tab_at(i);
         if (auto* parent = tree_parent(*tab)) children[parent].append(tab);
     }
+    QSet<Tab*> paired;
     for (int i = 0; i < m_window.tab_count(); ++i) {
         auto* tab = m_window.tab_at(i);
-        if (tree_parent(*tab)) continue;
-        ordered.append(tab);
-        ordered.append(children.value(tab));
+        if (tree_parent(*tab) || paired.contains(tab)) continue;
+        if (auto* split = split_for(tab)) {
+            // Keep the pair and its children together even when the source tabs
+            // originally occupied different positions in the strip.
+            for (auto* member : { split->first.data(), split->second.data() }) {
+                ordered.append(member);
+                ordered.append(children.value(member));
+                paired.insert(member);
+            }
+        } else {
+            ordered.append(tab);
+            ordered.append(children.value(tab));
+        }
     }
     m_reordering_tree = true;
     for (int i = 0; i < ordered.size(); ++i)
         if (m_window.tab_at(i) != ordered[i]) m_window.move_tab(m_window.tab_index(ordered[i]), i);
     m_reordering_tree = false;
+}
+
+void DerpBirdChrome::group_tab_from_view(Tab& child, Optional<u64> source_view_id)
+{
+    if (!source_view_id.has_value()) return;
+    for (int i = 0; i < m_window.tab_count(); ++i) {
+        auto* source = m_window.tab_at(i);
+        if (source == &child || !source->is_loaded() || source->view().view_id() != *source_view_id || source->is_pinned()) continue;
+        if (auto result = move_tree_tab(child, *source, "inside"sv); result.is_error())
+            warnln("Cannot group tab opened from page: {}", result.error());
+        return;
+    }
 }
 
 ErrorOr<void> DerpBirdChrome::move_tree_tab(Tab& source, Tab& target, StringView placement)
@@ -795,7 +833,12 @@ ErrorOr<void> DerpBirdChrome::move_tree_tab(Tab& source, Tab& target, StringView
     }
     if (block.contains(&target)) return Error::from_string_literal("A group cannot be moved into itself");
     auto* parent = tree_parent(target);
-    if (placement == "inside"sv) parent = parent ? parent : &target;
+    if (placement == "inside"sv) {
+        // Either half opens children under the same split-tab item.
+        auto* split = split_for(&target);
+        parent = split ? split->first.data() : parent ? parent : &target;
+    }
+    if (parent == &source) return Error::from_string_literal("A group cannot be moved into itself");
     if (parent && (source.is_pinned() || block.size() > 1)) return Error::from_string_literal("Tab groups support two levels only");
     int destination = remaining.indexOf(&target);
     if (placement == "inside"sv) {
@@ -807,17 +850,21 @@ ErrorOr<void> DerpBirdChrome::move_tree_tab(Tab& source, Tab& target, StringView
     }
     if (parent && parent->property("derpbirdTreeParent").toLongLong()) TRY(set_tree_parent(*parent, nullptr));
     TRY(set_tree_parent(source, parent));
+    remove_split(&source);
+
     for (int i = 0; i < block.size(); ++i) remaining.insert(destination + i, block[i]);
     m_reordering_tree = true;
     for (int i = 0; i < remaining.size(); ++i)
         if (m_window.tab_at(i) != remaining[i]) m_window.move_tab(m_window.tab_index(remaining[i]), i);
     m_reordering_tree = false;
+    place_content();
     queue_snapshot();
     return {};
 }
 
 JsonValue DerpBirdChrome::snapshot()
 {
+    restore_splits();
     normalize_tree_order();
     JsonArray tabs;
     for (int i = 0; i < m_window.tab_count(); ++i) {
@@ -907,6 +954,18 @@ JsonValue DerpBirdChrome::snapshot()
     preferences.set("wrapTabs"sv, m_shell_preferences->value("wrapTabs", false).toBool());
     state.set("preferences"sv, AK::move(preferences));
     state.set("tabs"sv, AK::move(tabs));
+    JsonArray splits;
+    for (auto const& split : m_splits) {
+        if (!split.first || !split.second) continue;
+        JsonObject item;
+        item.set("id"sv, tab_id(*split.first));
+        item.set("firstTabId"sv, tab_id(*split.first));
+        item.set("secondTabId"sv, tab_id(*split.second));
+        item.set("axis"sv, split.vertical ? "vertical"sv : "horizontal"sv);
+        item.set("ratio"sv, split.ratio);
+        splits.must_append(AK::move(item));
+    }
+    state.set("splits"sv, AK::move(splits));
     state.set("activeTabId"sv, m_window.current_tab() ? JsonValue(tab_id(*m_window.current_tab())) : JsonValue {});
     return state;
 }
@@ -930,6 +989,19 @@ void DerpBirdChrome::clear_autofill()
 
 bool DerpBirdChrome::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_shell && event->type() == QEvent::MouseButtonPress) {
+        // A pending tab tooltip must not cover the context menu or take its input.
+        if (m_shell->on_leave_tooltip_area) m_shell->on_leave_tooltip_area();
+        hide_tooltip();
+    }
+    if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::FocusIn) {
+        for (auto it = m_observed_tabs.begin(); it != m_observed_tabs.end(); ++it) {
+            if (it.value().view == watched && it.key() != m_window.current_tab() && split_for(it.key()) == split_for(m_window.current_tab()) && split_for(it.key())) {
+                m_window.activate_tab(m_window.tab_index(it.key()));
+                break;
+            }
+        }
+    }
     if (m_autofill_view && watched == m_autofill_view && m_credential_autofill.is_object()) {
         if (event->type() == QEvent::Wheel || event->type() == QEvent::MouseButtonPress) clear_autofill();
         else if (event->type() == QEvent::KeyPress) {
@@ -1116,7 +1188,9 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         for (auto const& overlay : overlays->values())
             exclusions.append(TRY(decode_rect(overlay)));
         ContentSurfaceState pending;
-        pending.accept(viewport, AK::move(exclusions));
+        auto capture_input = data.get_bool("captureInput"sv);
+        if (data.has("captureInput"sv) && !capture_input.has_value()) return Error::from_string_literal("Invalid input capture");
+        pending.accept(viewport, AK::move(exclusions), capture_input.value_or(false));
         m_pending_surface_state = AK::move(pending);
         return {};
     }
@@ -1294,6 +1368,37 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         m_filter_proposal = JsonValue {};
         return {};
     }
+    if (type == "tab.split"sv) {
+        auto target_id = data.get_string("targetId"sv);
+        auto edge = data.get_string("edge"sv);
+        if (!target_id.has_value() || !edge.has_value() || !edge->is_one_of("left"sv, "right"sv, "top"sv, "bottom"sv)) return Error::from_string_literal("Invalid split target");
+        Tab* target = nullptr;
+        for (int i = 0; i < m_window.tab_count(); ++i) if (tab_id(*m_window.tab_at(i)) == *target_id) target = m_window.tab_at(i);
+        if (!target || target == tab || target->is_pinned() || tab->is_pinned()) return Error::from_string_literal("Split requires two different unpinned tabs");
+        remove_split(tab); remove_split(target);
+        // A split is a single tab-strip item; detach the dragged member from a tree group.
+        TRY(detach_tree_tab(*tab));
+        TRY(detach_tree_tab(*target));
+        bool before = edge->is_one_of("left"sv, "top"sv);
+        m_splits.append({ before ? tab : target, before ? target : tab, edge->is_one_of("top"sv, "bottom"sv), .5 });
+        save_split(m_splits.last());
+        tab->ensure_loaded(); target->ensure_loaded();
+        m_window.activate_tab(m_window.tab_index(tab)); place_content();
+        return {};
+    }
+    if (type == "split.switch"sv || type == "split.resize"sv) {
+        auto* split = split_for(tab);
+        if (!split) return Error::from_string_literal("Tab is not split");
+        if (type == "split.switch"sv) split->vertical = !split->vertical;
+        else {
+            auto value = data.get("ratio"sv);
+            if (!value.has_value() || !value->is_number()) return Error::from_string_literal("Invalid split ratio");
+            auto ratio = value->get_double_with_precision_loss().value();
+            if (!std::isfinite(ratio) || ratio < .2 || ratio > .8) return Error::from_string_literal("Invalid split ratio");
+            split->ratio = ratio;
+        }
+        save_split(*split); place_content(); return {};
+    }
     if (type == "tab.activate"sv) {
         auto focus = data.get_string("focus"sv);
         if (focus.has_value() && *focus != "tab"sv)
@@ -1379,6 +1484,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         auto pinned = data.get_bool("value"sv);
         if (!pinned.has_value())
             return Error::from_string_literal("Invalid pin state");
+        if (*pinned) remove_split(tab);
         *pinned ? m_window.pin_tab(*tab) : m_window.unpin_tab(*tab);
         return {};
     }
@@ -1444,23 +1550,100 @@ void DerpBirdChrome::resizeEvent(QResizeEvent* event)
     place_content();
 }
 
+DerpBirdChrome::Split* DerpBirdChrome::split_for(Tab* tab)
+{
+    if (!tab) return nullptr;
+    for (auto& split : m_splits) if (split.first && split.second && (split.first == tab || split.second == tab)) return &split;
+    return nullptr;
+}
+
+void DerpBirdChrome::save_split(Split const& split)
+{
+    if (m_window.is_private() == WebView::IsPrivate::Yes || !split.first || !split.second || !split.first->session_tab_id().has_value() || !split.second->session_tab_id().has_value()) return;
+    auto key = QString("splits/%1").arg(*split.first->session_tab_id());
+    m_shell_preferences->setValue(key, QStringList { QString::number(*split.second->session_tab_id()), split.vertical ? "vertical" : "horizontal", QString::number(split.ratio) });
+}
+
+void DerpBirdChrome::remove_split(Tab* tab)
+{
+    for (int i = m_splits.size() - 1; i >= 0; --i) {
+        auto const& split = m_splits[i];
+        if (split.first != tab && split.second != tab && split.first && split.second) continue;
+        if (split.first && split.first->session_tab_id().has_value() && m_window.is_private() == WebView::IsPrivate::No)
+            m_shell_preferences->remove(QString("splits/%1").arg(*split.first->session_tab_id()));
+        m_splits.removeAt(i);
+    }
+}
+
+void DerpBirdChrome::restore_splits()
+{
+    if (m_window.is_private() == WebView::IsPrivate::Yes) return;
+    for (int i = 0; i < m_window.tab_count(); ++i) {
+        auto* first = m_window.tab_at(i);
+        if (!first->session_tab_id().has_value() || first->is_pinned() || split_for(first)) continue;
+        auto saved = m_shell_preferences->value(QString("splits/%1").arg(*first->session_tab_id())).toStringList();
+        if (saved.size() != 3 || (saved[1] != "vertical" && saved[1] != "horizontal")) continue;
+        bool ok = false; auto ratio = saved[2].toDouble(&ok);
+        if (!ok || !std::isfinite(ratio) || ratio < .2 || ratio > .8) continue;
+        for (int j = 0; j < m_window.tab_count(); ++j) {
+            auto* second = m_window.tab_at(j);
+            if (second != first && second->session_tab_id().has_value() && QString::number(*second->session_tab_id()) == saved[0] && !second->is_pinned() && !split_for(second)) {
+                m_splits.append({ first, second, saved[1] == "vertical", ratio }); place_content(); break;
+            }
+        }
+    }
+}
+
 void DerpBirdChrome::place_content()
 {
+    if (!m_content || m_placing_content) return;
+    QScopedValueRollback placing(m_placing_content, true);
     auto placement = m_surface_state.placement(rect());
     if (!placement.visible()) {
         m_shell->set_compositing_above(nullptr);
         m_content->hide();
         return;
     }
-    if (m_content->geometry() != placement.viewport)
-        m_content->setGeometry(placement.viewport);
-    if (m_content->mask() != placement.visible_region)
-        m_content->setMask(placement.visible_region);
-    auto* tab = m_window.current_tab();
-    auto* content_view = tab && tab->is_loaded() ? &tab->view() : nullptr;
-    m_shell->set_compositing_above(content_view);
+    if (m_content->geometry() != placement.viewport) m_content->setGeometry(placement.viewport);
+    m_content->setAttribute(Qt::WA_TransparentForMouseEvents, m_surface_state.captures_input());
+    if (m_content->mask() != placement.visible_region) m_content->setMask(placement.visible_region);
+    auto* active = m_window.current_tab();
+    auto* split = split_for(active);
+    QPointer<Tab> first = split ? split->first.data() : active;
+    QPointer<Tab> second = split ? split->second : nullptr;
+    QRect first_rect(QPoint(), placement.viewport.size()), second_rect;
+    if (split) {
+        int available = std::max(0, (split->vertical ? first_rect.height() : first_rect.width()) - 6);
+        int size = static_cast<int>(std::floor(available * split->ratio));
+        second_rect = first_rect;
+        if (split->vertical) { first_rect.setHeight(size); second_rect.setTop(size + 6); }
+        else { first_rect.setWidth(size); second_rect.setLeft(size + 6); }
+    }
+    // These pages have explicit geometry, even before the window is shown.
+    // Otherwise TabWidget's startup sizing copies the active half's size into
+    // the other restored half while its first child layout is still pending.
+    if (first) first->did_get_real_size();
+    if (second) second->did_get_real_size();
+    if (first) first->ensure_loaded();
+    if (second) second->ensure_loaded();
+    for (int i = 0; i < m_window.tab_count(); ++i) {
+        auto* tab = m_window.tab_at(i);
+        if (!tab) continue;
+        bool visible = tab == first || tab == second;
+        if (tab->is_loaded()) tab->view().set_system_visibility_state(visible ? Web::HTML::VisibilityState::Visible : Web::HTML::VisibilityState::Hidden);
+        if (visible) {
+            auto geometry = tab == first ? first_rect : second_rect;
+            if (tab->geometry() != geometry) tab->setGeometry(geometry);
+            tab->show();
+        } else tab->hide();
+    }
+    if (first && first->is_loaded()) first->view().set_compositing_above(nullptr);
+    if (second && second->is_loaded()) second->view().set_compositing_above(first && first->is_loaded() ? &first->view() : nullptr);
+    auto* top = second ? second.data() : first.data();
+    m_shell->set_compositing_above(top && top->is_loaded() ? &top->view() : nullptr);
     m_content->show();
-    m_content->raise();
+    if (m_surface_state.captures_input()) m_shell->raise();
+    else m_content->raise();
 }
 
 } // namespace Ladybird

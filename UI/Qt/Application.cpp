@@ -2194,9 +2194,10 @@ BrowserWindow* Application::window_for_new_tab(Optional<u64> source_view_id, Web
 
 void Application::open_view_in_new_tab(u64 view_id, Optional<u64> source_view_id, WebView::IsPrivate is_private, Web::HTML::ActivateTab activate_tab)
 {
-    if (auto* window = window_for_new_tab(source_view_id, is_private))
-        window->create_new_tab(activate_tab, view_id);
-    else
+    if (auto* window = window_for_new_tab(source_view_id, is_private)) {
+        auto& tab = window->create_new_tab(activate_tab, view_id);
+        if (auto* chrome = window->derpbird_chrome()) chrome->group_tab_from_view(tab, source_view_id);
+    } else
         new_window({}, configuration_for_new_window(), BrowserWindow::IsPopupWindow::No, is_private, view_id);
 }
 
@@ -2208,7 +2209,8 @@ void Application::open_url_in_new_tab(URL::URL const& url, Web::HTML::ActivateTa
         return;
     }
 
-    window->new_tab_from_url(url, activate_tab, BrowserWindow::TabLocation::after_current_tab());
+    auto& tab = window->new_tab_from_url(url, activate_tab, BrowserWindow::TabLocation::after_current_tab());
+    if (auto* chrome = window->derpbird_chrome()) chrome->group_tab_from_view(tab, source_view_id);
 }
 
 void Application::open_urls_in_new_tabs(ReadonlySpan<URL::URL> urls) const
@@ -2252,6 +2254,7 @@ void Application::open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescri
     }
 
     auto& tab = window->create_new_tab(activate_tab, BrowserWindow::TabLocation::after_current_tab());
+    if (auto* chrome = window->derpbird_chrome()) chrome->group_tab_from_view(tab, source_view_id);
     tab.view().load(move(navigation));
 }
 
