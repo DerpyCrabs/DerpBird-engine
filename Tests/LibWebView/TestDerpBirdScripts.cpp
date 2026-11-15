@@ -229,17 +229,22 @@ TEST_CASE(derpbird_scripts_reach_renderer_and_run_at_document_phases)
     auto* test_client = first->page().client().test_connection();
     VERIFY(test_client);
     u64 probe_id = 0;
-    auto probe_storage_channel = [&](bool unknown_document, bool expected_success) {
+    using ValueProtocol = Web::DerpBirdValueProtocol;
+    auto probe_payload = MUST(ValueProtocol::encode(ValueProtocol::Request {
+        ValueProtocol::Method::Open, true, "start"_string, {}, {} }));
+    auto probe_storage_channel = [&](bool unknown_document, bool expected_success, bool malformed = false) {
         Optional<bool> result;
         expired = false;
         auto expected_id = ++probe_id;
         test_client->on_derpbird_value_probe = [&](u64 received, bool success, ByteBuffer payload) {
             VERIFY(received == expected_id);
             result = success;
-            if (success) EXPECT_EQ(StringView(payload.bytes()), "opaque-value-fixture"sv);
+            if (success) EXPECT_EQ(StringView(payload.bytes()), StringView(probe_payload.bytes()));
         };
         deadline->start();
-        test_client->async_probe_derpbird_values(first->page().id(), expected_id, unknown_document, "opaque-value-fixture"sv.bytes());
+        ReadonlyBytes payload = probe_payload.bytes();
+        if (malformed) payload = "opaque-value-fixture"sv.bytes();
+        test_client->async_probe_derpbird_values(first->page().id(), expected_id, unknown_document, payload);
         Core::EventLoop::current().spin_until([&] { return result.has_value() || crashed || expired; });
         deadline->stop();
         VERIFY(!crashed && !expired && result.has_value());
@@ -255,6 +260,8 @@ TEST_CASE(derpbird_scripts_reach_renderer_and_run_at_document_phases)
         Core::deferred_invoke([payload = move(payload), completion = move(completion)]() mutable { completion(move(payload)); });
     };
     probe_storage_channel(false, true);
+    EXPECT_EQ(handled, 1u);
+    probe_storage_channel(false, false, true); // Invalid protocol never reaches the host provider.
     EXPECT_EQ(handled, 1u);
     probe_storage_channel(true, false); // Rejected before reaching provider.
     EXPECT_EQ(handled, 1u);

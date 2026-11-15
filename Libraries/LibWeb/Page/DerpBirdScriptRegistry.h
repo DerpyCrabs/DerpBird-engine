@@ -202,9 +202,13 @@ struct DerpBirdScriptDefinition {
         }
         if (sandbox.is_empty()) sandbox = "raw"_string;
         auto policy = TRY(DerpBirdScriptURLPolicy::create(matches, exclusions, *no_frames, includes, excludes, run_at == DerpBirdScriptRunAt::ContextMenu));
+        // Context is transport metadata for GM_info, not part of the installed
+        // script identity checked by the host for webRequest and context menus.
+        auto configuration = object;
+        configuration.remove("derpbirdPrivateContext"sv);
         return DerpBirdScriptDefinition {
             *id, *name, Utf16String::from_utf8(*source), run_at, move(policy), *enabled, *grant_none, *file_access,
-            move(grants), move(required_scripts), move(required_sources), move(connects), move(resources), move(resource_values), TRY(create_derpbird_script_info(*metadata, *name, object)), object.serialized(), 0, derpbird_script_contexts(*metadata), move(sandbox), has_web_request_metadata
+            move(grants), move(required_scripts), move(required_sources), move(connects), move(resources), move(resource_values), TRY(create_derpbird_script_info(*metadata, *name, object)), configuration.serialized(), 0, derpbird_script_contexts(*metadata), move(sandbox), has_web_request_metadata
         };
     }
 };

@@ -356,9 +356,15 @@ TEST_CASE(script_info_reflects_installed_updates_and_context)
     JsonArray records;
     records.must_append(record);
     auto scoped = Web::derpbird_scripts_for_context(JsonValue { records }, true);
+    auto installed_configuration = MUST(Web::DerpBirdScriptDefinition::decode(record)).configuration;
+    EXPECT_EQ(MUST(Web::DerpBirdScriptDefinition::decode(scoped.as_array().at(0).as_object())).configuration, installed_configuration);
     EXPECT(MUST(Web::DerpBirdScriptDefinition::decode(scoped.as_array().at(0).as_object())).info.get_bool("isIncognito"sv).value());
     scoped = Web::derpbird_scripts_for_context(scoped, false);
+    EXPECT_EQ(MUST(Web::DerpBirdScriptDefinition::decode(scoped.as_array().at(0).as_object())).configuration, installed_configuration);
     EXPECT(!MUST(Web::DerpBirdScriptDefinition::decode(scoped.as_array().at(0).as_object())).info.get_bool("isIncognito"sv).value());
+    auto changed = scoped.as_array().at(0).as_object();
+    changed.set("source"sv, "console.log('changed definition');"sv);
+    EXPECT_NE(MUST(Web::DerpBirdScriptDefinition::decode(changed)).configuration, installed_configuration);
     record.set("checkUpdates"sv, false);
     EXPECT(!MUST(Web::DerpBirdScriptDefinition::decode(record)).info.get_bool("scriptWillUpdate"sv).value());
     record.set("checkUpdates"sv, true);
