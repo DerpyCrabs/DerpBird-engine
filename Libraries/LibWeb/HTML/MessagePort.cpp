@@ -7,6 +7,7 @@
  */
 
 #include <AK/MemoryStream.h>
+#include <LibCore/EventLoop.h>
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
 #include <LibIPC/Transport.h>
@@ -34,12 +35,18 @@ void web_rust_message_port_discard_pending_messages(void* port);
 size_t web_rust_message_port_pending_outgoing_message_count(void* port);
 void web_rust_message_port_fail_next_transfer_for_testing(void* port);
 void web_rust_message_port_disentangle_ports_of_realm(JSVM*, void* realm);
-JSCompletion web_rust_message_port_transfer_steps(JSVM*, void* realm, void* port, TransferDataEncoder** out_data_holder);
+JSCompletion web_rust_message_port_transfer_steps(JSVM*, void* realm, void* port, bool may_leave_process, TransferDataEncoder** out_data_holder, u64* out_parked_end_token);
+void web_rust_message_port_give_up_on_parked_end(u64 token);
+void web_rust_message_port_entanglement_kind(void* port, ReadonlyBytes* out_kind);
+bool web_rust_message_port_transport_is_closed_for_testing(void* port);
 JSCompletion web_rust_message_port_transfer_receiving_steps(JSVM*, void* realm, TransferDataEncoder*);
 
 // Declared in Bindings/Rust/src/html/message_port.rs.
 IPC::Transport* web_bindings_message_port_transport_create_paired(IPC::TransportHandle** out_remote_handle);
 void web_bindings_message_port_transport_destroy(IPC::Transport*);
+Core::WeakEventLoopReference* web_bindings_message_port_current_event_loop();
+void web_bindings_message_port_release_event_loop(Core::WeakEventLoopReference*);
+void web_bindings_message_port_post_to_event_loop(Core::WeakEventLoopReference*, void (*steps)(u64), u64 argument);
 IPC::TransportHandle* web_bindings_message_port_transport_release_for_transfer(IPC::Transport*);
 void web_bindings_message_port_transport_set_up_read_hook(IPC::Transport*, void* state, void (*steps)(void*));
 bool web_bindings_message_port_transport_is_open(IPC::Transport*);
@@ -112,13 +119,31 @@ void MessagePort::discard_pending_messages()
     web_rust_message_port_discard_pending_messages(this);
 }
 
-WebIDL::ExceptionOr<TransferDataEncoder> MessagePort::transfer_steps(JS::Realm& realm)
+WebIDL::ExceptionOr<MessagePort::TransferredToWorker> MessagePort::transfer_to_worker(JS::Realm& realm, WorkerMayBeInOtherProcess worker_may_be_in_other_process)
 {
     TransferDataEncoder* data_holder = nullptr;
-    TRY(JS::HostABI::completion_from_abi<void>(web_rust_message_port_transfer_steps(vm_abi(), &realm, this, &data_holder)));
-    auto result = move(*data_holder);
+    u64 parked_end_token = 0;
+    TRY(JS::HostABI::completion_from_abi<void>(web_rust_message_port_transfer_steps(vm_abi(), &realm, this, worker_may_be_in_other_process == WorkerMayBeInOtherProcess::Yes, &data_holder, &parked_end_token)));
+    TransferredToWorker result { move(*data_holder), parked_end_token };
     delete data_holder;
     return result;
+}
+
+void MessagePort::give_up_on_parked_end(u64 parked_end_token)
+{
+    web_rust_message_port_give_up_on_parked_end(parked_end_token);
+}
+
+StringView MessagePort::entanglement_kind_for_testing() const
+{
+    ReadonlyBytes kind;
+    web_rust_message_port_entanglement_kind(const_cast<MessagePort*>(this), &kind);
+    return StringView { kind };
+}
+
+bool MessagePort::transport_is_closed_for_testing() const
+{
+    return web_rust_message_port_transport_is_closed_for_testing(const_cast<MessagePort*>(this));
 }
 
 size_t MessagePort::pending_outgoing_message_count() const
@@ -141,6 +166,23 @@ IPC::Transport* web_bindings_message_port_transport_create_paired(IPC::Transport
 void web_bindings_message_port_transport_destroy(IPC::Transport* transport)
 {
     delete transport;
+}
+
+// A reference to the event loop of the calling thread, which any thread may use, handed over.
+Core::WeakEventLoopReference* web_bindings_message_port_current_event_loop()
+{
+    return &Core::EventLoop::current_weak().leak_ref();
+}
+
+void web_bindings_message_port_release_event_loop(Core::WeakEventLoopReference* event_loop)
+{
+    event_loop->unref();
+}
+
+void web_bindings_message_port_post_to_event_loop(Core::WeakEventLoopReference* event_loop, void (*steps)(u64), u64 argument)
+{
+    if (auto strong_event_loop = event_loop->take(); strong_event_loop.is_alive())
+        strong_event_loop->deferred_invoke([steps, argument] { steps(argument); });
 }
 
 // The rights of the transport's end as a handle, handed over, after its IO thread stops.
@@ -175,7 +217,7 @@ void web_bindings_transport_handle_take(IPC::TransportHandle* handle, void* cont
     IPC::MessageBuffer buffer;
     IPC::Encoder encoder(buffer);
     MUST(encoder.encode(*owner));
-    auto attachments = release_transfer_attachments(buffer.take_attachments());
+    auto attachments = IPC::release_raw_attachments(buffer.take_attachments());
     receive(context, buffer.data().span(), attachments.data(), attachments.size());
 }
 
@@ -183,7 +225,7 @@ IPC::Transport* web_bindings_transport_handle_create_transport(ReadonlyBytes byt
 {
     FixedMemoryStream stream(bytes);
     Queue<IPC::Attachment> queue;
-    for (auto& attachment : adopt_transfer_attachments(attachments, count))
+    for (auto& attachment : IPC::adopt_raw_attachments({ attachments, count }))
         queue.enqueue(move(attachment));
     IPC::Decoder decoder(stream, queue);
     auto handle = MUST(decoder.decode<IPC::TransportHandle>());
@@ -194,7 +236,7 @@ bool web_bindings_message_port_transport_send(IPC::Transport* transport, Readonl
 {
     IPC::MessageDataType data;
     MUST(data.try_append(bytes.data(), bytes.size()));
-    IPC::MessageBuffer buffer { move(data), adopt_transfer_attachments(attachments, count) };
+    IPC::MessageBuffer buffer { move(data), IPC::adopt_raw_attachments({ attachments, count }) };
     if (auto result = buffer.transfer_message(*transport); result.is_error()) {
         dbgln("Failed to post message: {}", result.error());
         return false;
@@ -212,7 +254,7 @@ bool web_bindings_message_port_transport_read_messages(IPC::Transport* transport
         Vector<IPC::Attachment> attachments;
         while (!message.attachments.is_empty())
             attachments.append(message.attachments.dequeue());
-        auto raw_attachments = release_transfer_attachments(move(attachments));
+        auto raw_attachments = IPC::release_raw_attachments(move(attachments));
         failed_to_decode = !receive(context, message.bytes.bytes(), raw_attachments.data(), raw_attachments.size());
     });
     return failed_to_decode || should_shutdown == IPC::Transport::ShouldShutdown::Yes;

@@ -25,24 +25,24 @@ public:
             return Error::from_string_literal("Page scripting is disabled");
         auto world = TRY(DerpBirdScriptWorld::create(document));
         auto owner = adopt_ref(*new DerpBirdIsolatedScriptlets(document, move(world)));
-        owner->m_observer->set_document_became_inactive([weak = owner->make_weak_ptr()] {
+        owner->m_observer->set_document_became_inactive(GC::create_function(GC::Heap::the(), GC::captures(owner->make_weak_ptr()), [](auto& weak) {
             if (weak) {
                 NonnullRefPtr keep_alive { *weak };
                 keep_alive->close();
             }
-        });
+        }));
         auto& realm = owner->m_world->realm();
-        auto add_css = JS::NativeFunction::create(realm, [weak = owner->make_weak_ptr()](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+        auto add_css = JS::NativeFunction::create(realm, GC::create_function(GC::Heap::the(), GC::captures(owner->make_weak_ptr()), [](auto& weak, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
             if (!weak || weak->m_closed || !vm.argument(0).is_string())
                 return JS::Value(false);
             NonnullRefPtr keep_alive { *weak };
             auto source = TRY(vm.argument(0).to_utf16_string(vm));
             return JS::Value(!add_derpbird_procedural_style(*keep_alive->m_document, move(source)).is_error());
-        }, 1, "__derpbirdAddCSS"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
+        }), 1, "__derpbirdAddCSS"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
         realm.global_object().define_direct_property("__derpbirdAddCSS"_utf16_fly_string, add_css, JS::default_attributes);
-        auto enabled = JS::NativeFunction::create(realm, [weak = owner->make_weak_ptr()](JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
+        auto enabled = JS::NativeFunction::create(realm, GC::create_function(GC::Heap::the(), GC::captures(owner->make_weak_ptr()), [](auto& weak, JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
             return JS::Value(weak && !weak->m_closed && weak->m_document->is_fully_active() && weak->m_document->content_blocking_enabled());
-        }, 0, "__derpbirdFilterEnabled"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
+        }), 0, "__derpbirdFilterEnabled"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
         realm.global_object().define_direct_property("__derpbirdFilterEnabled"_utf16_fly_string, enabled, JS::default_attributes);
         return owner;
     }

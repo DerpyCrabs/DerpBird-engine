@@ -58,7 +58,7 @@
 #include <LibWebCommon/Page/ViewportIsFullscreen.h>
 #include <LibWebCommon/StorageAPI/StorageEndpoint.h>
 #include <LibWebCommon/WebView/Debugger.h>
-#include <LibWebView/AudioServerAudibility.h>
+#include <LibWebView/AudioServerActivity.h>
 #include <LibWebView/BlobURLStore.h>
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/ChildIdentity.h>
@@ -95,7 +95,7 @@ public:
     virtual void did_retain_blob_url_token(Web::HTML::CrossProcessId navigable_id, URL::BlobURLEntry::Token token) override;
     virtual Messages::WebContentClient::DidRequestBlobUrlEntryResponse did_request_blob_url_entry(Utf16String url, Optional<URL::BlobURLEntry::Token> token) override;
 
-    WebContentClient(NonnullOwnPtr<IPC::Transport>, IsPrivate, Web::PageId initial_page_id, Web::HTML::CrossProcessId root_navigable_id);
+    WebContentClient(NonnullOwnPtr<IPC::Transport>, BrowsingSession&, Web::PageId initial_page_id, Web::HTML::CrossProcessId root_navigable_id);
     ~WebContentClient();
 
     IsPrivate is_private() const { return m_is_private; }
@@ -111,6 +111,7 @@ public:
     virtual void did_request_derpbird_values(Web::PageId, Web::HTML::CrossProcessId, u64, ByteBuffer) override;
 
     RequestServerSiteBindings& request_server_site_bindings() { return m_request_server_site_bindings; }
+    RequestServerSiteBindings const& request_server_site_bindings() const { return m_request_server_site_bindings; }
     void remove_blob_url_entries();
 
     void connect_test_endpoint(NonnullOwnPtr<IPC::Transport>);
@@ -137,6 +138,9 @@ public:
     // Documents with no site, such as those of an opaque origin, come with whatever made them, so they do not count.
     void did_host_document_of_site(Utf16String site);
 
+    // Connects a client to the ImageDecoder of this process, for its main thread or for a worker on a thread of it.
+    Optional<IPC::TransportHandle> connect_new_image_decoder_client(Optional<u64>& client_generation);
+
     // A process that has hosted local file content may read local files. Site isolation gives such content processes
     // of its own, which host nothing else.
     bool has_hosted_local_file_content() const { return m_has_hosted_local_file_content; }
@@ -145,6 +149,13 @@ public:
     // documents processes of their own, which host nothing else.
     Optional<String> const& hosted_web_ui() const { return m_hosted_web_ui; }
     void set_hosted_web_ui(String host) { m_hosted_web_ui = move(host); }
+    // A process can take in a tab of an origin only if all it has ever hosted, and so may still hold, is tabs of that
+    // origin with their same-site and data: URL iframes. An origin-keyed tab keeps apart from the other origins of
+    // its site, so it only joins origin-keyed tabs of its origin, in a process that has not hosted iframes of those
+    // other origins.
+    void note_hosted_document(CanonicalDocument const&);
+    bool has_hosted_only_tabs_like(CanonicalDocument const&) const;
+    bool has_hosted_only_tabs_unlike(CanonicalDocument const&) const;
     void register_embedded_page(Web::PageId page_id, CanonicalTraversable&);
     void unregister_embedded_page(Web::PageId page_id);
     Optional<Web::PageId> page_id_for_traversable(CanonicalTraversable const&) const;
@@ -166,6 +177,8 @@ public:
     // the same reason.
     virtual bool may_act_for_storage_area(Web::StorageAPI::StorageAreaId) const override;
 
+    // The tabs with an open page in this process, each listed once.
+    Vector<u64> performance_owners() const;
     Optional<u64> exclusive_performance_owner() const;
 
     void did_lose_process();
@@ -185,6 +198,8 @@ public:
     void update_audio_capture_permission();
     u64 audio_capture_decision_count() const { return m_audio_capture_decision_count; }
     u64 audio_capture_refusal_count() const { return m_audio_capture_refusal_count; }
+    // Stands in for the AudioServer reporting a capture stream with the given label, which the renderer chooses.
+    void report_audio_capture_for_testing(Web::PageId labelled_page_id, bool capturing);
     // The process's AudioServer plays the page's sound while the page is authorized. It hears of an authorization
     // before this returns, so a document the page goes on to run is heard from its start.
     void authorize_audio_playback(Web::PageId);
@@ -198,13 +213,13 @@ public:
     Web::CompositorContextId allocate_compositor_context(Web::PageId page_id, Web::PagePresentationRegistration);
     Optional<Web::PageId> page_id_for_compositor_context_id(Web::CompositorContextId) const;
     bool has_requested_close() const { return m_requested_close; }
+    void close_server_if_unused();
 
     pid_t pid() const { return m_child_identity.pid; }
     u64 child_id() const { return m_child_identity.child_id; }
     void set_child_identity(ChildIdentity identity) { m_child_identity = identity; }
 
 private:
-    void close_server_if_unused();
     bool forget_compositor_context(Web::CompositorContextId);
     void destroy_all_compositor_contexts();
     void cancel_navigation_transactions();
@@ -235,9 +250,10 @@ private:
     virtual void storage_area_write_refused(Web::StorageAPI::StorageAreaId, Vector<StorageItem>) override;
     virtual void storage_area_reset(Web::StorageAPI::StorageAreaId, Vector<StorageItem>) override;
     virtual Messages::WebContentClient::DidStartDownloadWithoutRequestResponse did_start_download_without_request(Web::PageId page_id, URL::URL, ByteString suggested_filename, Optional<u64> total_size) override;
-    virtual Messages::WebContentClient::DidStartDownloadResponse did_start_download(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL, ByteString suggested_filename, Optional<u64> total_size, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data, JsonValue network_response) override;
+    virtual Messages::WebContentClient::DidStartDownloadResponse did_start_download(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL, ByteString suggested_filename, Optional<u64> total_size, HTTP::Cookie::SameSiteContext same_site_context, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data, JsonValue network_response) override;
     virtual Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(Web::PageId page_id, Web::HTML::ActivateTab, Web::HTML::WebViewHints, Web::HTML::CrossProcessId current_navigable_id, Utf16String name, bool no_opener, Optional<URL::URL> current_document_base_url) override;
     virtual Messages::WebContentClient::StartWorkerAgentResponse start_worker_agent(Web::PageId page_id, Web::HTML::WorkerAgentStartRequest request) override;
+    virtual void register_dedicated_worker(Web::PageId page_id, Web::HTML::WorkerAgentStartRequest request, IPC::TransportHandle worker_transport) override;
     virtual void did_update_cookie(HTTP::Cookie::Cookie) override;
     virtual Messages::WebContentClient::DidIsKnownHstsHostResponse did_is_known_hsts_host(String) override;
     virtual Messages::WebContentClient::DidLoseRequestServerConnectionResponse did_lose_request_server_connection(Optional<Utf16String> top_level_site) override;
@@ -262,9 +278,13 @@ private:
     bool m_rejected_ipc { false };
     // The site of the documents this process hosts, if it has only hosted those of one.
     Optional<Utf16String> m_site_of_hosted_documents;
+    Optional<u64> m_image_decoder_client_generation;
     bool m_has_hosted_documents_of_several_sites { false };
     bool m_has_hosted_local_file_content { false };
     Optional<String> m_hosted_web_ui;
+    Optional<URL::Origin> m_origin_of_hosted_tabs;
+    bool m_hosted_tabs_are_origin_keyed { false };
+    bool m_has_hosted_more_than_tabs_of_one_origin { false };
     Vector<u64> m_crashed_view_ids;
 
     WebContentPage& open_page(Web::PageId, CanonicalTraversable&);
@@ -291,9 +311,11 @@ private:
     static String audio_capture_permission_key(URL::URL const&);
     bool audio_capture_permitted() const { return page_permitting_audio_capture(); }
     WebContentPage* page_permitting_audio_capture() const;
+    bool page_permits_audio_capture(WebContentPage const&) const;
     bool page_may_capture_audio(WebContentPage const&) const;
-    void decide_audio_capture_request(u64 request_id);
+    void decide_audio_capture_request(u64 request_id, Audio::PlaybackGroupId);
     void send_audio_capture_decision(u64 request_id, bool allowed);
+    void update_audio_capture_indicators();
 
     // The controller connections to the MediaServer and AudioServer spawned for this process, from its first media use
     // until it exits. The AudioServer mixes for this process alone, so a compromised one hears only its own site.
@@ -311,7 +333,10 @@ private:
     // Likewise, the AudioServer is told again of the groups it may play, and of those the user has muted.
     HashTable<Audio::PlaybackGroupId> m_authorized_audio_playback_groups;
     HashTable<Audio::PlaybackGroupId> m_muted_audio_playback_groups;
-    AudioServerAudibility m_audio_server_audibility { [this](Audio::PlaybackGroupId group, Audio::Audibility audibility) { did_change_audio_playback_audibility(group, audibility); } };
+    AudioServerActivity m_audio_server_activity {
+        [this](Audio::PlaybackGroupId group, Audio::Audibility audibility) { did_change_audio_playback_audibility(group, audibility); },
+        [this] { update_audio_capture_indicators(); },
+    };
     RefPtr<Core::Timer> m_detached_page_close_timer;
 
     // When this process last got a WebRTCClient, so that it can't make us spawn them in a loop.

@@ -5,7 +5,6 @@
  */
 
 #include <AK/StdLibExtras.h>
-#include <LibCompositing/DisplayList/AccumulatedVisualContext.h>
 #include <LibCompositing/DisplayList/ContextRef.h>
 #include <LibCompositing/DisplayList/DisplayListCommand.h>
 #include <LibCompositing/DisplayList/DisplayListResourceIds.h>
@@ -76,6 +75,10 @@ static_assert(to_underlying(Compositing::RustFFI::ScalingMode::None) == to_under
 static_assert(to_underlying(Compositing::RustFFI::ScalingMode::Bilinear) == to_underlying(Gfx::ScalingMode::Bilinear));
 static_assert(to_underlying(Compositing::RustFFI::ScalingMode::BilinearMipmap) == to_underlying(Gfx::ScalingMode::BilinearMipmap));
 static_assert(to_underlying(Compositing::RustFFI::ScalingMode::NearestNeighbor) == to_underlying(Gfx::ScalingMode::NearestNeighbor));
+static_assert(sizeof(Compositing::RustFFI::SnapSelectionStrategyType) == sizeof(Compositing::SnapSelectionStrategy::Type));
+static_assert(to_underlying(Compositing::RustFFI::SnapSelectionStrategyType::EndPosition) == to_underlying(Compositing::SnapSelectionStrategy::Type::EndPosition));
+static_assert(to_underlying(Compositing::RustFFI::SnapSelectionStrategyType::Direction) == to_underlying(Compositing::SnapSelectionStrategy::Type::Direction));
+static_assert(to_underlying(Compositing::RustFFI::SnapSelectionStrategyType::EndPositionAndDirection) == to_underlying(Compositing::SnapSelectionStrategy::Type::EndPositionAndDirection));
 static_assert(sizeof(Compositing::RustFFI::CompositingAndBlendingOperator) == sizeof(Gfx::CompositingAndBlendingOperator));
 static_assert(to_underlying(Compositing::RustFFI::CompositingAndBlendingOperator::Normal) == to_underlying(Gfx::CompositingAndBlendingOperator::Normal));
 static_assert(to_underlying(Compositing::RustFFI::CompositingAndBlendingOperator::Multiply) == to_underlying(Gfx::CompositingAndBlendingOperator::Multiply));

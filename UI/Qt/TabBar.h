@@ -22,6 +22,7 @@
 #include <UI/Qt/WindowToolbar.h>
 
 #include <QHash>
+#include <QLabel>
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
@@ -52,8 +53,11 @@ class QWheelEvent;
 namespace Ladybird {
 
 class AllTabsPopover;
+class ChromeHeaderButton;
 class LadybirdButton;
+class SandboxOffBar;
 
+class TabMicrophoneIndicator;
 class TabPreviewPopup;
 class TabWidget;
 class WindowControlsReveal;
@@ -100,6 +104,7 @@ public:
     int pinned_tab_count() const;
 
     void update_loading_ring_animation();
+    void update_microphone_indicators();
     // How far the end of the horizontal tabs is from where it settles, while tabs open and close.
     int horizontal_tabs_end_offset() const;
     // A horizontal tab that closes shrinks away as the others close the gap.
@@ -116,6 +121,8 @@ private:
 
     virtual void resizeEvent(QResizeEvent*) override;
     virtual void tabLayoutChange() override;
+    virtual void tabInserted(int index) override;
+    virtual void tabRemoved(int index) override;
 
     virtual bool event(QEvent*) override;
     virtual void paintEvent(QPaintEvent*) override;
@@ -180,6 +187,7 @@ private:
     void schedule_tab_preview(int index);
     void show_tab_preview();
     void hide_tab_preview();
+    void stop_following_previewed_tab_frames();
     QPoint tab_preview_position_for(int index, QSize const& popup_size) const;
 
     // Where the pinned tabs sit in vertical tabs: a grid of tiles when expanded, one icon column when collapsed, and a
@@ -218,6 +226,9 @@ private:
     qreal loading_ring_opacity(int index) const;
     void ensure_tab_visible(int index);
     void update_tab_button_geometry();
+    TabMicrophoneIndicator* microphone_indicator(int index) const;
+    int horizontal_tab_min_width(int index) const;
+    int horizontal_tab_share() const;
 
     QPointer<TabWidget> m_tab_widget;
 
@@ -225,6 +236,7 @@ private:
     bool m_pinned_tabs_in_rows { false };
     WebView::VerticalTabsPosition m_vertical_tabs_position { WebView::VerticalTabsPosition::Left };
     int m_available_width { 0 };
+    // NB: While locked, the unpinned tabs keep the share of the strip that they had (see horizontal_tab_share()).
     Optional<int> m_locked_tab_width;
     QTimer* m_tab_width_unlock_timer { nullptr };
     int m_hovered_tab_index { -1 };
@@ -263,6 +275,9 @@ private:
     int m_settled_tab_count { 0 };
 
     QVariantAnimation* m_loading_ring_animation { nullptr };
+    // NB: QTabBar has room for only two widgets on each tab, the speaker and the close button, so the tab bar keeps the
+    //     microphone indicators itself.
+    HashMap<Tab const*, TabMicrophoneIndicator*> m_microphone_indicators;
     QIcon m_fallback_tab_icon;
     QHash<QString, QStaticText> m_tab_title_texts;
     // The tabs whose titles were too long to show in full when last painted.
@@ -284,6 +299,7 @@ private:
     int m_tab_preview_index { -1 };
     QPointer<Tab> m_previewed_tab;
     QMetaObject::Connection m_tab_preview_paint_connection;
+    QMetaObject::Connection m_tab_preview_change_connection;
 };
 
 class TabWidget final : public QWidget {
@@ -370,9 +386,11 @@ private:
     bool vertical_tabs_effectively_expanded() const;
     bool cursor_is_over_vertical_tabs() const;
     bool vertical_tabs_are_on_right() const;
+    bool window_controls_are_on_left() const;
     int vertical_tabs_layout_width() const;
     bool should_show_window_controls_in_tab_toolbar() const;
     bool vertical_tabs_hold_window_controls() const;
+    int sidebar_ladybird_button_inset(bool after_window_controls) const;
     bool toolbar_is_in_sidebar() const;
     int vertical_tabs_header_spacing() const;
     int minimum_vertical_tabs_expanded_width() const;
@@ -382,7 +400,7 @@ private:
     bool sidebar_toggle_stays_in_corner() const;
     void place_all_tabs_and_sidebar_toggle();
     void place_sidebar_toggle_in_corner();
-    void place_collapsed_sidebar_buttons();
+    void place_toolbar_sidebar_buttons();
     void float_sidebar_buttons_while_toggling();
     bool slides_page_with_toggling_sidebar() const;
     void slide_page_with_toggling_sidebar();
@@ -391,6 +409,7 @@ private:
     int toolbar_row_height_while_toggling() const;
     void move_toolbar_with_toggling_sidebar();
     QWidget* m_floating_buttons_strip { nullptr };
+    QLabel* m_floating_window_controls { nullptr };
     QLabel* m_floating_ladybird_button { nullptr };
     QLabel* m_floating_all_tabs_button { nullptr };
     QLabel* m_floating_sidebar_toggle { nullptr };
@@ -436,11 +455,11 @@ private:
     QToolButton* m_all_tabs_button { nullptr };
     AllTabsPopover* m_all_tabs_popover { nullptr };
     bool m_all_tabs_entries_update_is_pending { false };
-    Vector<WebView::SessionWindowId> m_recently_closed_unit_ids;
+    Vector<SessionWindowId> m_recently_closed_unit_ids;
     LadybirdButton* m_ladybird_button { nullptr };
-    // The Ladybird button and the all-tabs button after it, which move together.
+    // The Ladybird button, with the all-tabs button when both are on the left.
     QWidget* m_ladybird_buttons { nullptr };
-    QToolButton* m_vertical_tabs_toggle_button { nullptr };
+    ChromeHeaderButton* m_vertical_tabs_toggle_button { nullptr };
     QToolButton* m_minimize_window_button { nullptr };
     QToolButton* m_maximize_window_button { nullptr };
     QToolButton* m_close_window_button { nullptr };
@@ -448,6 +467,7 @@ private:
     WindowControlsReveal* m_window_controls_reveal { nullptr };
     WindowToolbar* m_toolbar { nullptr };
     BookmarksBarContainer* m_bookmarks_bar { nullptr };
+    SandboxOffBar* m_sandbox_off_bar { nullptr };
     QWidget* m_page_column { nullptr };
     QWidget* m_toolbar_placeholder { nullptr };
     bool m_toolbar_follows_page_column { false };
@@ -519,8 +539,8 @@ public:
     void set_placement(Placement);
     // Shows the button by fading it in, or fades it out and hides it.
     void set_revealed(bool);
-    // A sidebar row's close button is quieter, but on the hovered and the selected rows.
-    void set_row_emphasized(bool);
+    // A close button is dimmed, but on the hovered and the selected tabs.
+    void set_tab_emphasized(bool);
 
 protected:
     virtual bool event(QEvent* event) override;
@@ -532,11 +552,26 @@ private:
     Role m_role { Role::Close };
     Placement m_placement { Placement::Tab };
     bool m_revealed { false };
-    bool m_row_emphasized { false };
-    QIcon m_quiet_close_icon;
-    bool m_quiet_close_icon_is_dark { false };
+    bool m_tab_emphasized { false };
     qreal m_opacity { 1 };
     QVariantAnimation* m_reveal_animation { nullptr };
+};
+
+// Shows that a tab's page is using the microphone. It is not a control, so a press on it goes to the tab beneath.
+// NB: It is a label so that assistive technology reads it as text.
+class TabMicrophoneIndicator final : public QLabel {
+    Q_OBJECT
+
+public:
+    AK_ALLOC_WITH_KMALLOC;
+
+    explicit TabMicrophoneIndicator(QWidget* parent);
+    void set_placement(TabBarButton::Placement);
+
+private:
+    virtual void paintEvent(QPaintEvent*) override;
+
+    TabBarButton::Placement m_placement { TabBarButton::Placement::Tab };
 };
 
 }

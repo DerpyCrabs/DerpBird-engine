@@ -132,7 +132,7 @@ TEST_CASE(derpbird_content_blocking_removeparam_exceptions)
     EXPECT(blocker.check(blocked, source, Web::ContentBlocker::ResourceType::XMLHttpRequest, "GET"sv).blocked);
 }
 
-BENCHMARK_CASE(derpbird_removeparam_unaffected_requests)
+TEST_CASE(derpbird_removeparam_unaffected_requests)
 {
     auto& blocker = Web::ContentBlocker::the();
     ScopeGuard clear = [&] { MUST(blocker.set_patterns({})); };
@@ -151,16 +151,16 @@ BENCHMARK_CASE(derpbird_removeparam_unaffected_requests)
             for (size_t index = 0; index < count; ++index)
                 address.appendff("{}p{}=value%26value", index ? "&"sv : ""sv, index);
             auto url = URL::Parser::basic_parse(address.string_view()).release_value();
-            for (size_t sample = 0; sample < 7; ++sample) {
+            for (size_t sample = 0; sample < 2; ++sample) {
                 auto timer = Core::ElapsedTimer::start_new(Core::TimerType::Precise);
                 bool changed = false;
-                for (size_t iteration = 0; iteration < 10000; ++iteration) {
+                for (size_t iteration = 0; iteration < 256; ++iteration) {
                     auto result = blocker.check(url, source, Web::ContentBlocker::ResourceType::XMLHttpRequest, "GET"sv);
                     changed |= result.blocked || result.rewritten_url.has_value();
                 }
                 auto microseconds = timer.elapsed_time().to_microseconds();
                 EXPECT(!changed);
-                outln("removeparam exempt={} params={} sample={} requests=10000 microseconds={}", exempt, count, sample, microseconds);
+                outln("removeparam exempt={} params={} sample={} requests=256 microseconds={}", exempt, count, sample, microseconds);
             }
         }
     }
@@ -271,7 +271,7 @@ TEST_CASE(derpbird_removeparam_regex_cache_eviction)
     }
 }
 
-BENCHMARK_CASE(derpbird_removeparam_cached_regex)
+TEST_CASE(derpbird_removeparam_cached_regex)
 {
     auto& blocker = Web::ContentBlocker::the();
     ScopeGuard clear = [&] { MUST(blocker.set_patterns({})); };
@@ -282,14 +282,14 @@ BENCHMARK_CASE(derpbird_removeparam_cached_regex)
     auto source = URL::Parser::basic_parse("https://page.example/"sv).release_value();
     auto url = URL::Parser::basic_parse("https://tracker.example/?utm_source=one&utm_id=two&utm_keep=yes&keep=ok"sv).release_value();
     VERIFY(blocker.check(url, source, Web::ContentBlocker::ResourceType::XMLHttpRequest, "GET"sv).rewritten_url.has_value());
-    for (size_t sample = 0; sample < 7; ++sample) {
+    for (size_t sample = 0; sample < 2; ++sample) {
         auto timer = Core::ElapsedTimer::start_new(Core::TimerType::Precise);
         size_t rewritten = 0;
-        for (size_t index = 0; index < 10000; ++index)
+        for (size_t index = 0; index < 256; ++index)
             rewritten += blocker.check(url, source, Web::ContentBlocker::ResourceType::XMLHttpRequest, "GET"sv).rewritten_url.has_value();
         auto microseconds = timer.elapsed_time().to_microseconds();
-        EXPECT_EQ(rewritten, 10000u);
-        outln("removeparam cached-regex sample={} requests=10000 microseconds={}", sample, microseconds);
+        EXPECT_EQ(rewritten, 256u);
+        outln("removeparam cached-regex sample={} requests=256 microseconds={}", sample, microseconds);
     }
 }
 

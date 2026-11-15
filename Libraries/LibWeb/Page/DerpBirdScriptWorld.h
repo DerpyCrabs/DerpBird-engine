@@ -63,9 +63,9 @@ public:
         if (Bindings::initialize_window_web_interfaces(*window, realm).is_error())
             return Error::from_string_literal("Unable to initialize userscript interfaces");
         auto is_active = JS::NativeFunction::create(realm,
-            [world, document = GC::Root { &document }](JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
+            GC::create_function(GC::Heap::the(), GC::captures(world, GC::Root { &document }), [](auto& world, auto& document, JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
                 return JS::Value { !world->is_detached() && document->is_fully_active() };
-            }, 0, "__derpbirdIsActive"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
+            }), 0, "__derpbirdIsActive"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
         realm.global_object().define_direct_property("__derpbirdIsActive"_utf16_fly_string, is_active, JS::default_attributes);
         return owner;
     }
@@ -132,10 +132,10 @@ public:
         m_values->install(*gm, grants);
         m_values->install_legacy(grants, &m_realm->global_object());
         m_realm->global_object().define_direct_property("GM"_utf16_fly_string, gm, JS::default_attributes);
-        m_observer->set_document_became_inactive([world, values = m_values->make_weak_ptr()] {
+        m_observer->set_document_became_inactive(GC::create_function(GC::Heap::the(), GC::captures(world, m_values->make_weak_ptr()), [](auto& world, auto& values) {
             if (values) values->close();
             world->detach();
-        });
+        }));
     }
 
     void install_element_insertion(Vector<String> const& grants, bool raw)
@@ -153,7 +153,7 @@ public:
         // page's Trusted Types default policy. Accept only primitive strings:
         // conversions/getters must run before entering the native operation.
         auto configure = JS::NativeFunction::create(realm,
-            [world, document = m_document, elements, styles, authority](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+            GC::create_function(GC::Heap::the(), GC::captures(world, m_document, elements, styles, authority), [](auto& world, auto& document, auto& elements, auto& styles, auto& authority, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
                 if (world->is_detached() || !authority->active())
                     return vm.throw_completion<JS::TypeError>("Userscript was revoked"_utf16);
                 if (!vm.argument(0).is_object() || !vm.argument(1).is_string() || !vm.argument(2).is_string())
@@ -177,10 +177,10 @@ public:
                     element->set_attribute(FlyString { qualified_name.to_utf16_string().to_utf8() }, value);
                 }
                 return vm.argument(0);
-            }, 3, "__derpbirdConfigureElement"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
+            }), 3, "__derpbirdConfigureElement"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
         m_realm->global_object().define_direct_property("__derpbirdConfigureElement"_utf16_fly_string, configure, JS::default_attributes);
         auto function = JS::NativeFunction::create(realm,
-            [world, document = m_document, elements, styles, authority](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+            GC::create_function(GC::Heap::the(), GC::captures(world, m_document, elements, styles, authority), [](auto& world, auto& document, auto& elements, auto& styles, auto& authority, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
                 if (world->is_detached() || !authority->active())
                     return vm.throw_completion<JS::TypeError>("Userscript was revoked"_utf16);
                 if (!vm.argument(0).is_object() || !vm.argument(1).is_object())
@@ -215,7 +215,7 @@ public:
                     pending_connection = true;
                 }
                 return vm.argument(0);
-            }, 2, "__derpbirdInsertElement"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
+            }), 2, "__derpbirdInsertElement"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
         m_realm->global_object().define_direct_property("__derpbirdInsertElement"_utf16_fly_string, function, JS::default_attributes);
     }
 
@@ -228,7 +228,7 @@ public:
     {
         auto& realm = raw ? m_document->window()->principal_realm() : *m_realm;
         auto function = JS::NativeFunction::create(realm,
-            [owner = registration.make_weak_ptr(), realm = GC::Root { &realm }](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+            GC::create_function(GC::Heap::the(), GC::captures(registration.make_weak_ptr(), GC::Root { &realm }), [](auto& owner, auto& realm, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
                 if (!owner || !owner->active()) return vm.throw_completion<JS::TypeError>("webRequest registration revoked"_utf16);
                 if (!vm.argument(0).is_string() || (!vm.argument(1).is_undefined() && !vm.argument(1).is_function()))
                     return vm.throw_completion<JS::TypeError>("Invalid webRequest registration"_utf16);
@@ -245,7 +245,7 @@ public:
                         ++owner->pending_events;
                         auto text = event.serialized();
                         HTML::queue_global_task(HTML::Task::Source::Unspecified, realm->global_object(),
-                            GC::create_function(GC::Heap::the(), [owner, realm, revision, callback, text = move(text)] {
+                            GC::create_function(GC::Heap::the(), GC::captures(owner, realm, revision, callback, move(text)), [](auto& owner, auto& realm, auto& revision, auto& callback, auto& text) {
                                 if (!owner) return;
                                 --owner->pending_events;
                                 if (!owner->active() || owner->revision != revision) return;
@@ -257,7 +257,7 @@ public:
                     };
                 }
                 return JS::js_undefined();
-            }, 2, "__derpbirdWebRequest"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
+            }), 2, "__derpbirdWebRequest"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
         m_realm->global_object().define_direct_property("__derpbirdWebRequest"_utf16_fly_string, function, JS::default_attributes);
     }
 
@@ -329,9 +329,9 @@ private:
         , m_observer(DOM::DocumentObserver::create(document))
     {
         // The callback can outlive this native owner; never capture its address.
-        m_observer->set_document_became_inactive([world = GC::Ref { Bindings::host_defined_wrapper_world(realm) }] {
+        m_observer->set_document_became_inactive(GC::create_function(GC::Heap::the(), GC::captures(GC::Ref { Bindings::host_defined_wrapper_world(realm) }), [](auto& world) {
             world->detach();
-        });
+        }));
     }
 
     GC::Root<DOM::Document> m_document;

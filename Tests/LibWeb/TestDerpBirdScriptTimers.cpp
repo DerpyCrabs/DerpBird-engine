@@ -31,8 +31,6 @@
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/IntersectionObserver/IntersectionObserver.h>
-#include <LibWeb/PerformanceTimeline/PerformanceObserver.h>
-#include <LibWeb/PerformanceTimeline/PerformanceObserverEntryList.h>
 #include <LibWeb/Page/DerpBirdScriptWorld.h>
 #include <LibWeb/Platform/FontPlugin.h>
 #include <LibWeb/WebIDL/CallbackType.h>

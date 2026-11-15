@@ -278,6 +278,8 @@ void TransportMachPort::wait_until_incoming_is_current()
 
 void TransportMachPort::mark_peer_eof()
 {
+    notify_incoming_message_observer({});
+
     bool should_write_notification = false;
     {
         MutexLocker locker(m_incoming_mutex);
@@ -599,6 +601,8 @@ void TransportMachPort::process_received_message(u8* buffer)
     if (message->bytes.is_empty() && message->attachments.is_empty())
         return;
 
+    notify_incoming_message_observer(message->bytes.bytes());
+
     bool should_write_notification = false;
     {
         MutexLocker locker(m_incoming_mutex);
@@ -610,6 +614,19 @@ void TransportMachPort::process_received_message(u8* buffer)
     m_incoming_cv.signal();
     if (should_write_notification)
         write_read_notification_byte();
+}
+
+void TransportMachPort::set_incoming_message_observer(Function<void(ReadonlyBytes)> observer)
+{
+    MutexLocker locker(m_incoming_message_observer_mutex);
+    m_incoming_message_observer = move(observer);
+}
+
+void TransportMachPort::notify_incoming_message_observer(ReadonlyBytes bytes)
+{
+    MutexLocker locker(m_incoming_message_observer_mutex);
+    if (m_incoming_message_observer)
+        m_incoming_message_observer(bytes);
 }
 
 void TransportMachPort::set_up_read_hook(Function<void()> hook)
@@ -663,11 +680,27 @@ void TransportMachPort::release_send_right_to_peer()
     m_send_port = {};
 }
 
-void TransportMachPort::wait_until_readable()
+void TransportMachPort::wait_until_readable(Optional<MonotonicTime> deadline)
 {
     MutexLocker lock(m_incoming_mutex);
-    while (m_incoming_messages.is_empty() && !m_peer_eof)
-        m_incoming_cv.wait();
+    while (m_incoming_messages.is_empty() && !m_peer_eof && !m_wait_until_readable_interrupted) {
+        if (!deadline.has_value()) {
+            m_incoming_cv.wait();
+            continue;
+        }
+        auto now = MonotonicTime::now();
+        if (now >= *deadline)
+            break;
+        (void)m_incoming_cv.wait_for(*deadline - now);
+    }
+    m_wait_until_readable_interrupted = false;
+}
+
+void TransportMachPort::interrupt_wait_until_readable()
+{
+    MutexLocker lock(m_incoming_mutex);
+    m_wait_until_readable_interrupted = true;
+    m_incoming_cv.broadcast();
 }
 
 ErrorOr<void> TransportMachPort::post_message(MessageDataType bytes, Vector<Attachment>& attachments)

@@ -150,7 +150,7 @@ ContentBlocker::ContentBlocker()
 
 ContentBlocker::~ContentBlocker()
 {
-    ContentBlocking::FFI::rust_content_blocker_free(m_engine);
+    ContentBlocking::FFI::rust_content_blocker_free(m_engine.load());
 }
 
 static StringView resource_type_to_adblock_request_type(ContentBlocker::ResourceType type)
@@ -303,8 +303,8 @@ ErrorOr<void> ContentBlocker::set_rules_from_bytes(ReadonlyBytes rules_bytes)
     //               rules to put in it, and every caller already treats a missing engine as "nothing is blocked".
     //               Drop the engine instead of rebuilding an empty one.
     if (rules_bytes.is_empty()) {
-        ContentBlocking::FFI::rust_content_blocker_free(m_engine);
-        m_engine = nullptr;
+        MutexLocker locker(m_mutex);
+        ContentBlocking::FFI::rust_content_blocker_free(m_engine.exchange(nullptr));
         m_has_cosmetic_rules = false;
         return {};
     }
@@ -337,8 +337,8 @@ ErrorOr<void> ContentBlocker::set_rules_from_bytes(ReadonlyBytes rules_bytes)
 
     auto has_cosmetic_rules = rules_contain_cosmetic_rules(rules_bytes);
 
-    ContentBlocking::FFI::rust_content_blocker_free(m_engine);
-    m_engine = engine;
+    MutexLocker locker(m_mutex);
+    ContentBlocking::FFI::rust_content_blocker_free(m_engine.exchange(engine));
     m_has_cosmetic_rules = has_cosmetic_rules;
     return {};
 }
@@ -367,7 +367,7 @@ static ByteString serialized_top_context(URL::URL const& url, URL::URL const& so
 
 ContentBlocker::Decision ContentBlocker::check(URL::URL const& url, URL::URL const& source_url, ResourceType resource_type, StringView method, Optional<URL::URL> const& top_url, StringView ip_addresses) const
 {
-    if (!m_engine)
+    if (!has_rules())
         return {};
 
     if (url.scheme() == "data"sv)
@@ -379,8 +379,12 @@ ContentBlocker::Decision ContentBlocker::check(URL::URL const& url, URL::URL con
     auto request_type = resource_type_to_adblock_request_type(resource_type);
 
     auto top_context = serialized_top_context(url, source_url, resource_type, top_url);
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine)
+        return {};
     auto result = ContentBlocking::FFI::rust_content_blocker_check(
-        m_engine,
+        engine,
         url_string.bytes(),
         source_url_string.bytes(),
         request_type.bytes(),
@@ -406,7 +410,7 @@ ContentBlocker::Decision ContentBlocker::check(URL::URL const& url, URL::URL con
         }
     }
     if (!result.blocked && url.scheme().is_one_of("http"sv, "https"sv)) {
-        auto transforms = ContentBlocking::FFI::rust_content_blocker_uri_transforms(m_engine, url_string.bytes(), source_url_string.bytes(), request_type.bytes(), method.bytes(), top_context.bytes(), ip_addresses.bytes());
+        auto transforms = ContentBlocking::FFI::rust_content_blocker_uri_transforms(engine, url_string.bytes(), source_url_string.bytes(), request_type.bytes(), method.bytes(), top_context.bytes(), ip_addresses.bytes());
         ScopeGuard free_transforms = [&] { ContentBlocking::FFI::rust_content_blocker_free_string(transforms.data, transforms.length); };
         if (transforms.length && transforms.length <= 512 * KiB) {
             auto parsed = JsonValue::from_string(StringView { transforms.data, transforms.length });
@@ -486,19 +490,23 @@ ContentBlocker::Decision ContentBlocker::check_canonical_hosts(URL::URL const& u
 
 bool ContentBlocker::canonical_url_exempt(URL::URL const& url, URL::URL const& source, ResourceType type, StringView method, Optional<URL::URL> const& top_url, StringView ip_addresses) const
 {
-    if (!m_engine) return true;
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine) return true;
     auto address = serialized_url_for_matching(url);
     auto source_address = serialized_url_for_matching(source_url_for_matching(source));
     auto request_type = resource_type_to_adblock_request_type(type);
     auto top_context = serialized_top_context(url, source, type, top_url);
-    return ContentBlocking::FFI::rust_content_blocker_canonical_url_exempt(m_engine, address.bytes(), source_address.bytes(), request_type.bytes(), method.bytes(), top_context.bytes(), ip_addresses.bytes());
+    return ContentBlocking::FFI::rust_content_blocker_canonical_url_exempt(engine, address.bytes(), source_address.bytes(), request_type.bytes(), method.bytes(), top_context.bytes(), ip_addresses.bytes());
 }
 
 Utf16String ContentBlocker::html_filter_rules(URL::URL const& url) const
 {
-    if (!m_engine || !url.scheme().is_one_of("http"sv, "https"sv)) return {};
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine || !url.scheme().is_one_of("http"sv, "https"sv)) return {};
     auto address = serialized_url_for_matching(url);
-    return take_rust_utf16_string(ContentBlocking::FFI::rust_content_blocker_html_rules(m_engine, address.bytes()));
+    return take_rust_utf16_string(ContentBlocking::FFI::rust_content_blocker_html_rules(engine, address.bytes()));
 }
 
 Utf16String ContentBlocker::html_filter_runtime()
@@ -508,17 +516,23 @@ Utf16String ContentBlocker::html_filter_runtime()
 
 bool ContentBlocker::has_request_header_filters() const
 {
-    return m_engine && ContentBlocking::FFI::rust_content_blocker_has_request_header_filters(m_engine);
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    return engine && ContentBlocking::FFI::rust_content_blocker_has_request_header_filters(engine);
 }
 
 bool ContentBlocker::has_header_filters() const
 {
-    return m_engine && ContentBlocking::FFI::rust_content_blocker_has_header_filters(m_engine);
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    return engine && ContentBlocking::FFI::rust_content_blocker_has_header_filters(engine);
 }
 
 ContentBlocker::Decision ContentBlocker::check_response(URL::URL const& url, URL::URL const& source, ResourceType type, StringView method, HTTP::HeaderList const& headers, Optional<URL::URL> const& top_url, StringView ip_addresses) const
 {
-    if (!has_header_filters()) return {};
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine || !ContentBlocking::FFI::rust_content_blocker_has_header_filters(engine)) return {};
     JsonArray pairs;
     for (auto const& header : headers) {
         JsonArray pair;
@@ -530,7 +544,7 @@ ContentBlocker::Decision ContentBlocker::check_response(URL::URL const& url, URL
     auto address = serialized_url_for_matching(url);
     auto origin = serialized_url_for_matching(source_url_for_matching(source));
     auto top_context = serialized_top_context(url, source, type, top_url);
-    auto result = ContentBlocking::FFI::rust_content_blocker_block_response(m_engine, address.bytes(), origin.bytes(), resource_type_to_adblock_request_type(type).bytes(), method.bytes(), serialized.bytes(), top_context.bytes(), ip_addresses.bytes());
+    auto result = ContentBlocking::FFI::rust_content_blocker_block_response(engine, address.bytes(), origin.bytes(), resource_type_to_adblock_request_type(type).bytes(), method.bytes(), serialized.bytes(), top_context.bytes(), ip_addresses.bytes());
     ScopeGuard release = [&] {
         ContentBlocking::FFI::rust_content_blocker_free_string(result.matched_rule.data, result.matched_rule.length);
         ContentBlocking::FFI::rust_content_blocker_free_string(result.rewritten_url.data, result.rewritten_url.length);
@@ -544,7 +558,9 @@ ContentBlocker::Decision ContentBlocker::check_response(URL::URL const& url, URL
 
 ContentBlocker::Decision ContentBlocker::check_request_headers(URL::URL const& url, URL::URL const& source, ResourceType type, StringView method, HTTP::HeaderList const& headers, Optional<URL::URL> const& top_url, StringView ip_addresses) const
 {
-    if (!m_engine || !ContentBlocking::FFI::rust_content_blocker_has_request_header_filters(m_engine)) return {};
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine || !ContentBlocking::FFI::rust_content_blocker_has_request_header_filters(engine)) return {};
     JsonArray pairs;
     for (auto const& header : headers) {
         JsonArray pair;
@@ -556,7 +572,7 @@ ContentBlocker::Decision ContentBlocker::check_request_headers(URL::URL const& u
     auto address = serialized_url_for_matching(url);
     auto origin = serialized_url_for_matching(source_url_for_matching(source));
     auto top_context = serialized_top_context(url, source, type, top_url);
-    auto result = ContentBlocking::FFI::rust_content_blocker_block_request_headers(m_engine, address.bytes(), origin.bytes(), resource_type_to_adblock_request_type(type).bytes(), method.bytes(), serialized.bytes(), top_context.bytes(), ip_addresses.bytes());
+    auto result = ContentBlocking::FFI::rust_content_blocker_block_request_headers(engine, address.bytes(), origin.bytes(), resource_type_to_adblock_request_type(type).bytes(), method.bytes(), serialized.bytes(), top_context.bytes(), ip_addresses.bytes());
     ScopeGuard release = [&] {
         ContentBlocking::FFI::rust_content_blocker_free_string(result.matched_rule.data, result.matched_rule.length);
         ContentBlocking::FFI::rust_content_blocker_free_string(result.rewritten_url.data, result.rewritten_url.length);
@@ -570,16 +586,20 @@ ContentBlocker::Decision ContentBlocker::check_request_headers(URL::URL const& u
 
 bool ContentBlocker::has_ip_address_filters() const
 {
-    return m_engine && ContentBlocking::FFI::rust_content_blocker_has_ip_address_filters(m_engine);
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    return engine && ContentBlocking::FFI::rust_content_blocker_has_ip_address_filters(engine);
 }
 
 ContentBlocker::Decision ContentBlocker::check_ip_address(URL::URL const& url, URL::URL const& source, ResourceType type, StringView method, StringView ip_address, Optional<URL::URL> const& top_url) const
 {
-    if (!m_engine || !ContentBlocking::FFI::rust_content_blocker_has_ip_address_filters(m_engine)) return {};
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine || !ContentBlocking::FFI::rust_content_blocker_has_ip_address_filters(engine)) return {};
     auto address = serialized_url_for_matching(url);
     auto origin = serialized_url_for_matching(source_url_for_matching(source));
     auto top_context = serialized_top_context(url, source, type, top_url);
-    auto result = ContentBlocking::FFI::rust_content_blocker_check_ip_address(m_engine, address.bytes(), origin.bytes(), resource_type_to_adblock_request_type(type).bytes(), method.bytes(), ip_address.bytes(), top_context.bytes());
+    auto result = ContentBlocking::FFI::rust_content_blocker_check_ip_address(engine, address.bytes(), origin.bytes(), resource_type_to_adblock_request_type(type).bytes(), method.bytes(), ip_address.bytes(), top_context.bytes());
     ScopeGuard release = [&] {
         ContentBlocking::FFI::rust_content_blocker_free_string(result.matched_rule.data, result.matched_rule.length);
         ContentBlocking::FFI::rust_content_blocker_free_string(result.rewritten_url.data, result.rewritten_url.length);
@@ -593,13 +613,15 @@ ContentBlocker::Decision ContentBlocker::check_ip_address(URL::URL const& url, U
 
 Vector<String> ContentBlocker::action_rules(URL::URL const& url, URL::URL const& source, ResourceType type, StringView method, Optional<URL::URL> const& top_url, u8 action, StringView ip_addresses) const
 {
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
     Vector<String> rules;
-    if (!m_engine || !url.scheme().is_one_of("http"sv, "https"sv)) return rules;
+    if (!engine || !url.scheme().is_one_of("http"sv, "https"sv)) return rules;
     auto address = serialized_url_for_matching(url);
     auto initiator = serialized_url_for_matching(source_url_for_matching(source));
     auto kind = resource_type_to_adblock_request_type(type);
     auto top = serialized_top_context(url, source, type, top_url);
-    auto result = ContentBlocking::FFI::rust_content_blocker_action_rules(m_engine, address.bytes(), initiator.bytes(), kind.bytes(), method.bytes(), top.bytes(), action, ip_addresses.bytes());
+    auto result = ContentBlocking::FFI::rust_content_blocker_action_rules(engine, address.bytes(), initiator.bytes(), kind.bytes(), method.bytes(), top.bytes(), action, ip_addresses.bytes());
     ScopeGuard release = [&] { ContentBlocking::FFI::rust_content_blocker_free_string(result.data, result.length); };
     if (!result.length || result.length > 1 * MiB) return rules;
     auto value = JsonValue::from_string(StringView { result.data, result.length });
@@ -612,20 +634,24 @@ Vector<String> ContentBlocker::action_rules(URL::URL const& url, URL::URL const&
 
 u8 ContentBlocker::response_header_removals(URL::URL const& url, ResourceType type) const
 {
-    if (!m_engine || !url.scheme().is_one_of("http"sv, "https"sv)
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine || !url.scheme().is_one_of("http"sv, "https"sv)
         || (type != ResourceType::Document && type != ResourceType::Subdocument)) return 0;
     auto address = serialized_url_for_matching(url);
-    return ContentBlocking::FFI::rust_content_blocker_response_headers(m_engine, address.bytes()) & 15;
+    return ContentBlocking::FFI::rust_content_blocker_response_headers(engine, address.bytes()) & 15;
 }
 
 String ContentBlocker::response_modifiers(URL::URL const& url, URL::URL const& source, ResourceType type, StringView method, bool permissions, Optional<URL::URL> const& top_url, StringView ip_addresses) const
 {
-    if (!m_engine || !url.scheme().is_one_of("http"sv, "https"sv)) return {};
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine || !url.scheme().is_one_of("http"sv, "https"sv)) return {};
     auto address = serialized_url_for_matching(url);
     auto initiator = serialized_url_for_matching(source_url_for_matching(source));
     auto kind = resource_type_to_adblock_request_type(type);
     auto top_context = serialized_top_context(url, source, type, top_url);
-    auto result = ContentBlocking::FFI::rust_content_blocker_response_modifiers(m_engine, address.bytes(), initiator.bytes(), kind.bytes(), method.bytes(), permissions, top_context.bytes(), ip_addresses.bytes());
+    auto result = ContentBlocking::FFI::rust_content_blocker_response_modifiers(engine, address.bytes(), initiator.bytes(), kind.bytes(), method.bytes(), permissions, top_context.bytes(), ip_addresses.bytes());
     ScopeGuard release = [&] { ContentBlocking::FFI::rust_content_blocker_free_string(result.data, result.length); };
     if (!result.length || result.length > 512 * KiB) return {};
     auto text = String::from_utf8(StringView { result.data, result.length });
@@ -644,14 +670,16 @@ JsonArray ContentBlocker::response_replacements(URL::URL const& url, URL::URL co
 
 String ContentBlocker::csp_for_response(URL::URL const& url, URL::URL const& source_url, ResourceType type, StringView method, Optional<URL::URL> const& top_url, StringView ip_addresses) const
 {
-    if (!m_engine || !url.scheme().is_one_of("http"sv, "https"sv)
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine || !url.scheme().is_one_of("http"sv, "https"sv)
         || (type != ResourceType::Document && type != ResourceType::Subdocument))
         return {};
     auto address = serialized_url_for_matching(url);
     auto source = serialized_url_for_matching(source_url_for_matching(source_url));
     auto request_type = resource_type_to_adblock_request_type(type);
     auto top_context = serialized_top_context(url, source_url, type, top_url);
-    auto result = ContentBlocking::FFI::rust_content_blocker_csp(m_engine, address.bytes(), source.bytes(), request_type.bytes(), method.bytes(), top_context.bytes(), ip_addresses.bytes());
+    auto result = ContentBlocking::FFI::rust_content_blocker_csp(engine, address.bytes(), source.bytes(), request_type.bytes(), method.bytes(), top_context.bytes(), ip_addresses.bytes());
     ScopeGuard release = [&] { ContentBlocking::FFI::rust_content_blocker_free_string(result.data, result.length); };
     if (!result.length || result.length > 64 * KiB)
         return {};
@@ -666,10 +694,12 @@ String ContentBlocker::csp_for_response(URL::URL const& url, URL::URL const& sou
 
 Utf16String ContentBlocker::scriptlets_for_url(URL::URL const& url, bool isolated) const
 {
-    if (!m_engine || !url.scheme().is_one_of("http"sv, "https"sv))
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine || !url.scheme().is_one_of("http"sv, "https"sv))
         return {};
     auto address = serialized_url(url);
-    return take_rust_utf16_string(ContentBlocking::FFI::rust_content_blocker_scriptlets(m_engine, address.bytes(), isolated));
+    return take_rust_utf16_string(ContentBlocking::FFI::rust_content_blocker_scriptlets(engine, address.bytes(), isolated));
 }
 
 Utf16String ContentBlocker::cosmetic_style_sheet_for_url(URL::URL const& url) const
@@ -679,7 +709,7 @@ Utf16String ContentBlocker::cosmetic_style_sheet_for_url(URL::URL const& url) co
 
 Utf16String ContentBlocker::cosmetic_style_sheet_for_url(URL::URL const& url, ReadonlySpan<Utf16FlyString> classes, ReadonlySpan<Utf16FlyString> ids) const
 {
-    if (!m_engine || !m_has_cosmetic_rules)
+    if (!has_cosmetic_rules())
         return {};
 
     auto url_string = serialized_url(url);
@@ -694,8 +724,12 @@ Utf16String ContentBlocker::cosmetic_style_sheet_for_url(URL::URL const& url, Re
     auto classes_bytes = classes_string.value().bytes_as_string_view();
     auto ids_bytes = ids_string.value().bytes_as_string_view();
 
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine)
+        return {};
     return take_rust_utf16_string(ContentBlocking::FFI::rust_content_blocker_cosmetic_css(
-        m_engine,
+        engine,
         url_string.bytes(),
         classes_bytes.bytes(),
         ids_bytes.bytes()));
@@ -703,7 +737,7 @@ Utf16String ContentBlocker::cosmetic_style_sheet_for_url(URL::URL const& url, Re
 
 bool ContentBlocker::has_generic_cosmetic_selectors_for_url(URL::URL const& url, ReadonlySpan<Utf16FlyString> classes, ReadonlySpan<Utf16FlyString> ids) const
 {
-    if (!m_engine || !m_has_cosmetic_rules)
+    if (!has_cosmetic_rules())
         return false;
 
     auto url_string = serialized_url(url);
@@ -718,8 +752,12 @@ bool ContentBlocker::has_generic_cosmetic_selectors_for_url(URL::URL const& url,
     auto classes_bytes = classes_string.value().bytes_as_string_view();
     auto ids_bytes = ids_string.value().bytes_as_string_view();
 
+    MutexLocker locker(m_mutex);
+    auto* engine = m_engine.load();
+    if (!engine)
+        return false;
     return ContentBlocking::FFI::rust_content_blocker_has_generic_cosmetic_selectors(
-        m_engine,
+        engine,
         url_string.bytes(),
         classes_bytes.bytes(),
         ids_bytes.bytes());

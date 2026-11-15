@@ -289,10 +289,14 @@ TEST_CASE(derpbird_value_promises_recheck_limits_and_revocation_after_getters)
 {
     using Values = Web::DerpBirdScriptValues;
     auto& realm = principal_test_realm();
-    bool active = true;
+    struct ActiveState : RefCounted<ActiveState> {
+        GC_HOLDS_NO_CELL_EDGES;
+        bool value { true };
+    };
+    auto active = make_ref_counted<ActiveState>();
     size_t sends = 0;
     auto api = Values::create(realm, "script"_string,
-        [&](ByteBuffer, Values::Completion) -> ErrorOr<void> { ++sends; return {}; }, [&] { return active; });
+        [&](ByteBuffer, Values::Completion) -> ErrorOr<void> { ++sends; return {}; }, [&] { return active->value; });
     auto gm = JS::Object::create(realm, realm.intrinsics().object_prototype());
     api->install(*gm, { "GM.getValue"_string, "GM.setValue"_string });
     realm.global_object().define_direct_property("derpBoundedGM"_utf16_fly_string, gm, JS::default_attributes);
@@ -310,19 +314,19 @@ TEST_CASE(derpbird_value_promises_recheck_limits_and_revocation_after_getters)
     api->close();
 
     auto revoked_api = Values::create(realm, "script"_string,
-        [&](ByteBuffer, Values::Completion) -> ErrorOr<void> { ++sends; return {}; }, [&] { return active; });
+        [&](ByteBuffer, Values::Completion) -> ErrorOr<void> { ++sends; return {}; }, [&] { return active->value; });
     auto revoked_gm = JS::Object::create(realm, realm.intrinsics().object_prototype());
     revoked_api->install(*revoked_gm, { "GM.setValue"_string });
     realm.global_object().define_direct_property("derpRevokedGM"_utf16_fly_string, revoked_gm, JS::default_attributes);
-    auto revoke = JS::NativeFunction::create(realm, [&](JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
-        active = false;
+    auto revoke = JS::NativeFunction::create(realm, GC::create_function(realm.vm().heap(), GC::captures(active), [](auto& active, JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
+        active->value = false;
         return JS::js_undefined();
-    }, 0, "revokeValueWorld"_utf16_fly_string);
+    }), 0, "revokeValueWorld"_utf16_fly_string);
     realm.global_object().define_direct_property("revokeValueWorld"_utf16_fly_string, revoke, JS::default_attributes);
     evaluate_value_script(realm, "derpRevokedGM.setValue('key',{get value(){revokeValueWorld(); return 42}})"_utf16);
     EXPECT_EQ(sends, 1u);
     EXPECT_EQ(revoked_api->pending(), 0u);
-    // Remove the test closure before its stack capture expires.
+    // Remove the test callback after revocation.
     realm.global_object().define_direct_property("revokeValueWorld"_utf16_fly_string, JS::js_undefined(), JS::default_attributes);
 }
 
@@ -514,11 +518,11 @@ TEST_CASE(derpbird_value_listener_roots_pending_quota_and_reentrant_close)
     auto gm = JS::Object::create(realm, realm.intrinsics().object_prototype());
     api->install(*gm, { "GM.addValueChangeListener"_string });
     realm.global_object().define_direct_property("rootedListenerGM"_utf16_fly_string, gm, JS::default_attributes);
-    auto revoke = JS::NativeFunction::create(realm, [weak = api->make_weak_ptr()](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+    auto revoke = JS::NativeFunction::create(realm, GC::create_function(realm.vm().heap(), GC::captures(api->make_weak_ptr()), [](auto& weak, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
         if (weak) weak->close();
         vm.heap().collect_garbage();
         return JS::js_undefined();
-    }, 0, "revokeListenerApi"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
+    }), 0, "revokeListenerApi"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
     realm.global_object().define_direct_property("revokeListenerApi"_utf16_fly_string, revoke, JS::default_attributes);
     evaluate_value_script(realm, R"JS(
         globalThis.listenerQuota=0;globalThis.listenerAfterClose=0;

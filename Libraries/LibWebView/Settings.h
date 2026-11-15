@@ -18,6 +18,7 @@
 #include <LibHTTP/Cache/DiskCacheSettings.h>
 #include <LibURL/URL.h>
 #include <LibWebCommon/HTML/AutoplayPolicy.h>
+#include <LibWebCommon/Permissions/Permissions.h>
 #include <LibWebCommon/WebView/BrowsingBehavior.h>
 #include <LibWebView/Forward.h>
 #include <LibWebView/Options.h>
@@ -71,6 +72,11 @@ struct Appearance {
     ColorTheme color_theme { ColorTheme::Neutral };
 };
 
+enum class HostSetting : u8 {
+    Zoom,
+    ForceDark,
+};
+
 struct ContentSettings {
     double default_zoom_level_factor { 1.0 };
     HashMap<String, double> zoom_per_host;
@@ -100,37 +106,17 @@ struct SearchEngineSettings {
     bool suggestions { false };
 };
 
+template<typename Policy, Policy default_policy>
 struct SiteSetting {
-    OrderedHashTable<String> site_filters;
-
-protected:
-    SiteSetting() = default;
+    Policy policy { default_policy };
+    OrderedHashMap<String, Policy> site_filters;
 };
 
-struct AutoplaySiteSetting : public SiteSetting {
-    Web::HTML::AutoplayPolicy policy { Web::HTML::AutoplayPolicy::BlockAudio };
-};
+using AutoplaySiteSetting = SiteSetting<Web::HTML::AutoplayPolicy, Web::HTML::AutoplayPolicy::BlockAudio>;
 
-// Whether sites may ask for the user's location at all.
-enum class LocationPolicy : u8 {
+enum class PermissionPolicy : u8 {
     Ask,
     Block,
-};
-
-// Whether sites may ask to use the user's microphone at all.
-enum class MicrophonePolicy : u8 {
-    Ask,
-    Block,
-};
-
-// Whether sites may ask to send the user notifications at all.
-enum class NotificationsPolicy : u8 {
-    Ask,
-    Block,
-};
-
-struct BrowsingDataSettings {
-    HTTP::DiskCacheSettings disk_cache_settings;
 };
 
 enum class GlobalPrivacyControl {
@@ -164,9 +150,11 @@ enum class ConfigVariableID : u8 {
     UseClientSideWindowDecorations,
     VerticalTabsHoverExpandDelay,
     VerticalTabsHoverExpandAnimationDuration,
+    MaximumDiskCacheSize,
     MaximumConnectionsPerDownload,
     SplitDownloadsWithoutValidators,
     RestartStalledConnections,
+    DisableHighDynamicRangeSurfaces,
 
     Count,
 };
@@ -199,14 +187,11 @@ public:
     virtual void browsing_behavior_changed() { }
     virtual void search_engine_settings_changed() { }
     virtual void autoplay_settings_changed() { }
-    virtual void browsing_data_settings_changed() { }
+    virtual void permission_settings_changed(Web::Permissions::PermissionName) { }
     virtual void global_privacy_control_changed() { }
     virtual void crash_report_sending_changed() { }
     virtual void dns_settings_changed() { }
     virtual void config_variable_changed(ConfigVariableID) { }
-    virtual void geolocation_settings_changed() { }
-    virtual void microphone_settings_changed() { }
-    virtual void notifications_settings_changed() { }
     virtual void background_networking_settings_changed() { }
     virtual void content_blocker_settings_changed() { }
 
@@ -214,14 +199,68 @@ private:
     WeakPtr<Settings> m_settings;
 };
 
-class WEBVIEW_API Settings : public Weakable<Settings> {
+// What the settings hold, which a Settings can start over from.
+struct WEBVIEW_API SettingsData {
+    bool m_first_run_complete { false };
+
+    WindowSettings m_window_settings;
+
+    URL::URL m_new_tab_page_url;
+    bool m_restore_previous_session { true };
+    Vector<String> m_languages;
+    bool m_translation_prefers_higher_quality { false };
+
+    Appearance m_appearance;
+    ContentSettings m_content_settings;
+    TabSettings m_tab_settings;
+    BrowsingBehavior m_browsing_behavior;
+
+    SearchEngineSettings m_search_engine_settings;
+    Vector<SearchEngine> m_custom_search_engines;
+
+    AutoplaySiteSetting m_autoplay;
+    HashMap<Web::Permissions::PermissionName, PermissionPolicy> m_permission_policies;
+
+    GlobalPrivacyControl m_global_privacy_control { GlobalPrivacyControl::No };
+    CrashReportSending m_crash_report_sending { CrashReportSending::AskMe };
+
+    bool m_background_networking_enabled { true };
+    bool m_filter_list_updates_enabled { false };
+    bool m_content_blocker_enabled { false };
+    HashTable<String> m_content_blocker_disabled_sites;
+    Vector<ContentBlockerList> m_content_blocker_lists;
+    String m_custom_content_blocker_filters;
+
+    DNSSettings m_dns_settings { SystemDNS() };
+
+    Array<JsonValue, static_cast<size_t>(ConfigVariableID::Count)> m_config_variables {};
+};
+
+class WEBVIEW_API Settings
+    : public Weakable<Settings>
+    , private SettingsData {
 public:
     AK_ALLOC_WITH_KMALLOC;
 
     // The platform's languages stand in for the user's list until the settings file carries one.
     static Settings create(ByteString settings_path, Vector<String> platform_languages = {});
 
+    // Settings that live in another process, and are never read from or written to a file here.
+    static Settings create_from_json(JsonValue const&);
+    enum class PersistChange {
+        No,
+        Yes,
+    };
+    void replace_with_json(JsonValue const&, PersistChange);
+
+    // Called with the settings as they are, whenever they have changed.
+    Function<void(JsonValue const&)> on_persist;
+
     JsonValue serialize_json() const;
+
+    // What turns one set of serialized settings into another, by top-level key. A key that is gone has the value null.
+    static JsonObject changes_between(JsonObject const& from, JsonObject const& to);
+    static void apply_changes(JsonObject& settings, JsonObject const& changes);
 
     bool first_run_complete() const { return m_first_run_complete; }
     ErrorOr<void> complete_first_run();
@@ -230,6 +269,7 @@ public:
     WindowSettings const& window_settings() const { return m_window_settings; }
     void set_window_settings(WindowSettings);
 
+    static URL::URL const& default_new_tab_page_url();
     URL::URL const& new_tab_page_url() const { return m_new_tab_page_url; }
     void set_new_tab_page_url(URL::URL);
 
@@ -241,6 +281,10 @@ public:
     Vector<String> const& languages() const { return m_languages; }
     void set_languages(Vector<String>);
 
+    // Whether pages are translated with the platform's higher-quality models, rather than its faster ones.
+    bool translation_prefers_higher_quality() const { return m_translation_prefers_higher_quality; }
+    void set_translation_prefers_higher_quality(bool);
+
     static Appearance parse_appearance(JsonValue const&);
     Appearance const& appearance() const { return m_appearance; }
     void set_appearance(Appearance);
@@ -251,10 +295,12 @@ public:
 
     bool force_dark_for_host(StringView host) const;
     void set_force_dark_for_host(String const& host, bool enabled);
-    void reset_force_dark_for_host(StringView host);
 
     double zoom_for_host(StringView host) const;
     void set_zoom_for_host(String const& host, double zoom_level);
+
+    // Omitting the host resets every override for this setting.
+    void reset_host_setting(HostSetting, Optional<StringView> host = {});
 
     static TabSettings parse_tab_settings(JsonValue const&);
     TabSettings const& tab_settings() const { return m_tab_settings; }
@@ -274,22 +320,14 @@ public:
 
     AutoplaySiteSetting const& autoplay_settings() const { return m_autoplay; }
     void set_autoplay_policy(Web::HTML::AutoplayPolicy);
-    void add_autoplay_site_filter(String const&);
+    void add_autoplay_site_filter(String const&, Web::HTML::AutoplayPolicy);
     void remove_autoplay_site_filter(String const&);
     void remove_all_autoplay_site_filters();
 
-    LocationPolicy location_policy() const { return m_location_policy; }
-    void set_location_policy(LocationPolicy);
+    PermissionPolicy permission_policy(Web::Permissions::PermissionName) const;
+    void set_permission_policy(Web::Permissions::PermissionName, PermissionPolicy);
 
-    MicrophonePolicy microphone_policy() const { return m_microphone_policy; }
-    void set_microphone_policy(MicrophonePolicy);
-
-    NotificationsPolicy notifications_policy() const { return m_notifications_policy; }
-    void set_notifications_policy(NotificationsPolicy);
-
-    static BrowsingDataSettings parse_browsing_data_settings(JsonValue const&);
-    BrowsingDataSettings const& browsing_data_settings() const { return m_browsing_data_settings; }
-    void set_browsing_data_settings(BrowsingDataSettings);
+    HTTP::DiskCacheSettings disk_cache_settings() const;
 
     GlobalPrivacyControl global_privacy_control() const { return m_global_privacy_control; }
     void set_global_privacy_control(GlobalPrivacyControl);
@@ -343,45 +381,13 @@ public:
 private:
     explicit Settings(ByteString settings_path);
 
+    void reset_to_defaults();
+    void load_from_json(JsonValue const&);
+
     void persist_settings();
 
     ByteString m_settings_path;
-    bool m_first_run_complete { false };
-
-    WindowSettings m_window_settings;
-
-    URL::URL m_new_tab_page_url;
-    bool m_restore_previous_session { true };
-    Vector<String> m_languages;
-
-    Appearance m_appearance;
-    ContentSettings m_content_settings;
-    TabSettings m_tab_settings;
-    BrowsingBehavior m_browsing_behavior;
-
-    SearchEngineSettings m_search_engine_settings;
-    Vector<SearchEngine> m_custom_search_engines;
-
-    AutoplaySiteSetting m_autoplay;
-    LocationPolicy m_location_policy { LocationPolicy::Ask };
-    MicrophonePolicy m_microphone_policy { MicrophonePolicy::Ask };
-    NotificationsPolicy m_notifications_policy { NotificationsPolicy::Ask };
-
-    BrowsingDataSettings m_browsing_data_settings;
-    GlobalPrivacyControl m_global_privacy_control { GlobalPrivacyControl::No };
-    CrashReportSending m_crash_report_sending { CrashReportSending::AskMe };
-
-    bool m_background_networking_enabled { true };
-    bool m_filter_list_updates_enabled { false };
-    bool m_content_blocker_enabled { false };
-    HashTable<String> m_content_blocker_disabled_sites;
-    Vector<ContentBlockerList> m_content_blocker_lists;
-    String m_custom_content_blocker_filters;
-
-    DNSSettings m_dns_settings { SystemDNS() };
     bool m_dns_override_by_command_line { false };
-
-    Array<JsonValue, static_cast<size_t>(ConfigVariableID::Count)> m_config_variables {};
 
     Vector<SettingsObserver&> m_observers;
 };

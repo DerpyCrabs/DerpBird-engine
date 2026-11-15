@@ -46,12 +46,14 @@ def crash_helper(webdriver_pid, process_name):
     targets = []
     while pending:
         for pid, command in children.get(pending.pop(), []):
-            pending.append(pid)
             arguments = shlex.split(command)
+            # A helper's own children, such as its file broker, carry the helper's command line but are not the helper.
             if arguments and Path(arguments[0]).name == process_name:
                 assert "--crash-report-fd" in arguments, f"{process_name} has no capture descriptor"
                 assert "--disable-sandbox" not in arguments, f"{process_name} is not sandboxed"
                 targets.append(pid)
+            else:
+                pending.append(pid)
     assert len(targets) == 1, f"Expected one {process_name} child, found {len(targets)}"
     os.kill(targets[0], signal.SIGSEGV)
 
@@ -91,25 +93,7 @@ def run_test(webdriver_binary, process_name):
                 )
                 assert status == 200, body
             else:
-                if process_name == "WebWorker":
-                    status, payload, body = webdriver_helpers.request(
-                        port,
-                        "POST",
-                        f"/session/{session}/execute/async",
-                        {
-                            "script": """
-                            const done = arguments[0];
-                            window.worker = new Worker(URL.createObjectURL(new Blob([
-                                "postMessage('ready'); onmessage = () => {};"
-                            ], {type: 'text/javascript'})));
-                            worker.onmessage = () => done();
-                            worker.onerror = () => done('worker failed');
-                        """,
-                            "args": [],
-                        },
-                    )
-                    assert status == 200 and payload == {"value": None}, body
-                elif process_name == "ImageDecoder":
+                if process_name == "ImageDecoder":
                     # A process gets its decoder when it first has an image to decode.
                     status, payload, body = webdriver_helpers.request(
                         port,
@@ -183,7 +167,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--process",
         default="WebContent",
-        choices=["WebContent", "WebWorker", "RequestServer", "ImageDecoder", "Compositor"],
+        choices=["WebContent", "RequestServer", "ImageDecoder", "Compositor"],
     )
     args = parser.parse_args()
     run_test(args.webdriver_binary, args.process)

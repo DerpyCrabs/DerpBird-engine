@@ -21,14 +21,9 @@ list(TRANSFORM 48x48_ICONS PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/icons/48x48/
 set(INTERNAL_RESOURCES
     ladybird.css
     utils.js
+    WebCompat.json
 )
 list(TRANSFORM INTERNAL_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/")
-
-set(SITE_COMPATIBILITY_RESOURCES
-    cnn.com.json
-    nytimes.com.json
-)
-list(TRANSFORM SITE_COMPATIBILITY_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/WebCompat/")
 
 set(ABOUT_PAGES
     about.html
@@ -40,7 +35,7 @@ set(ABOUT_PAGES
     history.html
     newtab.html
     settings.html
-    services.html
+    support.html
     version.html
     webui.css
     welcome.css
@@ -62,16 +57,12 @@ set(ABOUT_SETTINGS_RESOURCES
     content.js
     dialog-deep-link.js
     feedback.js
-    geolocation.js
     languages.js
     network.js
-    microphone.js
-    notifications.js
     permissions.js
     privacy.js
     search.js
     services.js
-    site-permissions.js
     startup.js
     tabs.js
 )
@@ -172,11 +163,13 @@ function(copy_resources_to_build base_directory bundle_target)
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
 
-    copy_resource_set(ladybird RESOURCES ${INTERNAL_RESOURCES}
-        DESTINATION ${base_directory} TARGET ${bundle_target}
-    )
+    if (APPLE AND LADYBIRD_ICU_DATA_FILE)
+        copy_resource_set(icu RESOURCES ${LADYBIRD_ICU_DATA_FILE}
+            DESTINATION ${base_directory} TARGET ${bundle_target}
+        )
+    endif()
 
-    copy_resource_set(ladybird/site-compatibility RESOURCES ${SITE_COMPATIBILITY_RESOURCES}
+    copy_resource_set(ladybird RESOURCES ${INTERNAL_RESOURCES}
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
 
@@ -226,8 +219,10 @@ function(install_ladybird_resources destination component)
     install(FILES ${32x32_ICONS} DESTINATION "${destination}/icons/32x32" COMPONENT ${component})
     install(FILES ${48x48_ICONS} DESTINATION "${destination}/icons/48x48" COMPONENT ${component})
     install(FILES ${THEMES} DESTINATION "${destination}/themes" COMPONENT ${component})
+    if (LADYBIRD_ICU_DATA_FILE)
+        install(FILES ${LADYBIRD_ICU_DATA_FILE} DESTINATION "${destination}/icu" COMPONENT ${component})
+    endif()
     install(FILES ${INTERNAL_RESOURCES} DESTINATION "${destination}/ladybird" COMPONENT ${component})
-    install(FILES ${SITE_COMPATIBILITY_RESOURCES} DESTINATION "${destination}/ladybird/site-compatibility" COMPONENT ${component})
     install(FILES ${ABOUT_PAGES} DESTINATION "${destination}/ladybird/about-pages" COMPONENT ${component})
     install(FILES ${DERPBIRD_ASSETS} DESTINATION "${destination}/ladybird/about-pages/derpbird-assets" COMPONENT ${component})
     install(FILES ${ABOUT_SETTINGS_RESOURCES} DESTINATION "${destination}/ladybird/about-pages/settings" COMPONENT ${component})

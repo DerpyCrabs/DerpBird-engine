@@ -11,13 +11,13 @@
 #include <AK/kmalloc.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/CrashReportOutbox.h>
-#include <LibWebView/DownloadPresentation.h>
-#include <LibWebView/TabPerformanceMonitor.h>
 #include <LibWebView/WebCompatReport.h>
 #include <UI/Qt/Application.h>
+#include <UI/Qt/ApplicationActions.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeLayout.h>
 #include <UI/Qt/ChromeStyle.h>
+#include <UI/Qt/DownloadPresentation.h>
 #include <UI/Qt/FeedbackPopover.h>
 #include <UI/Qt/Icon.h>
 #include <UI/Qt/LadybirdButton.h>
@@ -29,6 +29,7 @@
 #include <UI/Qt/Motion.h>
 #include <UI/Qt/PerformanceMonitorWidget.h>
 #include <UI/Qt/Popover.h>
+#include <UI/Qt/RemoteDownloads.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/SystemAppearance.h>
 #include <UI/Qt/Theme.h>
@@ -652,7 +653,8 @@ static constexpr int FIELD_PANEL_WINDOW_MARGIN = 8;
 // A line inset this far from the surface's sides sets the suggestions apart from the field, and the list has this much
 // room around it.
 static constexpr int FIELD_PANEL_DIVIDER_INSET = 8;
-static constexpr int FIELD_PANEL_LIST_PADDING = 6;
+static constexpr int FIELD_PANEL_LIST_VERTICAL_PADDING = 6;
+static constexpr int FIELD_PANEL_LIST_HORIZONTAL_PADDING = 3;
 
 // The address field floats over its place in the toolbar, in a panel that is a native child of the window wherever the
 // page stays native under it. So the panel stacks above the native views of the sidebar and the page, and can grow over
@@ -700,6 +702,9 @@ public:
     void round_corners()
     {
 #if defined(AK_OS_MACOS)
+        // Asking for the native view would create the window's native window, even while the window is still being built.
+        if (!internalWinId())
+            return;
         if (m_expanded)
             round_appkit_view_corners(*this, ChromeStyle::LOCATION_EDIT_CORNER_RADIUS, Qt::transparent);
         else
@@ -708,6 +713,13 @@ public:
     }
 
 private:
+    virtual bool event(QEvent* event) override
+    {
+        if (event->type() == QEvent::WinIdChange)
+            round_corners();
+        return QWidget::event(event);
+    }
+
     virtual void paintEvent(QPaintEvent*) override
     {
         QPainter painter(this);
@@ -740,6 +752,11 @@ private:
 
 // NB: Window controls run to the window's edge. Without them, the address field ends the toolbar, and the room for its
 //     focus ring takes the place of some of the toolbar's margin.
+static int toolbar_left_margin(bool has_custom_window_controls)
+{
+    return has_custom_window_controls ? 0 : TOOLBAR_HORIZONTAL_MARGIN;
+}
+
 static constexpr int toolbar_right_margin(bool has_custom_window_controls)
 {
     return has_custom_window_controls ? 0 : TOOLBAR_HORIZONTAL_MARGIN - TOOLBAR_LOCATION_FOCUS_RING_ROOM;
@@ -916,7 +933,7 @@ public:
         m_file_name_label->setToolTip(qstring_from_ak_string(download.destination.string()));
         m_file_icon->set_extension(qstring_from_ak_string(download.destination.extension()));
 
-        auto status_text = qstring_from_ak_string(WebView::download_status_text(download));
+        auto status_text = qstring_from_ak_string(download_status_text(download));
         m_status_label->setText(status_text);
         m_status_label->setToolTip(status_text);
         auto failed = download.status == WebView::FileDownloader::DownloadStatus::Failed;
@@ -1048,7 +1065,7 @@ public:
     bool set_downloads(ReadonlySpan<WebView::FileDownloader::Download> downloads)
     {
         bool geometry_changed = false;
-        auto visible_downloads = WebView::recent_downloads_for_popover(downloads);
+        auto visible_downloads = recent_downloads_for_popover(downloads);
 
         if (!rows_match(visible_downloads)) {
             rebuild_rows(visible_downloads);
@@ -1143,9 +1160,11 @@ private:
 
 WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
     : QWidget(parent)
+    , WebView::SettingsObserver(Application::settings())
     , m_is_private(is_private)
+    , m_window_controls_on_left(window_controls_on_left())
 {
-    auto& application = WebView::Application::the();
+    auto& application = ApplicationActions::the();
 
     setObjectName("LadybirdToolbarContainer");
     // NB: The style sheet paints the toolbar's background, which a QWidget subclass only draws when asked to.
@@ -1179,11 +1198,12 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
 
     m_navigate_back_action.action().setEnabled(false);
     m_navigate_forward_action.action().setEnabled(false);
+    // NB: The application's reload actions own the shortcuts, so the window and its View menu share one action for each.
+    //     The window also stays shown while a page is full screen, which the toolbar doesn't.
     m_reload_action = create_application_action(*this, application.reload_action());
-    // NB: Reloading without the cache has no button of its own, so its shortcut belongs to what holds the toolbar,
-    //     which stays shown when the toolbar does not.
-    m_reload_bypassing_cache_action = create_application_action(*parent, application.reload_bypassing_cache_action());
-    parent->addAction(m_reload_bypassing_cache_action);
+    m_reload_action->setShortcuts({});
+    m_reload_bypassing_cache_action = create_application_action(*this, application.reload_bypassing_cache_action());
+    m_reload_bypassing_cache_action->setShortcuts({});
     m_stop_action = new QAction("Stop", this);
     m_stop_action->setToolTip("Stop loading this page");
     QObject::connect(m_stop_action, &QAction::triggered, this, [this] {
@@ -1253,7 +1273,6 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
     m_performance_monitor = new PerformanceMonitorWidget(m_performance_monitor_row);
     performance_monitor_row_layout->addWidget(m_performance_monitor);
     performance_monitor_row_layout->addStretch(1);
-    (void)WebView::TabPerformanceMonitor::the();
     update_performance_monitor_row();
 
     m_sidebar_slot = new QWidget(m_toolbar);
@@ -1274,6 +1293,14 @@ WindowToolbar::WindowToolbar(WebView::IsPrivate is_private, QWidget* parent)
     sidebar_slot_layout->addWidget(sidebar_slot_separator, 0, Qt::AlignVCenter);
     sidebar_slot_layout->addSpacing(SIDEBAR_SLOT_SEPARATOR_MARGIN);
     m_sidebar_slot->hide();
+
+    m_trailing_sidebar_slot = new QWidget(m_toolbar);
+    m_trailing_sidebar_slot->setObjectName("LadybirdTrailingSidebarSlot");
+    m_trailing_sidebar_slot->setProperty(WINDOW_DRAG_REGION_PROPERTY, true);
+    auto* trailing_sidebar_slot_layout = new QHBoxLayout(m_trailing_sidebar_slot);
+    trailing_sidebar_slot_layout->setContentsMargins(0, 0, 0, 0);
+    trailing_sidebar_slot_layout->setSpacing(TOOLBAR_SPACING);
+    m_trailing_sidebar_slot->hide();
 
     m_sidebar_footer = new QWidget(this);
     m_sidebar_footer->setObjectName("LadybirdSidebarFooter");
@@ -1331,6 +1358,24 @@ void WindowToolbar::size_navigation_buttons(QSize size, int spacing)
     m_navigation_buttons->layout()->setSpacing(spacing);
 }
 
+void WindowToolbar::restore_trailing_sidebar_slot()
+{
+    if (m_arrangement != ToolbarArrangement::Row || m_trailing_sidebar_slot->parentWidget() == m_toolbar)
+        return;
+    auto* row_layout = static_cast<QBoxLayout*>(m_toolbar->layout());
+    auto index = m_window_controls_on_left ? row_layout->count() : row_layout->indexOf(m_window_controls_separator);
+    row_layout->insertWidget(index, m_trailing_sidebar_slot, 0, Qt::AlignVCenter);
+}
+
+int WindowToolbar::trailing_sidebar_slot_right_inset(bool window_controls_visible) const
+{
+    auto has_trailing_controls = !use_native_macos_window_controls() && !m_window_controls_on_left && window_controls_visible;
+    auto inset = toolbar_right_margin(has_trailing_controls);
+    if (has_trailing_controls)
+        inset += m_window_controls->sizeHint().width() + m_window_controls_separator->width() + (2 * TOOLBAR_SPACING);
+    return inset;
+}
+
 void WindowToolbar::lay_out_as_row()
 {
     size_navigation_buttons(TOOLBAR_BUTTON_SIZE, TOOLBAR_SPACING);
@@ -1339,8 +1384,11 @@ void WindowToolbar::lay_out_as_row()
     toolbar_layout->setSpacing(TOOLBAR_SPACING);
     toolbar_layout->setContentsMargins(TOOLBAR_HORIZONTAL_MARGIN, 0, toolbar_right_margin(false), 0);
 
-    if constexpr (use_native_macos_window_controls())
+    if (m_window_controls_on_left) {
         toolbar_layout->addWidget(m_window_controls, 0, Qt::AlignVCenter);
+        if constexpr (!use_native_macos_window_controls())
+            toolbar_layout->addWidget(m_window_controls_separator, 0, Qt::AlignVCenter);
+    }
     toolbar_layout->addWidget(m_sidebar_slot, 0, Qt::AlignVCenter);
     toolbar_layout->addWidget(m_navigation_buttons, 0, Qt::AlignVCenter);
     m_navigation_buttons->show();
@@ -1348,7 +1396,8 @@ void WindowToolbar::lay_out_as_row()
     toolbar_layout->addWidget(m_downloads_button, 0, Qt::AlignVCenter);
     if (m_feedback_button)
         toolbar_layout->addWidget(m_feedback_button, 0, Qt::AlignVCenter);
-    if constexpr (!use_native_macos_window_controls()) {
+    toolbar_layout->addWidget(m_trailing_sidebar_slot, 0, Qt::AlignVCenter);
+    if (!m_window_controls_on_left) {
         toolbar_layout->addWidget(m_window_controls_separator, 0, Qt::AlignVCenter);
         toolbar_layout->addWidget(m_window_controls, 0, Qt::AlignVCenter);
     }
@@ -1377,6 +1426,7 @@ void WindowToolbar::lay_out_in_sidebar()
 
     // NB: What the sidebar has no room for stays hidden, as widgets left out of a layout would show where they last were.
     m_sidebar_slot->hide();
+    m_trailing_sidebar_slot->hide();
     m_window_controls->hide();
     m_window_controls_separator->hide();
 
@@ -1429,8 +1479,9 @@ void WindowToolbar::create_field_panel()
     // The suggestions are below the line under the field.
     m_suggestions_area = new QWidget(m_field_panel);
     auto* suggestions_layout = new QVBoxLayout(m_suggestions_area);
-    auto padding = FIELD_PANEL_LIST_PADDING;
-    suggestions_layout->setContentsMargins(padding, 1 + padding, padding, padding);
+    auto vertical_padding = FIELD_PANEL_LIST_VERTICAL_PADDING;
+    auto horizontal_padding = FIELD_PANEL_LIST_HORIZONTAL_PADDING;
+    suggestions_layout->setContentsMargins(horizontal_padding, 1 + vertical_padding, horizontal_padding, vertical_padding);
     suggestions_layout->setSpacing(0);
     panel_layout->addWidget(m_suggestions_area);
     m_suggestions_area->hide();
@@ -1459,6 +1510,10 @@ void WindowToolbar::raise_field_panel()
         QEvent z_order_change(QEvent::ZOrderChange);
         QCoreApplication::sendEvent(m_field_panel, &z_order_change);
     }
+
+#if defined(AK_OS_MACOS)
+    ensure_appkit_window_is_exposed(*m_field_panel);
+#endif
 }
 
 void WindowToolbar::update_field_panel()
@@ -1552,12 +1607,15 @@ bool WindowToolbar::eventFilter(QObject* watched, QEvent* event)
     return false;
 }
 
-void WindowToolbar::set_arrangement(ToolbarArrangement arrangement, int sidebar_inset)
+void WindowToolbar::set_arrangement(ToolbarArrangement arrangement, bool window_controls_on_left, int sidebar_inset)
 {
-    if (m_arrangement == arrangement && m_sidebar_inset == sidebar_inset)
+    if (m_arrangement == arrangement && m_sidebar_inset == sidebar_inset && m_window_controls_on_left == window_controls_on_left)
         return;
     m_arrangement = arrangement;
     m_sidebar_inset = sidebar_inset;
+    m_window_controls_on_left = window_controls_on_left;
+    if constexpr (!use_native_macos_window_controls())
+        set_window_control_button_order(*m_window_controls, window_controls_on_left);
 
     // NB: Deleting the layout leaves the widgets it held in place, ready for the next one.
     delete m_toolbar->layout();
@@ -1779,7 +1837,7 @@ void WindowToolbar::set_window_controls_visible(bool visible)
     m_window_controls_separator->setVisible(has_custom_window_controls);
     m_window_controls->setVisible(has_native_window_controls || has_custom_window_controls);
     m_toolbar->setFixedHeight(toolbar_height(visible));
-    m_toolbar->layout()->setContentsMargins(TOOLBAR_HORIZONTAL_MARGIN, 0, toolbar_right_margin(has_custom_window_controls), 0);
+    m_toolbar->layout()->setContentsMargins(toolbar_left_margin(has_custom_window_controls && m_window_controls_on_left), 0, toolbar_right_margin(has_custom_window_controls && !m_window_controls_on_left), 0);
     m_toolbar->layout()->invalidate();
 }
 
@@ -1789,8 +1847,11 @@ int WindowToolbar::lead_beside_collapsed_sidebar(QWidget const& ladybird_buttons
 {
     auto toolbar_spacing = m_toolbar->layout()->spacing();
     auto lead = 0;
-    if constexpr (use_native_macos_window_controls())
+    if (m_window_controls_on_left && !m_window_controls->isHidden()) {
         lead += m_window_controls->width() + toolbar_spacing;
+        if constexpr (!use_native_macos_window_controls())
+            lead += m_window_controls_separator->width() + toolbar_spacing;
+    }
 
     auto slot_width = m_sidebar_slot->layout()->sizeHint().width();
     auto slot_spacing = m_sidebar_slot->layout()->spacing();
@@ -1806,10 +1867,12 @@ void WindowToolbar::set_leading_room(int room)
 {
     if (m_arrangement == ToolbarArrangement::Sidebar)
         return;
+    auto has_custom_window_controls = !use_native_macos_window_controls() && m_window_controls_visible;
+    auto left_margin = toolbar_left_margin(has_custom_window_controls && m_window_controls_on_left) + room;
     auto margins = m_toolbar->layout()->contentsMargins();
-    if (margins.left() == TOOLBAR_HORIZONTAL_MARGIN + room)
+    if (margins.left() == left_margin)
         return;
-    margins.setLeft(TOOLBAR_HORIZONTAL_MARGIN + room);
+    margins.setLeft(left_margin);
     m_toolbar->layout()->setContentsMargins(margins);
     // NB: The toolbar moves along with the sidebar's edge at once, so its contents must too, or they lag a frame behind.
     m_toolbar->layout()->activate();
@@ -1876,7 +1939,7 @@ void WindowToolbar::tab_settings_changed()
 void WindowToolbar::config_variable_changed(WebView::ConfigVariableID variable)
 {
     if (variable == WebView::ConfigVariableID::ShowFeedbackButton && m_feedback_button) {
-        auto show_button = WebView::Application::settings().config_variable_as_bool(variable);
+        auto show_button = Application::settings().config_variable_as_bool(variable);
         if (!show_button && m_feedback_popover)
             m_feedback_popover->close();
         m_feedback_button->setVisible(show_button);
@@ -1887,7 +1950,7 @@ void WindowToolbar::config_variable_changed(WebView::ConfigVariableID variable)
 
 void WindowToolbar::update_performance_monitor_row()
 {
-    auto enabled = WebView::Application::settings().config_variable_as_bool(WebView::ConfigVariableID::ShowTabPerformanceMonitor);
+    auto enabled = Application::settings().config_variable_as_bool(WebView::ConfigVariableID::ShowTabPerformanceMonitor);
     m_performance_monitor_row->setVisible(enabled && isVisible());
 }
 
@@ -1934,8 +1997,8 @@ void WindowToolbar::recreate_icons()
 
 void WindowToolbar::update_downloads_button()
 {
-    auto downloads = WebView::Application::the().file_downloader().downloads_of_session(m_is_private);
-    auto button_state = WebView::downloads_button_state(downloads);
+    auto downloads = RemoteDownloads::the().downloads_of_session(m_is_private);
+    auto button_state = downloads_button_state(downloads);
 
     if (!button_state.has_downloads && m_downloads_popover)
         m_downloads_popover->close();
@@ -1964,7 +2027,7 @@ void WindowToolbar::update_downloads_popover()
     if (!m_downloads_popover || !m_downloads_popover->isVisible())
         return;
 
-    if (m_downloads_popover->set_downloads(WebView::Application::the().file_downloader().downloads_of_session(m_is_private)))
+    if (m_downloads_popover->set_downloads(RemoteDownloads::the().downloads_of_session(m_is_private)))
         position_downloads_popover();
 }
 
@@ -2001,7 +2064,7 @@ void WindowToolbar::show_feedback_popover()
                 m_tab->view().report_website_issue();
         };
         m_feedback_popover->on_report_bug = [this] {
-            browser_window().new_tab_from_url(WebView::new_bug_report_url(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_current_tab());
+            browser_window().new_tab_from_url(WebView::new_bug_report_url(Application::browser_options().disable_sandbox), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_current_tab());
         };
         m_feedback_popover->on_review_crash_reports = [this] {
             browser_window().new_tab_from_url(URL::URL::about("crashes"sv), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::after_current_tab());
@@ -2028,8 +2091,8 @@ void WindowToolbar::show_feedback_popover()
 // The downloads hang from the downloads button. Without any, the downloads page opens instead.
 void WindowToolbar::show_downloads_popover()
 {
-    auto downloads = WebView::Application::the().file_downloader().downloads_of_session(m_is_private);
-    if (!WebView::downloads_button_state(downloads).has_downloads) {
+    auto downloads = RemoteDownloads::the().downloads_of_session(m_is_private);
+    if (!downloads_button_state(downloads).has_downloads) {
         m_open_downloads_page_action->trigger();
         return;
     }
@@ -2041,25 +2104,25 @@ void WindowToolbar::show_downloads_popover()
             m_downloads_button->setChecked(visible);
         };
         m_downloads_popover->on_cancel_download = [this](u64 id) {
-            auto& file_downloader = WebView::Application::the().file_downloader();
+            auto& file_downloader = RemoteDownloads::the();
             if (auto download = file_downloader.download(id); download.has_value() && WebView::FileDownloader::status_is_active(download->status))
                 file_downloader.cancel_download(id);
             update_downloads_popover();
         };
         m_downloads_popover->on_pause_download = [this](u64 id) {
-            WebView::Application::the().file_downloader().pause_download(id);
+            RemoteDownloads::the().pause_download(id);
             update_downloads_popover();
         };
         m_downloads_popover->on_resume_download = [this](u64 id) {
-            WebView::Application::the().file_downloader().resume_download(id);
+            RemoteDownloads::the().resume_download(id);
             update_downloads_popover();
         };
         m_downloads_popover->on_show_in_folder = [](u64 id) {
-            if (auto download = WebView::Application::the().file_downloader().download(id); download.has_value())
-                WebView::Application::the().show_download_in_folder(*download);
+            if (auto download = RemoteDownloads::the().download(id); download.has_value())
+                RemoteDownloads::the().show_in_folder(id);
         };
         m_downloads_popover->on_clear_finished = [this] {
-            (void)WebView::Application::the().file_downloader().prune_inactive_downloads(m_is_private);
+            RemoteDownloads::the().prune_inactive_downloads(m_is_private);
             update_downloads_popover();
         };
         m_downloads_popover->on_open_all_downloads = [this] {
@@ -2070,7 +2133,7 @@ void WindowToolbar::show_downloads_popover()
     }
 
     m_downloads_popover->update_chrome_style(palette());
-    (void)m_downloads_popover->set_downloads(WebView::Application::the().file_downloader().downloads_of_session(m_is_private));
+    (void)m_downloads_popover->set_downloads(RemoteDownloads::the().downloads_of_session(m_is_private));
     position_downloads_popover();
     m_downloads_popover->show();
     position_downloads_popover();

@@ -41,6 +41,13 @@ void RemoteWindow::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_cross_origin_property_descriptor_map);
 }
 
+CrossOriginPropertyDescriptorMap& RemoteWindow::cross_origin_property_descriptor_map()
+{
+    if (!m_cross_origin_property_descriptor_map)
+        m_cross_origin_property_descriptor_map = heap().allocate<CrossOriginPropertyDescriptorMap>();
+    return *m_cross_origin_property_descriptor_map;
+}
+
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#window-navigable
 GC::Ptr<RemoteNavigable> RemoteWindow::navigable() const
 {
@@ -316,7 +323,14 @@ GC::OrderedRootHashMap<Utf16FlyString, GC::Ref<Navigable>> RemoteWindow::documen
         // 1. Let name be navigable's target name.
         // 2. If navigable's active document's origin is same origin with window's relevant settings object's origin, then append name to names.
         auto origin = navigable->active_document_origin();
-        if (origin.has_value() && origin->is_same_origin(this->origin()))
+        if (origin.has_value() && origin->is_same_origin(this->origin())) {
+            names.set(name, navigable);
+            continue;
+        }
+
+        // NB: Browsers also expose cross-origin children whose target name matches their container's name content
+        //     attribute, as Window::document_tree_child_navigable_target_name_property_set() does.
+        if (auto container_name = navigable->container_name(); container_name.has_value() && *container_name == name)
             names.set(name, navigable);
     }
 

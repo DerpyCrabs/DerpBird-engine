@@ -149,7 +149,7 @@ static RefPtr<Fetch::Infrastructure::Request> fetch_a_style_resource_impl(StyleR
 }
 
 // https://drafts.csswg.org/css-values-4/#fetch-a-style-resource
-GC::Ptr<Fetch::Infrastructure::FetchController> fetch_a_style_resource(StyleResourceURL const& url_value, RuleOrDeclaration css_rule_or_declaration, Fetch::Infrastructure::Request::Destination destination, CorsMode cors_mode, Fetch::Infrastructure::FetchAlgorithms::ProcessResponseConsumeBodyFunction process_response)
+GC::Ptr<Fetch::Infrastructure::FetchController> fetch_a_style_resource(StyleResourceURL const& url_value, RuleOrDeclaration css_rule_or_declaration, Fetch::Infrastructure::Request::Destination destination, CorsMode cors_mode, GC::Ref<GC::Function<Fetch::Infrastructure::FetchAlgorithms::ProcessResponseConsumeBodyFunction::FunctionType>> process_response)
 {
     auto request = fetch_a_style_resource_impl(url_value, css_rule_or_declaration, destination, cors_mode);
     if (!request)
@@ -158,13 +158,11 @@ GC::Ptr<Fetch::Infrastructure::FetchController> fetch_a_style_resource(StyleReso
     auto& environment_settings = *css_rule_or_declaration.environment_settings_object;
 
     Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input { Fetch::Engine::BodyIntent::ConsumeForCallback };
-    fetch_algorithms_input.process_response_consume_body = [authority = request->derpbird_insertion_authority(), process_response = move(process_response)](auto response, auto bytes) {
-        // Headers may have passed CSP before source/CSSOM revocation. Recheck
-        // after the body arrives, before consumers decode or publish it.
+    fetch_algorithms_input.process_response_consume_body = GC::create_function(GC::Heap::the(), GC::captures(request->derpbird_insertion_authority(), process_response), [](auto& authority, auto& process_response, GC::Ref<Fetch::Infrastructure::ResponseView> response, Fetch::Infrastructure::FetchAlgorithms::BodyBytes bytes) {
         if (authority && !authority->active())
             bytes = Fetch::Infrastructure::FetchAlgorithms::ConsumeBodyFailureTag {};
-        process_response(response, move(bytes));
-    };
+        process_response->function()(response, move(bytes));
+    });
 
     return Fetch::Fetching::fetch(environment_settings.realm(), *request, Fetch::Infrastructure::FetchAlgorithms::create(move(fetch_algorithms_input)));
 }

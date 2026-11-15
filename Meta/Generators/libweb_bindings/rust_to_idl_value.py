@@ -29,6 +29,7 @@ from Generators.libweb_bindings.rust_types import inheriting_interfaces
 from Generators.libweb_bindings.rust_types import is_callback_interface
 from Generators.libweb_bindings.rust_types import is_named_union
 from Generators.libweb_bindings.rust_types import is_promise_type
+from Generators.libweb_bindings.rust_types import is_record_of_cells
 from Generators.libweb_bindings.rust_types import is_sequence_of_cells
 from Generators.libweb_bindings.rust_types import is_unnamed_union_of_cpp_interfaces
 from Generators.libweb_bindings.rust_types import member_other_than_undefined
@@ -57,7 +58,7 @@ from Utils.webidl_parser import OperationParameter
 # NB: CSSOMString is a string type that an implementation chooses, https://drafts.csswg.org/cssom/#cssomstring-type,
 #     and it is a DOMString here, as it is in the C++ bindings.
 DOM_STRING_TYPES = ("CSSOMString", "DOMString")
-STRING_TYPES = (*DOM_STRING_TYPES, "USVString")
+STRING_TYPES = ("ByteString", *DOM_STRING_TYPES, "USVString")
 
 
 def buffer_source_rules(idl_type: IDLType, parameter_attributes: dict[str, str]) -> str:
@@ -85,7 +86,7 @@ def rust_to_idl_value(
     name = idl_type.name
     attributes = {**idl_type.extended_attributes, **parameter_attributes}
     for integer_attribute in ("Clamp", "EnforceRange"):
-        if integer_attribute in attributes and (idl_type.nullable or name not in INTEGER_TYPES):
+        if integer_attribute in attributes and name not in INTEGER_TYPES:
             raise UnsupportedByRustBindings(
                 f"{what} has the type {idl_type} with [{integer_attribute}], which the Rust bindings only handle on "
                 "integer types"
@@ -111,6 +112,10 @@ def rust_to_idl_value(
         element = rust_sequence_element_to_idl_value(idl_type, identifier, context, what)
         return f"sequence_from_js(vm, {value}, Vec::new(), |value| {element})"
     if isinstance(idl_type, IDLParameterizedType) and idl_type.name == "record":
+        if keeps_cells_alive and is_record_of_cells(idl_type, context):
+            key = rust_to_idl_value(idl_type.parameters[0], {}, "key", identifier, context, what)
+            record_value = rust_to_idl_value(idl_type.parameters[1], {}, "value", identifier, context, what)
+            return f"record_from_js(vm, {value}, MarkedVec::new(vm), |key| {key}, |value| {record_value})"
         return rust_record_to_idl_value(idl_type, value, identifier, context, what)
     if isinstance(idl_type, IDLParameterizedType) and idl_type.name == "Promise":
         return f"to_promise(vm, {value})"
@@ -124,6 +129,8 @@ def rust_to_idl_value(
         return f"to_dom_string(vm, {value})"
     if name == "USVString":
         return f"to_usv_string(vm, {value})"
+    if name == "ByteString":
+        return f"to_byte_string(vm, {value})"
     if name == "boolean":
         return f"to_boolean({value})"
     if name == "any":
@@ -230,7 +237,7 @@ def rust_record_to_idl_value(
         )
     key = rust_to_idl_value(key_type, {}, "key", identifier, context, what)
     record_value = rust_to_idl_value(value_type, {}, "value", identifier, context, what)
-    return f"record_from_js(vm, {value}, |key| {key}, |value| {record_value})"
+    return f"record_from_js(vm, {value}, Vec::new(), |key| {key}, |value| {record_value})"
 
 
 @dataclass
@@ -238,6 +245,7 @@ class UnionMembers:
     """The members of a union by the kinds that the Rust bindings distinguish between when they convert a JS value to
     the union."""
 
+    object_type: Optional[IDLType] = None
     dictionary_type: Optional[IDLType] = None
     string_type: Optional[IDLType] = None
     numeric_type: Optional[IDLType] = None
@@ -267,6 +275,8 @@ def union_members_by_kind(union_type: IDLUnionType, context: GenerationContext, 
     for member_type in union_member_types(union_type, context):
         if runtime_union_type(member_type, context) == "BufferSource" and members.buffer_source_type is None:
             members.buffer_source_type = member_type
+        elif member_type.name == "object" and members.object_type is None:
+            members.object_type = member_type
         elif resolved_dictionary(member_type, context) is not None and members.dictionary_type is None:
             members.dictionary_type = member_type
         elif member_type.name in STRING_TYPES and members.string_type is None:
@@ -312,7 +322,9 @@ def rust_numeric_literal(literal: Optional[str], idl_type_name: str) -> Optional
 
 def rust_string_literal(default_value: Optional[str], idl_type_name: str, what: str) -> Optional[str]:
     """The Rust expression of a string of the IDL, if the default value is one, as a value of the string type."""
-    if idl_type_name not in STRING_TYPES or default_value is None or not default_value.startswith('"'):
+    if idl_type_name not in STRING_TYPES or idl_type_name == "ByteString":
+        return None
+    if default_value is None or not default_value.startswith('"'):
         return None
     string = default_value[1:-1]
     if not string.isascii() or "\\" in string:
@@ -330,14 +342,19 @@ def rust_default_value(
     default_value = member.default_value
     if member.type.nullable and default_value == "null":
         return "None"
+
+    # NB: A nullable type with another default value has that value, not null.
+    def value(literal: str) -> str:
+        return f"Some({literal})" if member.type.nullable else literal
+
     string_literal = rust_string_literal(default_value, name, what)
     if string_literal is not None:
-        return string_literal
+        return value(string_literal)
     if name == "boolean" and default_value in ("true", "false"):
-        return default_value
+        return value(default_value)
     numeric_literal = rust_numeric_literal(default_value, name)
     if numeric_literal is not None:
-        return numeric_literal
+        return value(numeric_literal)
     if member.type.nullable and default_value == "null":
         return "None"
     if name == "any" and default_value in ("null", "undefined"):
@@ -718,6 +735,15 @@ def write_union_from_js(out: TextIO, context: GenerationContext, union_type: IDL
             if value.is_nullish() || value.is_object() {{
                 return {dictionary_conversion};
             }}
+"""
+        )
+    if members.object_type is not None:
+        steps.append(
+            """            // 11. If V is an Object, then:
+            //     7. If types includes object, then return the IDL value that is a reference to the object V.
+            if value.is_object() {
+                return Ok(Self::Object(value.as_object()));
+            }
 """
         )
     numeric_type = members.numeric_type

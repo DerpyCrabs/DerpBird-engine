@@ -1,13 +1,10 @@
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
 #include <LibURL/Parser.h>
-#include <LibWebView/Menu.h>
+#include <UI/Qt/Actions.h>
 #include <LibWebView/BrowsingSession.h>
-#include <LibWebView/SessionStore.h>
+#include <UI/Qt/SessionStore.h>
 #include <LibWebView/Profile.h>
-#include <LibWebView/CanonicalDocument.h>
-#include <LibWebView/CanonicalTraversable.h>
-#include <LibWebView/WebContentPage.h>
 #include <LibWebView/WebUI.h>
 #include <UI/Qt/DerpBirdImport.h>
 #include <UI/Qt/DerpBirdFilePicker.h>
@@ -41,13 +38,13 @@
 
 namespace Ladybird {
 
-class NavigationObserver final : public WebView::Action::Observer {
+class NavigationObserver final : public Action::Observer {
 public:
     explicit NavigationObserver(DerpBirdChrome& chrome)
         : m_chrome(&chrome)
     {
     }
-    void on_enabled_state_changed(WebView::Action&) override
+    void on_enabled_state_changed(Action&) override
     {
         if (m_chrome)
             m_chrome->queue_snapshot();
@@ -64,13 +61,14 @@ static String tab_id(Tab const& tab)
 
 DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     : QWidget(&window)
+    , WebView::SettingsObserver(Application::settings())
     , m_window(window)
 {
     if (auto result = Application::the().derpbird_style_store(); result.is_error())
         warnln("Unable to load user styles: {}", result.error());
     if (auto result = Application::the().derpbird_script_store(); result.is_error())
         warnln("Unable to load userscripts: {}", result.error());
-    m_shell_preferences = std::make_unique<QSettings>(QString::fromUtf8(Application::the().profile().paths().config.characters()) + "/DerpBirdChrome.ini", QSettings::IniFormat);
+    m_shell_preferences = std::make_unique<QSettings>(QString::fromUtf8(Application::the().derpbird_profile_paths().config.characters()) + "/DerpBirdChrome.ini", QSettings::IniFormat);
     // Browser commands must also work while focus belongs to a web page.
     // The native menu/toolbar is hidden when this chrome is active.
     new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_H), &window, [this] {
@@ -111,10 +109,9 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     connect(m_source_watcher, &QFileSystemWatcher::directoryChanged, source_timer, [source_timer] { source_timer->start(); });
     connect(m_source_watcher, &QFileSystemWatcher::fileChanged, source_timer, [source_timer] { source_timer->start(); });
     connect(source_timer, &QTimer::timeout, this, [this] {
-        if (auto channel = m_shell->page().web_ui(); channel && channel->host() == "derpbird"sv)
-            channel->async_send_message("derpbird.sources-changed"sv, JsonValue {});
+        m_shell->send_derpbird_shell_message("derpbird.sources-changed"_string, JsonValue {});
     });
-    m_autocomplete = std::make_unique<WebView::Autocomplete>(window.is_private());
+    m_autocomplete = std::make_unique<WebView::Autocomplete>(Application::the(), window.is_private());
     m_suggestion_timer = new QTimer(this);
     m_suggestion_timer->setSingleShot(true);
     m_suggestion_timer->setInterval(250);
@@ -175,7 +172,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
         if (data.is_object()) {
             auto type = data.as_object().get_string("type"sv);
             if (type.has_value() && type->bytes_as_string_view().starts_with("proxy."sv)) {
-                if (m_window.is_private() == WebView::IsPrivate::Yes || Application::profile().is_temporary()) {
+                if (m_window.is_private() == WebView::IsPrivate::Yes || Application::the().derpbird_profile_is_temporary()) {
                     completion(Error::from_string_literal("Edit proxy settings in a regular persistent window")); return;
                 }
                 if (type == "proxy.get"sv) {
@@ -196,7 +193,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                 completion(Error::from_string_literal("Unknown proxy operation")); return;
             }
             if (type.has_value() && (type->bytes_as_string_view().starts_with("import."sv) || type == "credentials.import-csv"sv)) {
-                if (m_window.is_private() == WebView::IsPrivate::Yes || Application::profile().is_temporary()) {
+                if (m_window.is_private() == WebView::IsPrivate::Yes || Application::the().derpbird_profile_is_temporary()) {
                     completion(Error::from_string_literal("Import requires a regular persistent profile")); return;
                 }
                 if (type == "import.status"sv) { completion(DerpBirdImport::status()); return; }
@@ -249,16 +246,16 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                 auto store = Application::the().derpbird_style_store();
                 if (store.is_error()) { completion(store.release_error()); return; }
                 auto revision = store.value()->revision();
-                auto shell_document = m_shell->page().traversable().active_document().id();
-                auto channel = m_shell->page().web_ui();
-                auto top_document = tab->view().page().traversable().active_document().id();
+                auto shell_document = m_shell->derpbird_document();
+                auto channel = m_shell->derpbird_shell_channel();
+                auto top_document = tab->view().derpbird_document();
                 auto valid = [self = QPointer { this }, target = QPointer { tab }, view = QPointer { &tab->view() }, shell_document, channel, top_document, revision] {
                     if (!self || !target || !view || self->m_window.current_tab() != target || !target->is_loaded()
                         || &target->view() != view || view->crash_overlay_active()
-                        || view->page().traversable().active_document().id() != top_document
-                        || !self->m_shell->page().is_open() || self->m_shell->crash_overlay_active()
-                        || self->m_shell->page().web_ui() != channel
-                        || self->m_shell->page().traversable().active_document().id() != shell_document) return false;
+                        || view->derpbird_document() != top_document
+                        || !self->m_shell->derpbird_page_open() || self->m_shell->crash_overlay_active()
+                        || self->m_shell->derpbird_shell_channel() != channel
+                        || self->m_shell->derpbird_document() != shell_document) return false;
                     auto current = Application::the().derpbird_style_store();
                     return !current.is_error() && current.value()->revision() == revision;
                 };
@@ -282,7 +279,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                 if (m_window.is_private() == WebView::IsPrivate::Yes || m_source_scans.contains(scripts)) {
                     completion(Error::from_string_literal("Source directories require a regular window and no pending scan")); return;
                 }
-                auto path = QString::fromUtf8(Application::profile().paths().data.characters())
+                auto path = QString::fromUtf8(Application::the().derpbird_profile_paths().data.characters())
                     + (scripts ? "/DerpBirdScriptFolders.json" : "/DerpBirdStyleFolders.json");
                 // Only the native picker/config mutation touches the GUI thread.
                 if (data.as_object().get_string("action"sv) != "list"sv) {
@@ -290,8 +287,8 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                     if (configured.is_error()) { completion(configured.release_error()); return; }
                 }
                 m_source_scans.insert(scripts);
-                auto document = m_shell->page().traversable().active_document().id();
-                auto channel = m_shell->page().web_ui();
+                auto document = m_shell->derpbird_document();
+                auto channel = m_shell->derpbird_shell_channel();
                 struct ScanResult { Optional<ErrorOr<JsonValue>> result; QStringList watches; };
                 auto scan = std::make_shared<ScanResult>();
                 auto* thread = QThread::create([scan, path, scripts] {
@@ -300,8 +297,8 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                 });
                 connect(thread, &QThread::finished, this, [this, scan, scripts, document, channel, completion = AK::move(completion)]() mutable {
                     m_source_scans.remove(scripts);
-                    if (!m_shell->page().is_open() || m_shell->page().web_ui() != channel
-                        || m_shell->page().traversable().active_document().id() != document) {
+                    if (!m_shell->derpbird_page_open() || m_shell->derpbird_shell_channel() != channel
+                        || m_shell->derpbird_document() != document) {
                         completion(Error::from_string_literal("Source editor document expired")); return;
                     }
                     // The worker already enumerated all paths; avoid a second tree walk here.
@@ -334,14 +331,14 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                 if (!token.has_value() || token->is_empty() || token->bytes().size() > 32 || !address.has_value() || address->bytes().size() > 8192 || m_source_download || m_window.is_private() == WebView::IsPrivate::Yes) {
                     completion(Error::from_string_literal("Source download requires a regular window and no pending download")); return;
                 }
-                auto document = m_shell->page().traversable().active_document().id();
-                auto channel = m_shell->page().web_ui();
+                auto document = m_shell->derpbird_document();
+                auto channel = m_shell->derpbird_shell_channel();
                 m_source_download_token = *token;
                 m_source_download = new DerpBirdSourceDownload(this, *address,
                     [self = QPointer { this }, document, channel, completion = AK::move(completion)](ErrorOr<JsonValue> result) mutable {
                         if (self) self->m_source_download = nullptr;
-                        if (!self || !self->m_shell->page().is_open() || self->m_shell->page().web_ui() != channel
-                            || self->m_shell->page().traversable().active_document().id() != document) {
+                        if (!self || !self->m_shell->derpbird_page_open() || self->m_shell->derpbird_shell_channel() != channel
+                            || self->m_shell->derpbird_document() != document) {
                             completion(Error::from_string_literal("Source editor document expired")); return;
                         }
                         completion(AK::move(result));
@@ -362,14 +359,14 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                 if (store.is_error()) { completion(store.release_error()); return; }
                 auto prepared = store.value()->prepare_from_editor(*items, *revision);
                 if (prepared.is_error()) { completion(prepared.release_error()); return; }
-                auto document = m_shell->page().traversable().active_document().id();
-                auto channel = m_shell->page().web_ui();
+                auto document = m_shell->derpbird_document();
+                auto channel = m_shell->derpbird_shell_channel();
                 m_script_install = new DerpBirdScriptInstall(this, prepared.release_value(),
                     [self = QPointer { this }, document, channel, revision = *revision, completion = AK::move(completion)](ErrorOr<JsonArray> result) mutable {
                         if (self) self->m_script_install = nullptr;
-                        if (!self || !self->m_shell->page().is_open() || self->m_shell->crash_overlay_active()
-                            || self->m_shell->page().web_ui() != channel
-                            || self->m_shell->page().traversable().active_document().id() != document
+                        if (!self || !self->m_shell->derpbird_page_open() || self->m_shell->crash_overlay_active()
+                            || self->m_shell->derpbird_shell_channel() != channel
+                            || self->m_shell->derpbird_document() != document
                             || self->m_shell->url().serialize() != "about:derpbird"sv) {
                             completion(Error::from_string_literal("Userscript editor document expired")); return;
                         }
@@ -384,7 +381,12 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                             return snapshot;
                         }();
                         completion(AK::move(committed));
-                    }, QString::fromUtf8(Application::profile().paths().data.characters()) + "/DerpBirdScriptFolders.json");
+                    }, {
+                        .request = [](JsonValue payload, Function<void(ErrorOr<JsonValue>)> done) {
+                            return HubConnection::the().request_derpbird(0, "network.fetch"_string, AK::move(payload), AK::move(done));
+                        },
+                        .cancel = [](u64 id) { if (auto* hub = HubConnection::the_if_connected()) hub->cancel_derpbird_request(id); },
+                    }, QString::fromUtf8(Application::the().derpbird_profile_paths().data.characters()) + "/DerpBirdScriptFolders.json");
                 m_script_install->start();
                 return;
             }
@@ -451,16 +453,16 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                     completion(Error::from_string_literal("Откройте обычную вкладку и выберите поле пароля."));
                     return;
                 }
-                auto shell_document = m_shell->page().traversable().active_document().id();
-                auto channel = m_shell->page().web_ui();
-                auto top_document = tab->view().page().traversable().active_document().id();
+                auto shell_document = m_shell->derpbird_document();
+                auto channel = m_shell->derpbird_shell_channel();
+                auto top_document = tab->view().derpbird_document();
                 auto valid = [self = QPointer { this }, target = QPointer { tab }, view = QPointer { &tab->view() }, shell_document, channel, top_document] {
                     return self && target && view && self->m_window.current_tab() == target && target->is_loaded()
                         && &target->view() == view && !view->crash_overlay_active()
-                        && view->page().traversable().active_document().id() == top_document
-                        && self->m_shell->page().is_open() && !self->m_shell->crash_overlay_active()
-                        && self->m_shell->page().web_ui() == channel
-                        && self->m_shell->page().traversable().active_document().id() == shell_document
+                        && view->derpbird_document() == top_document
+                        && self->m_shell->derpbird_page_open() && !self->m_shell->crash_overlay_active()
+                        && self->m_shell->derpbird_shell_channel() == channel
+                        && self->m_shell->derpbird_document() == shell_document
                         && self->m_shell->url().serialize() == "about:derpbird"sv;
                 };
                 bool capture = type == "credentials.capture"sv;
@@ -493,16 +495,16 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                 return;
             }
             if (type == "credentials.copy"sv) {
-                auto document = m_shell->page().traversable().active_document().id();
-                auto channel = m_shell->page().web_ui();
+                auto document = m_shell->derpbird_document();
+                auto channel = m_shell->derpbird_shell_channel();
                 auto ticket = m_secret_clipboard.ticket();
                 auto payload = data;
                 payload.as_object().set("type"sv, "credentials.reveal"sv);
                 Application::the().derpbird_credentials_request(payload, m_window.is_private() == WebView::IsPrivate::Yes,
                     [self = QPointer { this }, document, channel, ticket, completion = AK::move(completion)](ErrorOr<JsonValue> result) mutable {
-                        if (!self || !self->m_shell->page().is_open() || self->m_shell->crash_overlay_active()
-                            || self->m_shell->page().web_ui() != channel
-                            || self->m_shell->page().traversable().active_document().id() != document
+                        if (!self || !self->m_shell->derpbird_page_open() || self->m_shell->crash_overlay_active()
+                            || self->m_shell->derpbird_shell_channel() != channel
+                            || self->m_shell->derpbird_document() != document
                             || self->m_shell->url().serialize() != "about:derpbird"sv) {
                             completion(Error::from_string_literal("Password copy document expired"));
                             return;
@@ -574,7 +576,7 @@ void DerpBirdChrome::observe_tab(Tab& tab)
         return;
     if (tab.session_tab_id().has_value()) {
         m_tree_tabs.insert(*tab.session_tab_id(), &tab);
-        auto parent = m_window.session().session_store->tab_tree_parent(*tab.session_tab_id());
+        auto parent = m_window.session().tab_tree_parent(*tab.session_tab_id());
         if (!parent.is_error()) tab.setProperty("derpbirdTreeParent", static_cast<qlonglong>(parent.value().value_or(0)));
     }
     auto* scope = new QObject(this);
@@ -585,7 +587,7 @@ void DerpBirdChrome::observe_tab(Tab& tab)
     connect(&tab, &Tab::title_changed, scope, [this] { queue_snapshot(); });
     connect(&tab, &Tab::favicon_changed, scope, [this] { queue_snapshot(); });
     connect(&tab, &Tab::loading_changed, scope, [this] { queue_snapshot(); });
-    connect(&tab, &Tab::playing_audio_indicator_changed, scope, [this] { queue_snapshot(); });
+    connect(&tab, &Tab::audio_state_changed, scope, [this] { queue_snapshot(); });
     connect(&tab, &QObject::destroyed, scope, [this, pointer = &tab, session_id = tab.session_tab_id()] {
         if (session_id.has_value()) m_tree_tabs.remove(*session_id);
         // Tab's derived lifetime has ended. Only release the stored observation;
@@ -604,15 +606,11 @@ void DerpBirdChrome::observe_tab(Tab& tab)
             self->m_autofill_anchor = QRect(bounds.x(), bounds.y(), bounds.width(), bounds.height());
             auto generation = self->m_autofill_generation;
             auto document_id = document.id();
-            auto page = document.host();
             auto origin = document.origin().serialize();
-            auto valid = [self, target, view, page, document_id, origin, generation] {
-                if (!self || !target || !view || !page || !page->is_open() || self->m_window.current_tab() != target
+            auto valid = [self, target, view, document_id, origin, generation] {
+                if (!self || !target || !view || !view->derpbird_page_open() || self->m_window.current_tab() != target
                     || self->m_autofill_generation != generation || !target->is_loaded() || view->crash_overlay_active()) return false;
-                auto document = page->hosted_document_with_id(document_id);
-                return document && !document->browsing_context().has_been_discarded()
-                    && document->browsing_context().active_document().ptr() == document.ptr()
-                    && document->origin().serialize() == origin;
+                return view->derpbird_document_is_current(document_id, origin);
             };
             self->m_autofill_valid = [valid] { return valid(); }; self->m_autofill_view = view;
             JsonObject request; request.set("type"sv, "credentials.for-origin"sv); request.set("origin"sv, origin);
@@ -632,18 +630,18 @@ void DerpBirdChrome::observe_tab(Tab& tab)
             if (!self || !target || !view || self->m_credential_fill
                 || self->m_window.is_private() == WebView::IsPrivate::Yes
                 || self->m_window.current_tab() != target || !target->is_loaded()) return;
-            auto shell_document = self->m_shell->page().traversable().active_document().id();
-            auto channel = self->m_shell->page().web_ui();
+            auto shell_document = self->m_shell->derpbird_document();
+            auto channel = self->m_shell->derpbird_shell_channel();
             auto authority = [self, target, view, shell_document, channel] {
                 // The source was validated by WebContentPage at receipt. Login
                 // navigation may replace it; keep its captured origin immutable.
                 return self && target && view && self->m_window.current_tab() == target
                     && self->m_window.is_private() == WebView::IsPrivate::No
                     && target->is_loaded() && &target->view() == view
-                    && view->page().is_open() && !view->crash_overlay_active()
-                    && self->m_shell->page().is_open() && !self->m_shell->crash_overlay_active()
-                    && self->m_shell->page().web_ui() == channel
-                    && self->m_shell->page().traversable().active_document().id() == shell_document
+                    && view->derpbird_page_open() && !view->crash_overlay_active()
+                    && self->m_shell->derpbird_page_open() && !self->m_shell->crash_overlay_active()
+                    && self->m_shell->derpbird_shell_channel() == channel
+                    && self->m_shell->derpbird_document() == shell_document
                     && self->m_shell->url().serialize() == "about:derpbird"sv;
             };
             auto proposal = self->m_credential_proposal.propose(document.origin().serialize(), AK::move(username), password, AK::move(authority));
@@ -744,8 +742,8 @@ ErrorOr<void> DerpBirdChrome::set_tree_parent(Tab& tab, Tab* parent)
 {
     if (!tab.session_tab_id().has_value() || (parent && !parent->session_tab_id().has_value()))
         return Error::from_string_literal("Tab session is unavailable");
-    Optional<WebView::SessionTabId> id = parent ? parent->session_tab_id() : Optional<WebView::SessionTabId> {};
-    TRY(m_window.session().session_store->set_tab_tree_parent(*tab.session_tab_id(), id));
+    Optional<SessionTabId> id = parent ? parent->session_tab_id() : Optional<SessionTabId> {};
+    TRY(m_window.session().set_tab_tree_parent(*tab.session_tab_id(), id));
     tab.setProperty("derpbirdTreeParent", static_cast<qlonglong>(id.value_or(0)));
     queue_snapshot();
     return {};
@@ -856,7 +854,7 @@ JsonValue DerpBirdChrome::snapshot()
     JsonObject state;
     state.set("addressSuggestions"sv, m_address_suggestions);
     StringBuilder dynamic_rules;
-    for (auto line : WebView::Application::settings().custom_content_blocker_filters().bytes_as_string_view().split_view('\n')) {
+    for (auto line : Application::settings().custom_content_blocker_filters().bytes_as_string_view().split_view('\n')) {
         if (line.starts_with("!#derpbird-dynamic "sv)) { dynamic_rules.append(line.substring_view(19)); dynamic_rules.append('\n'); }
     }
     state.set("dynamicRules"sv, MUST(dynamic_rules.to_string()));
@@ -884,30 +882,22 @@ JsonValue DerpBirdChrome::snapshot()
         proposal = JsonValue {};
     state.set("credentialProposal"sv, AK::move(proposal));
     auto* active = m_window.current_tab();
-    state.set("scriptCommands"sv, active && active->is_loaded() ? Application::the().derpbird_script_commands(active->view().page()) : JsonArray {});
+    state.set("scriptCommands"sv, active && active->is_loaded() ? active->view().derpbird_script_commands() : JsonArray {});
     auto* logged_view = m_blocking_log_visible && active && active->is_loaded() ? &active->view() : nullptr;
-    if (m_request_log_view.ptr() != logged_view) {
+    if (m_request_log_view.data() != logged_view) {
         if (m_request_log_view) m_request_log_view->set_request_logging(false);
-        m_request_log_view = logged_view ? logged_view->make_weak_ptr<WebView::ViewImplementation>() : WeakPtr<WebView::ViewImplementation> {};
+        m_request_log_view = logged_view;
         if (m_request_log_view) m_request_log_view->set_request_logging(true);
     }
     if (m_blocking_log_visible && active && active->is_loaded()) {
         JsonObject log;
-        JsonArray entries;
-        for (auto const& entry : active->view().blocking_log()) {
-            JsonObject item;
-            item.set("id"sv, entry.sequence);
-            item.set("url"sv, entry.url);
-            item.set("kind"sv, entry.kind);
-            item.set("rule"sv, entry.rule);
-            entries.must_append(AK::move(item));
-        }
+        auto entries = active->view().derpbird_blocking_log();
         log.set("tabId"sv, tab_id(*active));
         log.set("entries"sv, AK::move(entries));
         state.set("blockingLog"sv, AK::move(log));
     }
-    auto const& proxy_profile = Application::request_server_options().proxy_configuration.active_profile();
-    state.set("proxyProfile"sv, proxy_profile.is_empty() ? "system"_string : proxy_profile);
+    auto proxy = DerpBirdProxy::state();
+    state.set("proxyProfile"sv, proxy.is_error() ? "system"_string : proxy.value().get_string("active"sv).value_or("system"_string));
     state.set("version"sv, 1);
     state.set("revision"sv, ++m_revision);
     JsonObject preferences;
@@ -928,9 +918,7 @@ void DerpBirdChrome::queue_snapshot()
     m_snapshot_queued = true;
     QTimer::singleShot(0, this, [this] {
         m_snapshot_queued = false;
-        if (auto channel = m_shell->page().web_ui();
-            channel && channel->host() == "derpbird"sv)
-            channel->async_send_message("derpbird.snapshot"sv, snapshot());
+        m_shell->send_derpbird_shell_message("derpbird.snapshot"_string, snapshot());
     });
 }
 
@@ -954,7 +942,7 @@ bool DerpBirdChrome::eventFilter(QObject* watched, QEvent* event)
             }
         }
     }
-    if (watched == m_shell && event->type() == QEvent::FocusOut && m_shell->page().is_open()) {
+    if (watched == m_shell && event->type() == QEvent::FocusOut && m_shell->derpbird_page_open()) {
         // Release shell interaction state before the deferred system-focus update.
         // The shell owns DOM focus and popup policy; native code names no controls.
         m_shell->run_javascript("window.dispatchEvent(new Event('derpbird-shell-deactivate'))"_string);
@@ -1199,7 +1187,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
             rules.append(ak_string_from_qstring(columns.join(' ')));
             rules.append('\n');
         }
-        auto& settings = WebView::Application::settings();
+        auto& settings = Application::settings();
         for (auto line : settings.custom_content_blocker_filters().bytes_as_string_view().split_view('\n')) {
             if (!line.starts_with("!#derpbird-dynamic "sv)) { rules.append(line); rules.append('\n'); }
         }
@@ -1246,7 +1234,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         auto key = input->get_string("key"sv);
         if (!key.has_value() || key->bytes().size()>64) return Error::from_string_literal("Invalid command key");
         event.set("key"sv, *key);
-        return Application::the().invoke_derpbird_script_command(tab->view().page(), *command_id, event);
+        return Application::the().invoke_derpbird_script_command(tab->view(), *command_id, event);
     }
     if (type == "blocking.pick"sv || type == "blocking.zap"sv) {
         tab->ensure_loaded();
@@ -1280,7 +1268,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
                 if (!self || !target || !target->is_loaded()) return;
                 target->view().stop_node_picker();
                 if (zap) { target->view().remove_dom_node(node); target->view().clear_node_picker(); self->m_filter_tab = nullptr; }
-                else { target->view().highlight_dom_node(node, {}); target->view().page().async_derpbird_filter_selector(node); }
+                else { target->view().highlight_dom_node(node, {}); target->view().request_derpbird_filter_selector(node); }
             });
         });
         m_window.activate_tab(index);
@@ -1297,7 +1285,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
             auto prefix = MUST(String::formatted("{}##", tab->url().serialized_host()));
             if (!rule.has_value() || !rule->bytes_as_string_view().starts_with(prefix.bytes_as_string_view()) || rule->bytes().size() > 8192 || rule->contains('\n') || rule->contains('\r'))
                 return Error::from_string_literal("Invalid cosmetic rule");
-            auto& settings = WebView::Application::settings();
+            auto& settings = Application::settings();
             settings.set_custom_content_blocker_filters(MUST(String::formatted("{}\n{}", settings.custom_content_blocker_filters(), *rule)));
             tab->view().reload();
         }
@@ -1406,7 +1394,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         auto url = data.get_string("url"sv);
         if (!url.has_value())
             return Error::from_string_literal("Missing URL");
-        auto parsed = type == "tab.navigate-input"sv ? WebView::sanitize_url(*url, WebView::Application::settings().search_engine_settings().engine) : URL::Parser::basic_parse(*url);
+        auto parsed = type == "tab.navigate-input"sv ? WebView::sanitize_url(*url, Application::settings().search_engine_settings().engine) : URL::Parser::basic_parse(*url);
         if (!parsed.has_value() || !is_public_navigation_url(*parsed))
             return Error::from_string_literal("Unsupported navigation URL");
         tab->view().set_next_history_visit_transition(WebView::HistoryVisitTransition::Omnibox);
@@ -1445,7 +1433,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
 void DerpBirdChrome::update_display_metadata(double device_pixel_ratio, Optional<u64> display_id, double refresh_rate)
 {
     m_shell->set_device_pixel_ratio(device_pixel_ratio);
-    m_shell->set_display_metadata(display_id, refresh_rate);
+    m_shell->set_display_metadata(display_id, refresh_rate, false);
 }
 
 void DerpBirdChrome::resizeEvent(QResizeEvent* event)

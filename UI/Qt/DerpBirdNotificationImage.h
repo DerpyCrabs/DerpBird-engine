@@ -21,12 +21,17 @@ class DerpBirdNotificationImage final : public QObject {
 public:
     using Completion = Function<void(RefPtr<Gfx::Bitmap const>)>;
     DerpBirdNotificationImage(QObject* parent, WebView::WebContentPage& page, Completion completion)
-        : QObject(parent), m_client(page.client().make_weak_ptr<WebView::WebContentClient>()), m_completion(move(completion))
+        : QObject(parent), m_client(page.client().make_weak_ptr<WebView::WebContentClient>()), m_client_child_id(page.client().child_id()), m_completion(move(completion))
     {
         m_timeout.setSingleShot(true);
         connect(&m_timeout, &QTimer::timeout, this, [this] { finish({}); });
     }
-    ~DerpBirdNotificationImage() override { m_done = true; if (m_request) m_request->stop(); }
+    ~DerpBirdNotificationImage() override {
+        m_done = true;
+        if (m_request) m_request->stop();
+        m_decoder = nullptr;
+        if (m_decoder_generation.has_value()) WebView::ImageDecoderManager::the().process_did_release_decoder(m_client_child_id, *m_decoder_generation);
+    }
     void start(String const& address)
     {
         m_timeout.start(10000);
@@ -71,7 +76,7 @@ private:
         m_body.clear(); m_ok = false;
         auto client = WebView::Application::request_server_client(m_client->session().is_private());
         if (client.is_error()) { finish({}); return; }
-        m_request = client.value()->start_request("GET"sv, m_url, {}, {}, HTTP::CacheMode::NoStore, HTTP::Cookie::IncludeCredentials::No);
+        m_request = client.value()->start_request("GET"sv, m_url, HTTP::Cookie::SameSiteContext {}, {}, {}, HTTP::CacheMode::NoStore, HTTP::Cookie::IncludeCredentials::No);
         if (!m_request) { finish({}); return; }
         auto serial = ++m_serial;
         auto active = [self = QPointer(this), serial] { return self && !self->m_done && self->m_serial == serial; };
@@ -103,7 +108,7 @@ private:
     void decode()
     {
         if (!m_client || m_body.is_empty()) { finish({}); return; }
-        auto handle = WebView::ImageDecoderManager::the().connect_requesting_process(m_client->child_id(), &m_client->session(), {});
+        auto handle = m_client->connect_new_image_decoder_client(m_decoder_generation);
         if (!handle.has_value()) { finish({}); return; }
         auto transport = handle->create_transport();
         if (transport.is_error()) { finish({}); return; }
@@ -127,6 +132,8 @@ private:
         }, [self = QPointer(this)](Error&) { if (self) self->finish({}); }, Gfx::IntSize{128,128});
     }
     WeakPtr<WebView::WebContentClient> m_client;
+    u64 m_client_child_id;
+    Optional<u64> m_decoder_generation;
     Completion m_completion; QTimer m_timeout;
     RefPtr<Requests::Request> m_request;
     RefPtr<ImageDecoderClient::Client> m_decoder;

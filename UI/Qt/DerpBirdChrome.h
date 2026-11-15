@@ -4,7 +4,7 @@
 #include <AK/JsonValue.h>
 #include <AK/WeakPtr.h>
 #include <LibWebView/ViewImplementation.h>
-#include <LibWebView/Menu.h>
+#include <UI/Qt/Actions.h>
 #include <LibWebView/Settings.h>
 #include <LibWebView/Autocomplete.h>
 #include <QHash>
@@ -83,7 +83,7 @@ private:
     QHash<bool, QStringList> m_source_watch_paths;
     QFileSystemWatcher* m_source_watcher { nullptr };
     bool m_blocking_log_visible { false };
-    WeakPtr<WebView::ViewImplementation> m_request_log_view;
+    QPointer<WebContentView> m_request_log_view;
     BrowserWindow& m_window;
     WebContentView* m_shell { nullptr };
     QWidget* m_content { nullptr };
@@ -99,8 +99,8 @@ private:
     struct Observation {
         QObject* scope { nullptr };
         QPointer<WebContentView> view {};
-        WebView::Action::Observer* back { nullptr };
-        WebView::Action::Observer* forward { nullptr };
+        Action::Observer* back { nullptr };
+        Action::Observer* forward { nullptr };
         Optional<u64> navigation_listener {};
     };
     QHash<Tab*, Observation> m_observed_tabs;

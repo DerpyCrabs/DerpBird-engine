@@ -8,7 +8,7 @@
 #include <LibRequests/Request.h>
 #include <LibRequests/RequestClient.h>
 #include <LibURL/Parser.h>
-#include <LibWebView/Application.h>
+#include <AK/Base64.h>
 #include <QCryptographicHash>
 #include <QPointer>
 #include <QRegularExpression>
@@ -57,15 +57,19 @@ inline ErrorOr<void> verify_derpbird_dependency(StringView address, ReadonlyByte
 class DerpBirdScriptInstall final : public QObject {
 public:
     using Completion = Function<void(ErrorOr<JsonArray>)>;
-    DerpBirdScriptInstall(QObject* parent, JsonArray items, Completion completion, QString folder_config = {})
-        : QObject(parent), m_items(move(items)), m_completion(move(completion)), m_folder_config(move(folder_config))
+    struct Transport {
+        Function<u64(JsonValue, Function<void(ErrorOr<JsonValue>)>)> request;
+        Function<void(u64)> cancel;
+    };
+    DerpBirdScriptInstall(QObject* parent, JsonArray items, Completion completion, Transport transport, QString folder_config = {})
+        : QObject(parent), m_items(move(items)), m_completion(move(completion)), m_folder_config(move(folder_config)), m_transport(move(transport))
     {
         m_timeout.setSingleShot(true);
         connect(&m_timeout, &QTimer::timeout, this, [this] { fail("Userscript dependency download timed out"sv); });
     }
     ~DerpBirdScriptInstall() override
     {
-        if (m_request) m_request->stop();
+        if (m_request) m_transport.cancel(exchange(m_request, 0));
         if (!m_done) m_completion(Error::from_string_literal("Userscript installation cancelled"));
     }
     void start()
@@ -95,7 +99,7 @@ private:
         if (m_done) return;
         m_done = true;
         m_timeout.stop();
-        if (m_request) m_request->stop();
+        if (m_request) m_transport.cancel(exchange(m_request, 0));
         m_completion(move(result));
         deleteLater();
     }
@@ -188,52 +192,31 @@ private:
     {
         if (m_done) return;
         m_body.clear();
-        m_ok = false;
         m_mime = "application/octet-stream"_string;
-        auto client = WebView::Application::request_server_client();
-        if (client.is_error()) { finish(client.release_error()); return; }
-        auto headers = HTTP::HeaderList::create();
-        m_request = client.value()->start_request("GET"sv, m_url, *headers, {}, HTTP::CacheMode::NoStore, HTTP::Cookie::IncludeCredentials::No);
-        if (!m_request) { fail("Cannot start userscript dependency download"sv); return; }
+        JsonObject payload; payload.set("url"sv, m_url.serialize()); payload.set("limit"sv, max_dependency);
         auto serial = ++m_serial;
-        auto active = [self = QPointer(this), serial] { return self && !self->m_done && self->m_serial == serial; };
-        m_request->set_unbuffered_request_callbacks(
-            [this, active](auto headers, Optional<u32> status, auto const&, Requests::CacheState) {
-                if (!active()) return;
-                if (status == 301u || status == 302u || status == 303u || status == 307u || status == 308u) {
-                    auto location = headers->get("Location"sv);
-                    auto target = location.has_value() ? URL::Parser::basic_parse(*location, m_url) : Optional<URL::URL> {};
-                    if (!target.has_value() || ++m_redirects > 20
-                        || (target->scheme() != "https"sv && !(target->scheme() == "http"sv && m_url.scheme() == "http"sv))
-                        || !target->username().is_empty() || !target->password().is_empty()) {
-                        fail("Invalid userscript dependency redirect"sv); return;
-                    }
-                    m_url = target.release_value();
-                    m_url.set_fragment({});
-                    ++m_serial;
-                    m_request->stop();
-                    QTimer::singleShot(0, this, [this] { fetch(); });
-                    return;
-                }
-                if (auto type = headers->get("Content-Type"sv); type.has_value()) {
-                    auto mime = type->view().substring_view(0, type->find(';').value_or(type->length())).trim_whitespace();
-                    bool valid = !mime.is_empty() && mime.length() <= 128;
-                    for (auto ch : mime)
-                        valid &= is_ascii_alphanumeric(ch) || ch == '/' || ch == '-' || ch == '+' || ch == '.' || ch == '_';
-                    if (valid) m_mime = MUST(String::from_utf8(mime));
-                }
-                m_ok = status.has_value() && *status >= 200 && *status < 300;
-                if (!m_ok) fail("Userscript dependency returned an unsuccessful HTTP status"sv);
-            },
-            [this, active](Requests::ResponseData data) { if (active()) append(data.bytes()); },
-            [this, active](Core::ImmutableBytes data) { if (active()) append(data.bytes()); },
-            [this, active](u64, auto const&, Optional<Requests::NetworkError> error) {
-                if (!active()) return;
-                if (error.has_value() || !m_ok) { fail("Userscript dependency download failed"sv); return; }
-                auto integrity = verify_derpbird_dependency(m_original, m_body.bytes());
-                if (integrity.is_error()) { finish(integrity.release_error()); return; }
-                accept_dependency();
-            });
+        m_request = m_transport.request(move(payload), [self = QPointer(this), serial](ErrorOr<JsonValue> response) {
+            if (!self || self->m_done || self->m_serial != serial) return;
+            self->m_request = 0;
+            if (response.is_error()) { self->finish(response.release_error()); return; }
+            if (!response.value().is_object()) { self->fail("Invalid dependency response"sv); return; }
+            auto const& result = response.value().as_object();
+            auto encoded = result.get_string("body"sv);
+            if (!encoded.has_value()) { self->fail("Invalid dependency response"sv); return; }
+            auto bytes = decode_base64(*encoded);
+            if (bytes.is_error()) { self->finish(bytes.release_error()); return; }
+            self->append(bytes.value().bytes());
+            if (self->m_done) return;
+            if (auto type = result.get_string("contentType"sv); type.has_value()) {
+                auto mime = type->bytes_as_string_view().substring_view(0, type->find_byte_offset(';').value_or(type->bytes().size())).trim_whitespace();
+                bool valid = !mime.is_empty() && mime.length() <= 128;
+                for (auto ch : mime) valid &= is_ascii_alphanumeric(ch) || ch == '/' || ch == '-' || ch == '+' || ch == '.' || ch == '_';
+                if (valid) self->m_mime = MUST(String::from_utf8(mime));
+            }
+            auto integrity = verify_derpbird_dependency(self->m_original, self->m_body.bytes());
+            if (integrity.is_error()) { self->finish(integrity.release_error()); return; }
+            self->accept_dependency();
+        });
     }
     void accept_dependency()
     {
@@ -273,7 +256,8 @@ private:
     Optional<DerpBirdLocalScript> m_local_script;
     size_t m_local_item { 0 };
     QTimer m_timeout;
-    RefPtr<Requests::Request> m_request;
+    Transport m_transport;
+    u64 m_request { 0 };
     JsonArray m_sources;
     ByteBuffer m_body;
     URL::URL m_url;

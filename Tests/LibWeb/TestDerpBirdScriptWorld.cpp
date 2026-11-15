@@ -36,8 +36,6 @@
 #include <LibWeb/Page/DerpBirdIsolatedScriptlets.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/IntersectionObserver/IntersectionObserver.h>
-#include <LibWeb/PerformanceTimeline/PerformanceObserver.h>
-#include <LibWeb/PerformanceTimeline/PerformanceObserverEntryList.h>
 #include <LibWeb/Page/DerpBirdScriptWorld.h>
 #include <LibWeb/Page/DerpBirdCredentialFields.h>
 #include <LibWeb/Page/DerpBirdCredentialSession.h>
@@ -241,13 +239,17 @@ TEST_CASE(derpbird_script_world_isolates_globals_prototypes_and_dom_expandos)
                 && Object.getPrototypeOf(options) === Object.prototype
                 && delivered === performanceObserver && this === performanceObserver;
             probe.setAttribute('data-performance-callback', 'ran');
-        }); performanceObserver;
+        }); performanceObserver.observe({ entryTypes: ["mark"] });
+        performance.mark("derpbird-world-callback"); performanceObserver;
     )JS"_utf16));
     VERIFY(!performance_result.is_abrupt());
-    auto* performance = Web::Bindings::impl_from<Web::PerformanceTimeline::PerformanceObserver>(&performance_result.value().as_object());
-    VERIFY(performance);
-    auto performance_entries = Web::PerformanceTimeline::PerformanceObserverEntryList::create({});
-    EXPECT(!performance->invoke_callback(performance_entries, {}).is_abrupt());
+    // Exercise the real delivery task; PerformanceObserver now lives in Rust.
+    for (size_t turn = 0; turn < 64; ++turn) {
+        auto delivered = MUST(world->run("performanceIsolated"_utf16));
+        VERIFY(!delivered.is_abrupt());
+        if (delivered.value().as_bool()) break;
+        Web::HTML::main_thread_event_loop().process();
+    }
     check(*world, "performanceIsolated === true"_utf16);
 
     auto walker_result = TRY_OR_FAIL(world->run(R"JS(
@@ -278,6 +280,7 @@ TEST_CASE(derpbird_script_world_isolates_globals_prototypes_and_dom_expandos)
         Promise.resolve().then(() => probe.setAttribute('data-closed-job', 'ran'));
         true;
     )JS"_utf16);
+    check(*world, "performance.mark('derpbird-revoked-callback'); true"_utf16);
     world->close();
     page_run(R"JS(
         Promise.resolve().then(() => document.getElementById('probe').setAttribute('data-page-job', 'ran'));
@@ -303,7 +306,7 @@ TEST_CASE(derpbird_script_world_isolates_globals_prototypes_and_dom_expandos)
     )JS"_utf16);
     Web::ResizeObserver::invoke_resize_observer_callback(*resize, {});
     Web::IntersectionObserver::invoke_intersection_observer_callback(*intersection, intersection_entries);
-    EXPECT(!performance->invoke_callback(performance_entries, {}).is_abrupt());
+    for (size_t turn = 0; turn < 64; ++turn) Web::HTML::main_thread_event_loop().process();
     Web::HTML::main_thread_event_loop().perform_a_microtask_checkpoint();
     EXPECT(page_run("!document.getElementById('probe').hasAttribute('data-closed-job')"_utf16).as_bool());
     EXPECT(page_run("document.getElementById('probe').getAttribute('data-page-job') === 'ran'"_utf16).as_bool());
@@ -598,6 +601,58 @@ TEST_CASE(derpbird_script_world_isolates_globals_prototypes_and_dom_expandos)
     EXPECT(page_run("!document.getElementById('probe').hasAttribute('data-lifecycle-event') && !document.getElementById('probe').hasAttribute('data-lifecycle-job')"_utf16).as_bool());
 }
 
+TEST_CASE(derpbird_script_world_revocation_releases_queued_web_lock)
+{
+    install_test_fonts();
+    Web::Bindings::create_a_principal_javascript_realm();
+    auto& vm = Web::Bindings::main_thread_vm();
+    auto client = vm.heap().allocate<TestPageClient>();
+    auto page = Web::Page::create(client);
+    client->m_page = page.ptr();
+    auto traversable = Web::HTML::LocalTraversableNavigable::create_a_new_top_level_traversable(page, nullptr, {});
+    page->set_top_level_traversable(traversable);
+    auto document = GC::Ref { *traversable->active_document() };
+    auto address = URL::Parser::basic_parse("https://example.com/locks"sv).release_value();
+    document->set_url(address);
+    document->set_origin(address.origin());
+    auto& realm = document->window()->principal_realm();
+    vm.pop_execution_context();
+    auto run = [&](Utf16View source) {
+        auto& settings = Web::Bindings::principal_host_defined_environment_settings_object(realm);
+        vm.push_execution_context(settings.realm_execution_context());
+        ScopeGuard pop = [&] { vm.pop_execution_context(); };
+        auto script = JS::Script::parse(source, realm);
+        VERIFY(!script.is_error());
+        auto result = vm.run(script.value());
+        VERIFY(!result.is_error());
+        return result.release_value();
+    };
+    run(R"JS(
+        const probe = document.createElement('div');
+        probe.id = 'lock-probe';
+        (document.body || document.documentElement || document).appendChild(probe);
+    )JS"_utf16);
+    auto world = TRY_OR_FAIL(Web::DerpBirdScriptWorld::create(*document));
+    auto queued = TRY_OR_FAIL(world->run(R"JS(
+        navigator.locks.request('derpbird-revoked-lock', () => {
+            document.getElementById('lock-probe').setAttribute('data-revoked', 'ran');
+            return new Promise(() => {});
+        });
+        true;
+    )JS"_utf16));
+    VERIFY(!queued.is_abrupt());
+    world->close();
+    run(R"JS(
+        globalThis.pageLockAcquired = false;
+        navigator.locks.request('derpbird-revoked-lock', () => { pageLockAcquired = true; });
+    )JS"_utf16);
+    for (size_t turn = 0; turn < 64; ++turn)
+        Web::HTML::main_thread_event_loop().process();
+    Web::HTML::main_thread_event_loop().perform_a_microtask_checkpoint();
+    EXPECT(run("!document.getElementById('lock-probe').hasAttribute('data-revoked')"_utf16).as_bool());
+    EXPECT(run("pageLockAcquired"_utf16).as_bool());
+}
+
 TEST_CASE(derpbird_credential_fields_revalidate_forms_documents_and_script_mutation)
 {
     install_test_fonts();
@@ -715,19 +770,28 @@ TEST_CASE(derpbird_credential_fields_revalidate_forms_documents_and_script_mutat
     auto reentrant = MUST(select_session());
     EXPECT(another_selection.ticket != reentrant.ticket);
     EXPECT(session->capture(another_selection).is_error());
-    bool attempted_replay = false;
+    struct ReplayState : RefCounted<ReplayState> {
+        GC_HOLDS_NO_CELL_EDGES;
+        bool attempted { false };
+        WeakPtr<Web::DerpBirdCredentialSession> session;
+        Web::DerpBirdCredentialSession::Selection selection;
+    };
+    auto replay = make_ref_counted<ReplayState>();
+    replay->session = session->make_weak_ptr();
+    replay->selection = reentrant;
     vm.push_execution_context(Web::Bindings::principal_host_defined_environment_settings_object(realm).realm_execution_context());
-    auto revoke = JS::NativeFunction::create(realm, [&](JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
-        attempted_replay = true;
-        EXPECT(session->fill(reentrant, "replayed"_string, "must-not-fill"_string).is_error());
-        session->cancel();
+    auto revoke = JS::NativeFunction::create(realm, GC::create_function(vm.heap(), GC::captures(replay), [](auto& replay, JS::VM&) -> JS::ThrowCompletionOr<JS::Value> {
+        replay->attempted = true;
+        VERIFY(replay->session);
+        EXPECT(replay->session->fill(replay->selection, "replayed"_string, "must-not-fill"_string).is_error());
+        replay->session->cancel();
         return JS::js_undefined();
-    }, 0, "cancelCredential"_utf16_fly_string);
+    }), 0, "cancelCredential"_utf16_fly_string);
     realm.global_object().define_direct_property("cancelCredential"_utf16_fly_string, revoke, JS::default_attributes);
     vm.pop_execution_context();
     run("document.getElementById('p').value='unchanged'; document.getElementById('u').addEventListener('input',()=>cancelCredential(),{once:true})"_utf16);
     EXPECT(session->fill(reentrant, "new-user"_string, "must-not-fill-after-cancel"_string).is_error());
-    EXPECT(attempted_replay);
+    EXPECT(replay->attempted);
     EXPECT(run("document.getElementById('p').value==='unchanged'"_utf16).as_bool());
     realm.global_object().define_direct_property("cancelCredential"_utf16_fly_string, JS::js_undefined(), JS::default_attributes);
     auto navigation_selection = MUST(select_session());
@@ -1163,11 +1227,17 @@ TEST_CASE(derpbird_module_waiters_do_not_cross_insertion_authorities)
     auto url = URL::Parser::basic_parse("https://example.com/shared.mjs"sv).release_value();
     auto first = Web::DerpBirdInsertionAuthority::create([] { return true; });
     auto second = Web::DerpBirdInsertionAuthority::create([] { return true; });
-    size_t page_calls = 0, first_calls = 0, second_calls = 0;
-    auto callback = [&](size_t& calls) {
-        return GC::create_function(vm.heap(), [&calls](GC::Ptr<Web::HTML::ModuleScript> script) {
+    struct Calls : RefCounted<Calls> {
+        GC_HOLDS_NO_CELL_EDGES;
+        size_t value { 0 };
+    };
+    auto page_calls = make_ref_counted<Calls>();
+    auto first_calls = make_ref_counted<Calls>();
+    auto second_calls = make_ref_counted<Calls>();
+    auto callback = [&](NonnullRefPtr<Calls> calls) {
+        return GC::create_function(vm.heap(), GC::captures(move(calls)), [](auto& calls, GC::Ptr<Web::HTML::ModuleScript> script) {
             EXPECT(!script);
-            ++calls;
+            ++calls->value;
         });
     };
     map->set(url, u"javascript-or-wasm"sv, { callback(page_calls) });
@@ -1176,15 +1246,15 @@ TEST_CASE(derpbird_module_waiters_do_not_cross_insertion_authorities)
     map->append(url, u"javascript-or-wasm"sv, callback(first_calls), first->identity());
     first->revoke();
     map->complete_fetch(url, u"javascript-or-wasm"sv, nullptr, first->identity());
-    EXPECT_EQ(first_calls, 2u);
-    EXPECT_EQ(page_calls, 0u);
-    EXPECT_EQ(second_calls, 0u);
+    EXPECT_EQ(first_calls->value, 2u);
+    EXPECT_EQ(page_calls->value, 0u);
+    EXPECT_EQ(second_calls->value, 0u);
     EXPECT(map->get(url, u"javascript-or-wasm"sv).has_value());
     EXPECT(map->get(url, u"javascript-or-wasm"sv, second->identity()).has_value());
     EXPECT(!map->get(url, u"javascript-or-wasm"sv, first->identity()).has_value());
     map->complete_fetch(url, u"javascript-or-wasm"sv, nullptr);
     map->complete_fetch(url, u"javascript-or-wasm"sv, nullptr, second->identity());
-    EXPECT_EQ(page_calls, 1u);
-    EXPECT_EQ(second_calls, 1u);
+    EXPECT_EQ(page_calls->value, 1u);
+    EXPECT_EQ(second_calls->value, 1u);
     vm.pop_execution_context();
 }

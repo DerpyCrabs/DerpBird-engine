@@ -25,9 +25,9 @@ public:
     static NonnullRefPtr<DerpBirdCredentialSession> create(DOM::Document& document, Clock clock = [] { return MonotonicTime::now(); })
     {
         auto session = adopt_ref(*new DerpBirdCredentialSession(document, move(clock)));
-        session->m_observer->set_document_became_inactive([weak = session->make_weak_ptr()] {
+        session->m_observer->set_document_became_inactive(GC::create_function(GC::Heap::the(), GC::captures(session->make_weak_ptr()), [](auto& weak) {
             if (weak) weak->close();
-        });
+        }));
         return session;
     }
     ~DerpBirdCredentialSession() { close(); }

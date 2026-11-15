@@ -12,7 +12,7 @@ use core::ffi::c_void;
 use core::ptr::NonNull;
 
 use libjs_rust::api::{
-    ErrorKind, ErrorType, ForeignCellSlot, RawNativeFunctionResult, ThrowCompletionOr, Trace, Value, Vm,
+    ErrorKind, ErrorType, ForeignCellSlot, Gc, RawNativeFunctionResult, Realm, ThrowCompletionOr, Trace, Value, Vm,
 };
 
 use crate::bindings::promise::{WebIdlPromise, promise_from_abi};
@@ -20,6 +20,9 @@ use crate::bindings::promise::{WebIdlPromise, promise_from_abi};
 unsafe extern "C" {
     /// A new WebIDL::CallbackType of the object, whose callback context is the incumbent settings object.
     fn web_bindings_create_callback_function(callable: *mut c_void, returns_promise: bool) -> *mut c_void;
+
+    /// The associated callback realm, or null after its isolated wrapper world is revoked.
+    fn web_bindings_active_callback_realm(callback: *mut c_void) -> *mut c_void;
 
     /// WebIDL::invoke_callback() of the WebIDL::CallbackType with the this value, if `has_this_value`, and the
     /// arguments.
@@ -78,6 +81,12 @@ impl CallbackType {
         Self(slot)
     }
 
+    fn active_realm(&self) -> Option<Gc<Realm>> {
+        // SAFETY: The slot keeps the callback and its associated realm alive.
+        let realm = unsafe { web_bindings_active_callback_realm(self.0.as_ptr()) };
+        NonNull::new(realm.cast::<Realm>()).map(|realm| unsafe { Gc::from_non_null(realm) })
+    }
+
     // https://webidl.spec.whatwg.org/#js-callback-function
     fn from_js(vm: &Vm, value: Value, returns_promise: bool) -> ThrowCompletionOr<Self> {
         // 1. If the result of calling IsCallable(V) is false and the conversion to an IDL value is not being performed
@@ -100,6 +109,15 @@ impl CallbackType {
 }
 
 impl CallbackFunction {
+    /// Check before creating callback argument wrappers: invocation itself checks too late.
+    pub(crate) fn active_realm(&self) -> Option<Gc<Realm>> {
+        self.0.active_realm()
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
+        self.0.0.as_ptr()
+    }
+
     /// The callback function value of a JS value, https://webidl.spec.whatwg.org/#js-callback-function
     pub(crate) fn from_js(vm: &Vm, value: Value) -> ThrowCompletionOr<Self> {
         CallbackType::from_js(vm, value, false).map(Self)
@@ -146,6 +164,10 @@ impl CallbackInterface {
 }
 
 impl PromiseCallbackFunction {
+    pub(crate) fn active_realm(&self) -> Option<Gc<Realm>> {
+        self.0.active_realm()
+    }
+
     pub(crate) fn as_ptr(&self) -> *mut c_void {
         self.0.0.as_ptr()
     }

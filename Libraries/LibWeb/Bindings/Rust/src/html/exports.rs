@@ -20,6 +20,7 @@ use liburl_rust::FfiOrigin;
 
 use super::broadcast_channel::{BROADCAST_CHANNEL_MESSAGE_CLASS, BroadcastChannel, BroadcastChannelMessage};
 use super::image_bitmap::ImageBitmap;
+use super::image_bitmap_rendering_context::ImageBitmapRenderingContext;
 use super::image_data::ImageData;
 use super::message_port::MessagePort;
 use super::storage::{Storage, StorageType};
@@ -31,9 +32,11 @@ use crate::bindings::conversions::UsvString;
 use crate::bindings::cpp_cell::CppCell;
 use crate::bindings::environment_settings_object::relevant_settings_object;
 use crate::bindings::event_target::CppEventTarget;
-use crate::bindings::interface::{Interface, Ref, cell_from_abi, cell_into_abi, realm_arguments, wrap};
+use crate::bindings::interface::{Interface, Ref, allocate, cell_from_abi, cell_into_abi, realm_arguments, wrap};
 use crate::bindings::structured_data::{TransferDataReader, TransferDataWriter, Transferable};
+use crate::canvas_2d::canvas::Canvas;
 use crate::dom::event::EventInit;
+use crate::html::port_channel::give_up_on_parked_end;
 use crate::html::structured_serialize::cpp::SerializedTransferRecord;
 use crate::html::structured_serialize::message_record::MessageRecord;
 use crate::html::structured_serialize::transfer_data_holder::{TransferDataHolder, TransferPayload};
@@ -353,8 +356,9 @@ pub unsafe extern "C" fn web_rust_message_port_fail_next_transfer_for_testing(po
     unsafe { cell_from_abi::<MessagePort>(port) }.fail_next_transfer_for_testing();
 }
 
-/// The transfer steps of the MessagePort, which C++ runs outside StructuredSerializeWithTransfer, into a data holder
-/// that holds no type, whose carrier it hands over.
+/// The transfer steps of the MessagePort of a new channel to a worker, which C++ runs outside
+/// StructuredSerializeWithTransfer, into a data holder that holds no type, whose carrier it hands over. The data holder
+/// goes through the browser process, and the token in `out_parked_end_token` is for settling what became of it.
 ///
 /// # Safety
 ///
@@ -364,7 +368,9 @@ pub unsafe extern "C" fn web_rust_message_port_transfer_steps(
     vm: *mut c_void,
     realm: *mut c_void,
     port: *mut c_void,
+    may_leave_process: bool,
     out_data_holder: &mut *mut c_void,
+    out_parked_end_token: &mut u64,
 ) -> RawNativeFunctionResult {
     // SAFETY: The caller passes the live VM, a live realm and a live cell of a MessagePort.
     let ((vm, realm), port) = unsafe { (realm_arguments(vm, realm), cell_from_abi::<MessagePort>(port)) };
@@ -372,13 +378,48 @@ pub unsafe extern "C" fn web_rust_message_port_transfer_steps(
     let data_holder = TransferDataHolder::new();
     let result = MessagePort::transfer_steps(&port, &mut cx, &mut TransferDataWriter::new(&data_holder, realm, None));
     if result.is_ok() {
-        *out_data_holder = data_holder.finish().into_cpp();
+        let mut payload = data_holder.finish();
+        *out_parked_end_token = payload.park_channel_end(may_leave_process);
+        *out_data_holder = payload.into_cpp();
     }
     RawNativeFunctionResult::from_completion(
         result
             .map(|()| Value::UNDEFINED)
             .map_err(|exception| exception.throw(&cx)),
     )
+}
+
+/// Tells that nobody in this process is going to claim the channel end of the token, unless somebody did.
+#[unsafe(no_mangle)]
+pub extern "C" fn web_rust_message_port_give_up_on_parked_end(token: u64) {
+    give_up_on_parked_end(token);
+}
+
+/// How the port reaches the port it is entangled with, as an ASCII string that lives forever, for tests.
+///
+/// # Safety
+///
+/// `port` must be a live cell of a MessagePort, and `out_kind` must be valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_rust_message_port_entanglement_kind(
+    port: *mut c_void,
+    out_kind: *mut ak::Span<'static, u8>,
+) {
+    // SAFETY: The caller passes a live cell of a MessagePort.
+    let kind = unsafe { cell_from_abi::<MessagePort>(port) }.entanglement_kind();
+    // SAFETY: The caller passes a pointer that is valid for a write.
+    unsafe { out_kind.write(ak::Span::new(kind.as_bytes())) };
+}
+
+/// Whether the transport of the port closed, for tests.
+///
+/// # Safety
+///
+/// `port` must be a live cell of a MessagePort.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_rust_message_port_transport_is_closed_for_testing(port: *mut c_void) -> bool {
+    // SAFETY: The caller passes a live cell of a MessagePort.
+    unsafe { cell_from_abi::<MessagePort>(port) }.transport_is_closed_for_testing()
 }
 
 /// The transfer-receiving steps of a MessagePort that C++ runs outside StructuredDeserializeWithTransfer, which return
@@ -415,14 +456,28 @@ pub unsafe extern "C" fn web_rust_message_port_disentangle_ports_of_realm(vm: *m
     MessagePort::disentangle_ports_of_realm(vm, realm);
 }
 
+/// Releases what the thread's agent keeps outside its heap, for an agent that goes away.
+///
+/// # Safety
+///
+/// `vm` must be the live VM of the thread, whose heap has to stay alive through the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_rust_shut_down_agent(vm: *mut c_void) {
+    // SAFETY: The caller passes the live VM.
+    let vm = unsafe { &*vm.cast::<Vm>() };
+    MessagePort::shut_down_ports_of_agent(vm);
+    crate::html::broadcast_channel::forget_broadcast_channels_of_agent();
+    crate::web_assembly::Agent::shut_down();
+    crate::indexed_db::internal::storage::shut_down_storage();
+}
+
 /// Steps 6 to 9 of BroadcastChannel's postMessage(), for a message that another process posted, whose channel name
 /// C++ hands over.
 ///
 /// # Safety
 ///
 /// `vm` must be the live VM, the origins and the bytes lent, `channel_name` an owned AK::Utf16String, and
-/// `shared_memory` and `shared_memory_sizes` arrays of `shared_memory_count` descriptors that are open for the call and
-/// their sizes.
+/// `shared_store_lifeline` a descriptor that is open for the call, or negative.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn web_rust_broadcast_channel_deliver_message_locally(
     vm: *mut c_void,
@@ -430,12 +485,10 @@ pub unsafe extern "C" fn web_rust_broadcast_channel_deliver_message_locally(
     channel_name: usize,
     source_origin: *const FfiOrigin,
     serialized_message: ak::Span<'_, u8>,
-    shared_memory: *const c_int,
-    shared_memory_sizes: *const usize,
-    shared_memory_count: usize,
+    shared_store_lifeline: c_int,
 ) {
-    // SAFETY: The caller passes the live VM, lends the origins and the descriptors, and hands over the name.
-    let (vm, storage_key, channel_name, source_origin, shared_memory, shared_memory_sizes) = unsafe {
+    // SAFETY: The caller passes the live VM, lends the origins and the descriptor, and hands over the name.
+    let (vm, storage_key, channel_name, source_origin) = unsafe {
         (
             &*vm.cast::<Vm>(),
             StorageKey {
@@ -443,22 +496,15 @@ pub unsafe extern "C" fn web_rust_broadcast_channel_deliver_message_locally(
             },
             Utf16String::from_raw_owned(channel_name),
             (*source_origin).to_origin(),
-            ak::slice_from_raw_parts(shared_memory, shared_memory_count),
-            ak::slice_from_raw_parts(shared_memory_sizes, shared_memory_count),
         )
     };
     let message = BROADCAST_CHANNEL_MESSAGE_CLASS.allocate(vm, |defer_gc| BroadcastChannelMessage {
         storage_key,
         channel_name,
         source_origin,
-        // SAFETY: The caller keeps the descriptors open for the call.
+        // SAFETY: The caller keeps the descriptor open for the call.
         serialized: unsafe {
-            MessageRecord::received(
-                defer_gc,
-                serialized_message.as_slice(),
-                shared_memory,
-                shared_memory_sizes,
-            )
+            MessageRecord::received(defer_gc, serialized_message.as_slice(), &[], &[], shared_store_lifeline)
         },
     });
     BroadcastChannel::deliver_message_locally(vm, message, None);
@@ -626,4 +672,66 @@ pub unsafe extern "C" fn web_rust_structured_clone(
     let (value, transfer) = unsafe { (Value::from_raw(value), objects_from_abi(vm, transfer, count)) };
     let result = structured_clone(&cx, value, &transfer.values());
     RawNativeFunctionResult::from_completion(result.map_err(|exception| exception.throw(&cx)))
+}
+
+/// Creates the ImageBitmapRenderingContext of the HTMLCanvasElement whose cell is `canvas` and whose
+/// Web::HTML::CanvasHost is `canvas_host`, and returns its cell.
+///
+/// # Safety
+///
+/// `canvas` must be the live cell of the canvas, and `canvas_host` the same object as a Web::HTML::CanvasHost.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_image_bitmap_rendering_context_create(
+    vm: &Vm,
+    canvas: *mut c_void,
+    canvas_host: *mut c_void,
+    alpha: bool,
+) -> *mut c_void {
+    let canvas = Canvas {
+        cell: NonNull::new(canvas).expect("C++ passes the canvas"),
+        host: NonNull::new(canvas_host).expect("C++ passes the canvas"),
+        is_offscreen: false,
+    };
+    cell_into_abi(allocate(vm, |defer_gc| {
+        ImageBitmapRenderingContext::new(defer_gc, canvas, alpha)
+    }))
+}
+
+/// The Gfx::DecodedImageFrame of the output bitmap of the context, which stays valid until the output bitmap changes,
+/// or null for none.
+///
+/// # Safety
+///
+/// `context` must be a live cell.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_image_bitmap_rendering_context_frame(context: *mut c_void) -> *const c_void {
+    // SAFETY: The caller passes a live cell.
+    unsafe { object_from_abi::<ImageBitmapRenderingContext>(context) }.raw_frame()
+}
+
+/// # Safety
+///
+/// `context` must be a live cell.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_image_bitmap_rendering_context_is_blank(context: *mut c_void) -> bool {
+    // SAFETY: The caller passes a live cell.
+    unsafe { object_from_abi::<ImageBitmapRenderingContext>(context) }.is_blank()
+}
+
+/// # Safety
+///
+/// `context` must be a live cell.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_image_bitmap_rendering_context_origin_clean(context: *mut c_void) -> bool {
+    // SAFETY: The caller passes a live cell.
+    unsafe { object_from_abi::<ImageBitmapRenderingContext>(context) }.origin_clean()
+}
+
+/// # Safety
+///
+/// `context` must be a live cell.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn web_image_bitmap_rendering_context_alpha(context: *mut c_void) -> bool {
+    // SAFETY: The caller passes a live cell.
+    unsafe { object_from_abi::<ImageBitmapRenderingContext>(context) }.alpha()
 }

@@ -33,7 +33,7 @@ void HTMLBodyElement::inserted()
     if (!is_connected())
         return;
     auto document = GC::Ref { this->document() };
-    queue_a_microtask(document, GC::create_function(GC::Heap::the(), [document] {
+    queue_a_microtask(document, GC::create_function(GC::Heap::the(), GC::captures(document), [](auto& document) {
         if (document->is_fully_active() && document->body())
             document->page().client().derpbird_document_phase(*document, DerpBirdScriptRunAt::DocumentBody);
     }));

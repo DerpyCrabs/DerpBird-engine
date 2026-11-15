@@ -54,10 +54,11 @@ void style_engine_set_text_is_ascii_whitespace(DocumentHost const*, StyleNodeID 
 void style_engine_set_node_dom_paint_facts(DocumentHost const*, StyleNodeID node, u8 facts);
 void style_engine_set_element_unique_node_id(DocumentHost const*, StyleNodeID node, u64 unique_node_id);
 void style_engine_set_element_table_spans(DocumentHost const*, StyleNodeID node, u32 column_span, u32 row_span);
+void style_engine_set_element_frameset_layout(DocumentHost const*, StyleNodeID node, ReadonlySpan<FfiFrameSetDimension> columns, ReadonlySpan<FfiFrameSetDimension> rows, ReadonlySpan<FfiFrameSetBorder> borders, u32 border_thickness);
 void style_engine_set_element_id_name(DocumentHost const*, StyleNodeID node, StyleAtomID name);
 void style_engine_set_shadow_root(DocumentHost const*, StyleNodeID shadow_host, StyleNodeID shadow_root);
 void style_engine_record_environment_change(DocumentHost const*, u8 changes);
-void style_engine_record_custom_property_registration_change(DocumentHost const*, StyleAtomID name);
+void style_engine_record_custom_property_registration_change(DocumentHost const*);
 void style_engine_flush(DocumentHost const*);
 void style_engine_finish_sheet_rules_replacement(DocumentHost const*, SheetID sheet, u32 declaration_block);
 void style_engine_attach_sheet(DocumentHost const*, SheetID sheet, TreeScopeID tree_scope, SheetID before_sheet);
@@ -104,18 +105,12 @@ bool style_engine_pending_transaction_may_affect_layout_geometry(DocumentHost co
 void style_engine_defer_pending_transaction_for_geometry_read(DocumentHost const*, BegunRead const*);
 bool style_engine_begin_deferred_geometry_transaction_flush(DocumentHost const*, BegunRead const*);
 bool style_engine_has_deferred_geometry_transaction(DocumentHost const*, BegunRead const*);
-u64 style_engine_cold_pass(DocumentHost const*, BegunRead const*, StyleNodeID root, bool verify, u32 threads);
-u64 style_engine_cold_pass_report(DocumentHost const*, BegunRead const*, u32 index);
-u64 style_engine_live_report(DocumentHost const*, BegunRead const*, StyleNodeID root, bool verify, u32 index);
-u64 style_engine_style_counter(DocumentHost const*, BegunRead const*, u32 index);
-bool style_engine_reset_style_counters(DocumentHost const*, BegunRead const*);
-bool style_engine_last_pass_is_full(DocumentHost const*, BegunRead const*);
-u32 style_engine_last_pass_size(DocumentHost const*, BegunRead const*, StyleNodeID root, bool changed);
-u32 style_engine_last_pass_element(DocumentHost const*, BegunRead const*, StyleNodeID root, bool changed, u32 index);
-u64 style_engine_animated_style_samples(DocumentHost const*, BegunRead const*, bool rebuilt_every_group, bool reset);
+bool style_engine_begin_style_trace(DocumentHost const*, BegunRead const*);
+bool style_engine_end_style_trace(DocumentHost const*, BegunRead const*);
+u32 style_engine_style_trace_size(DocumentHost const*, BegunRead const*, StyleNodeID root);
+u64 style_engine_style_trace_entry(DocumentHost const*, BegunRead const*, StyleNodeID root, u32 index);
 u32 style_engine_layer_index(DocumentHost const*, BegunRead const*, TreeScopeID tree_scope, u32 layer);
 u32 style_engine_layer_index_for_origin(DocumentHost const*, BegunRead const*, TreeScopeID tree_scope, u32 layer, u8 origin);
-u64 style_engine_size_query_container_scan_visits(DocumentHost const*, BegunRead const*, bool reset);
 u64 style_engine_ensure_random_base_value(DocumentHost const*, BegunRead const*, StyleNodeID node, ReadonlySpan<u16> name, bool element_shared);
 }
 
@@ -227,8 +222,6 @@ public:
     StyleAtomID intern_atom(Utf16FlyString const&);
     // Counts the reclaims of this document's atoms, so a cache keyed by atoms can tell when one may have been reused.
     [[nodiscard]] u64 atom_generation() const;
-    // Moves a node's record to the environment its inherited custom-property data was refreshed
-    // to; the record the host holds for the new one, or null when nothing moved.
     // What a read of an element's style, or one of its pseudo-elements', made before the next style update asks of
     // the style engine, and the pseudo-element a demand may read.
     using RecordDemand = StyleEngineFFI::FfiRecordDemand;
@@ -412,6 +405,11 @@ public:
     // Takes the style update that flew in, waiting for it to land, to drain its reactions against the inputs it
     // was sealed with. What was written beside it waits for end_flown_style_drain(): it is the next transaction's.
     StyleUpdateTimings drain_flown_style_update(Layout::BegunRead const& read);
+
+    // How long the document goes without a style update before the engine gives back what its passes keep for the
+    // next one. Each update starts the wait over, so a document that styles every frame, as an animation does, keeps it.
+    static constexpr auto scratch_trim_delay = AK::Duration::from_seconds(1);
+    void trim_scratch();
     void end_flown_style_drain();
     // Takes in the fonts passes resolved against a table older than the document's. Those of a transaction that flew wait
     // for the end of its drain, as what was written beside it does; a drain's own later passes publish the newer table
@@ -459,6 +457,7 @@ private:
     void gather_computation_inputs(LentComputationInputs&);
 
     void submit_recorded_input();
+    void note_style_update_for_scratch_trim();
     void publish_attribute_value_texts_if_requirements_moved(Layout::BegunRead const& read);
 
     Optional<StyleSheetResourceContexts> m_style_sheet_resource_contexts;
@@ -469,6 +468,8 @@ private:
     NonnullRefPtr<Layout::RenderDocument> m_render_document;
     u64 m_published_font_environment_generation { 0 };
     GC::Ptr<StyleComputer> m_style_computer;
+    GC::Ptr<Platform::Timer> m_scratch_trim_timer;
+    MonotonicTime m_last_style_update_time { MonotonicTime::now() };
     // The language the host interned last, which most elements arriving after one share: its tag, its atom, and the
     // atom generation the atom was interned in.
     Utf16String m_last_language_text;

@@ -188,11 +188,6 @@ WebIDL::ExceptionOr<void> initialize_window_web_interfaces(HTML::Window& window,
     window_global_mixin.initialize(realm, global_object);
     window_global_mixin.define_unforgeable_attributes(realm, global_object);
 
-    // The interface/unforgeable setup above is realm-scoped and must run for every Window wrapper realm.
-    // WindowOrWorkerGlobalScopeMixin state is impl-scoped and shared by all worlds for this Window.
-    if (&realm == &window.principal_realm())
-        window.WindowOrWorkerGlobalScopeMixin::initialize();
-
     if (window.is_internals_object_exposed())
         Bindings::define_internals_property(realm, window, global_object);
 
@@ -223,13 +218,13 @@ WebIDL::UnsignedLong request_animation_frame(HTML::Window& window, WebIDL::Callb
     //     handler belongs to the window, so the callback lives exactly as long as the window's document. A root here
     //     would keep a callback that never runs (a hidden document gets no animation frames) alive for the life of
     //     the process, and with it the window, its document, and everything the document holds.
-    auto handler = [callback = GC::Ref { callback }](double now) {
+    auto handler = GC::create_function(GC::Heap::the(), GC::captures(GC::Ref { callback }), [](GC::Ref<WebIDL::CallbackType>& callback, double now) {
         auto& callback_realm = callback->callback->shape().realm();
         auto result = WebIDL::invoke_callback(*callback, {}, { { JS::Value(now) } });
         if (result.is_error())
             HTML::report_exception(result, callback_realm);
-    };
-    return window.request_animation_frame(move(handler));
+    });
+    return window.request_animation_frame(handler);
 }
 
 WebIDL::ExceptionOr<WebIDL::UnsignedLong> request_animation_frame(HTML::DedicatedWorkerGlobalScope& scope, WebIDL::CallbackType& callback)
@@ -241,14 +236,13 @@ WebIDL::UnsignedLong request_idle_callback(HTML::Window& window, WebIDL::Callbac
 {
     // NB: A plain GC reference rather than a GC::Root, for the same reason as in request_animation_frame() above: the
     //     window's idle callback lists trace the handler, so the callback lives exactly as long as the window's document.
-    auto handler = [callback = GC::Ref { callback }](GC::Ref<RequestIdleCallback::IdleDeadline> deadline) -> JS::Completion {
+    auto handler = GC::create_function(GC::Heap::the(), GC::captures(GC::Ref { callback }), [](GC::Ref<WebIDL::CallbackType>& callback, GC::Ref<RequestIdleCallback::IdleDeadline> deadline) -> JS::Completion {
         auto& callback_realm = callback->associated_realm();
-        auto& world = host_defined_wrapper_world(callback_realm);
-        if (world.is_detached())
+        if (host_defined_wrapper_world(callback_realm).is_detached())
             return JS::js_undefined();
-        return WebIDL::invoke_callback(*callback, {}, { { wrap(world, callback_realm, deadline) } });
-    };
-    return window.request_idle_callback(move(handler), options);
+        return WebIDL::invoke_callback(*callback, {}, { { wrap(host_defined_wrapper_world(callback_realm), callback_realm, deadline) } });
+    });
+    return window.request_idle_callback(handler, options);
 }
 
 void define_internals_property(JS::Realm& realm, HTML::Window& window, JS::Object& global_object)
@@ -394,7 +388,6 @@ void Window::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_statusbar);
     visitor.visit(m_toolbar);
     visitor.visit(m_external);
-    m_event_timing_state.visit_edges(visitor);
 }
 
 void Window::finalize()
@@ -646,7 +639,7 @@ CSS::Parser::ValueParserFFI::FfiMediaFeatureValue Window::query_media_feature(CS
         // FIXME: Detect if window is fullscreen
         return ident_media_feature_value(CSS::Keyword::Browser);
     case CSS::MediaFeatureID::DynamicRange:
-        return ident_media_feature_value(CSS::Keyword::Standard);
+        return ident_media_feature_value(page().client().screen_shows_high_dynamic_range() ? CSS::Keyword::High : CSS::Keyword::Standard);
     case CSS::MediaFeatureID::EnvironmentBlending:
         return ident_media_feature_value(CSS::Keyword::Opaque);
     case CSS::MediaFeatureID::ForcedColors:
@@ -734,7 +727,7 @@ CSS::Parser::ValueParserFFI::FfiMediaFeatureValue Window::query_media_feature(CS
     case CSS::MediaFeatureID::VideoColorGamut:
         return ident_media_feature_value(CSS::Keyword::Srgb);
     case CSS::MediaFeatureID::VideoDynamicRange:
-        return ident_media_feature_value(CSS::Keyword::Standard);
+        return ident_media_feature_value(page().client().screen_shows_high_dynamic_range() ? CSS::Keyword::High : CSS::Keyword::Standard);
     case CSS::MediaFeatureID::WebkitTransform3d:
         // https://compat.spec.whatwg.org/#css-media-queries-webkit-transform-3d
         // If the user agent supports 3D transforms, the value will be 1. Otherwise the value is 0.
@@ -1013,8 +1006,8 @@ void Window::start_an_idle_period()
 
     // 5. Queue a task on the queue associated with the idle-task task source,
     //    which performs the steps defined in the invoke idle callbacks algorithm with window and getDeadline as parameters.
-    queue_global_task(Task::Source::IdleTask, relevant_global_object(*this), GC::create_function(GC::Heap::the(), [this] {
-        invoke_idle_callbacks();
+    queue_global_task(Task::Source::IdleTask, relevant_global_object(*this), GC::create_function(GC::Heap::the(), GC::captures(*this), [](Window& self) {
+        self.invoke_idle_callbacks();
     }),
         Task::Priority::Idle);
 }
@@ -1031,7 +1024,7 @@ void Window::invoke_idle_callbacks()
         // 1. Pop the top callback from window's list of runnable idle callbacks.
         auto callback = m_runnable_idle_callbacks.take_first();
         if (callback->timeout_timer_id().has_value()) {
-            clear_timeout(*callback->timeout_timer_id());
+            cancel_timeout_steps(*callback->timeout_timer_id());
             callback->clear_timeout_timer_id();
         }
         // 2. Let deadlineArg be a new IdleDeadline whose [get deadline time algorithm] is getDeadline.
@@ -1044,8 +1037,8 @@ void Window::invoke_idle_callbacks()
         // 4. If window's list of runnable idle callbacks is not empty, queue a task which performs the steps
         //    in the invoke idle callbacks algorithm with getDeadline and window as a parameters and return from this algorithm
         if (!m_runnable_idle_callbacks.is_empty()) {
-            queue_global_task(Task::Source::IdleTask, relevant_global_object(*this), GC::create_function(GC::Heap::the(), [this] {
-                invoke_idle_callbacks();
+            queue_global_task(Task::Source::IdleTask, relevant_global_object(*this), GC::create_function(GC::Heap::the(), GC::captures(*this), [](Window& self) {
+                self.invoke_idle_callbacks();
             }),
                 Task::Priority::Idle);
         }
@@ -1303,7 +1296,7 @@ void Window::close()
         traversable->set_closing(true);
 
         // 2. Queue a task on the DOM manipulation task source to definitely close thisTraversable.
-        HTML::queue_global_task(HTML::Task::Source::DOMManipulation, relevant_global_object(incumbent_global_object), GC::create_function(GC::Heap::the(), [traversable] {
+        HTML::queue_global_task(HTML::Task::Source::DOMManipulation, relevant_global_object(incumbent_global_object), GC::create_function(GC::Heap::the(), GC::captures(traversable), [](auto& traversable) {
             as<LocalTraversableNavigable>(*traversable).definitely_close_top_level_traversable();
         }));
     }
@@ -2165,7 +2158,7 @@ double Window::device_pixel_ratio() const
 WebIDL::UnsignedLong Window::request_animation_frame(AnimationFrameCallbackHandler callback)
 {
     // FIXME: Make this fully spec compliant. Currently implements a mix of 'requestAnimationFrame()' and 'run the animation frame callbacks'.
-    auto handle = animation_frame_callback_driver().add(GC::create_function(GC::Heap::the(), move(callback)));
+    auto handle = animation_frame_callback_driver().add(callback);
     if (Core::StatsLog::the())
         set_rendering_pending(associated_document(), RenderingPendingReason::ScheduledAnimationFrameCallbacks, animation_frame_callback_driver().callback_count());
     page().client().request_frame();
@@ -2213,7 +2206,7 @@ u32 Window::request_idle_callback(IdleCallbackHandler callback, IdleRequestOptio
     auto handle = m_idle_callback_identifier;
 
     // 4. Push callback to the end of window's list of idle request callbacks, associated with handle.
-    auto idle_callback = GC::Heap::the().allocate<IdleCallback>(GC::create_function(GC::Heap::the(), move(callback)), handle);
+    auto idle_callback = GC::Heap::the().allocate<IdleCallback>(callback, handle);
     m_idle_request_callbacks.set(handle, idle_callback);
     main_thread_event_loop().did_request_idle_callback();
 
@@ -2222,18 +2215,17 @@ u32 Window::request_idle_callback(IdleCallbackHandler callback, IdleRequestOptio
     // 6. If the timeout property is present in options and has a positive value:
     if (options.timeout.has_value() && *options.timeout > 0) {
         // 1. Wait for timeout milliseconds.
-        auto timeout = min(*options.timeout, static_cast<u32>(NumericLimits<i32>::max()));
-        auto timeout_timer_id = run_steps_after_a_timeout(static_cast<i32>(timeout), [this, handle] {
+        auto timeout_timer_id = run_steps_after_a_timeout(*options.timeout, GC::create_function(GC::Heap::the(), GC::captures(*this, handle), [](Window& self, u32 handle) {
             // FIXME: 2. Wait until all invocations of this algorithm, whose timeout added to their posted time occurred before this one's, have completed.
             // FIXME: 3. Optionally, wait a further user-agent defined length of time.
 
             // 4. Queue a task on the queue associated with the idle-task task source, which performs the invoke idle callback timeout algorithm, passing handle and window as arguments.
             // NB: A timed-out idle task has normal scheduling priority so that higher-priority work cannot keep it from
             //     running indefinitely. Its task source remains the idle-task task source as required by the specification.
-            queue_global_task(Task::Source::IdleTask, relevant_global_object(*this), GC::create_function(GC::Heap::the(), [this, handle] {
-                invoke_idle_callback_timeout(handle);
+            queue_global_task(Task::Source::IdleTask, relevant_global_object(self), GC::create_function(GC::Heap::the(), GC::captures(self, handle), [](Window& self, u32 handle) {
+                self.invoke_idle_callback_timeout(handle);
             }));
-        });
+        }));
         idle_callback->set_timeout_timer_id(timeout_timer_id);
     }
 
@@ -2253,7 +2245,7 @@ void Window::cancel_idle_callback(u32 handle)
         if (!callback.has_value())
             return;
         if ((*callback)->timeout_timer_id().has_value())
-            clear_timeout(*(*callback)->timeout_timer_id());
+            cancel_timeout_steps(*(*callback)->timeout_timer_id());
     };
     remove_callback(m_idle_request_callbacks);
     remove_callback(m_runnable_idle_callbacks);
@@ -2366,11 +2358,8 @@ GC::OrderedRootHashMap<Utf16FlyString, GC::Ref<Navigable>> Window::document_tree
         //     container's name content attribute. This keeps <iframe name=...> accessible
         //     through parent.frames.name while still excluding names introduced only by a
         //     cross-origin child changing window.name.
-        if (auto container = navigable->container()) {
-            auto container_name = container->name();
-            if (container_name.has_value() && *container_name == name)
-                names.set(name, *navigable);
-        }
+        if (auto container_name = navigable->container_name(); container_name.has_value() && *container_name == name)
+            names.set(name, *navigable);
     }
 
     return names;
@@ -2474,10 +2463,10 @@ Variant<Empty, GC::Ref<WindowProxy>, GC::Ref<DOM::Element>, GC::Ref<DOM::HTMLCol
 
     // 4. Otherwise return an HTMLCollection rooted at window's associated Document,
     //    whose filter matches only named objects of window with the name name. (By definition, these will all be elements.)
-    auto collection = DOM::HTMLCollection::create(mutable_this.associated_document(), DOM::HTMLCollection::Scope::Descendants, [name](auto& element) -> bool {
+    auto collection = DOM::HTMLCollection::create(mutable_this.associated_document(), DOM::HTMLCollection::Scope::Descendants, GC::create_function(heap(), GC::captures(name), [](Utf16FlyString const& name, DOM::Element const& element) -> bool {
         if (is_named_element_by_name(element) && element.name() == name)
             return true;
-        return element.id() == name; }, DOM::HTMLCollection::AttributeInvalidationType::IdOrName);
+        return element.id() == name; }), DOM::HTMLCollection::AttributeInvalidationType::IdOrName);
     return collection;
 }
 

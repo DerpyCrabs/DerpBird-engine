@@ -86,7 +86,7 @@ All sizes are in logical pixels.
 | Toolbar | 40 px | Directly below the tab strip, in the toolbar color. |
 | Drag space | 44 px | Always kept free after the + button (before the window controls on Windows), so there is somewhere to grab and move the window even with many tabs open. |
 | Bookmarks bar | 30 px | Optional, below the toolbar. Set to show on hover, it slides down over the page while the pointer is over the toolbar, the sidebar or the bar itself. |
-| Window corner radius | 10 px (macOS) | Follows the platform elsewhere. |
+| Window corner radius | 10 px (macOS), 6 px (client-side decorations elsewhere) | Custom corners become square when maximized or full screen. Native window frames follow the platform. |
 
 ### Tabs
 
@@ -97,9 +97,9 @@ All sizes are in logical pixels.
 | Active tab | 30 px tall | 8 px top radius plus an 8 px inverted "foot" on each side where it joins the toolbar. 5 px of strip shows above it. Its contents are vertically centered in it, which puts them on the shared center line. |
 | End insets | Favicon 7 px from the left edge; × glyph 11 px from the right edge | Rule: each end item is as far from the tab's side as it is from the tab's top (the 16 px favicon sits 7 px down, the 8 px × glyph 11 px down). Padding: active 0 6 px 0 7 px; inactive 3 px inset + 0 3 px 0 4 px, so favicons and × never move when a tab becomes active. |
 | Favicon to title | 8 px | |
-| Close button | 18 px hover square, 7 px × (14 px glyph box); click area extends to the full tab height | The × is always visible on every tab except pinned tabs, in `muted`; its hover square appears on hover. Indicators like the speaker sit to its left. |
-| Tab width | 20 to 232 px | Tabs shrink until only the favicon is left, giving up their padding below 32 px, then the strip scrolls. A tab too narrow for its favicon beside its × shows only the favicon; the active one shows its × in the favicon's place. |
-| Pinned tab | 44 px wide | Favicon only, always first |
+| Close button | 18 px hover square, 7 px × (14 px glyph box); click area extends to the full tab height | The × is always visible on every tab except pinned tabs, in `muted`. On tabs that are neither active nor hovered it is dimmed as a whole, to 75% opacity in light and 55% in dark and private, and it is at full opacity on the active tab, on a hovered tab and with increased contrast. Its hover square appears on hover. Indicators like the speaker and the microphone sit to its left. |
+| Tab width | 20 to 232 px | Tabs shrink until only the favicon is left, giving up their padding below 32 px, then the strip scrolls. A tab with a speaker or a microphone stops shrinking where its favicon still fits beside them and its ×: 75 px with a speaker, 72 px with a microphone, 89 px with both. The other tabs share what is left. The active tab stops shrinking at 56 px, where its favicon and × still fit side by side. Any other tab too narrow for its favicon beside its × shows only the favicon. |
+| Pinned tab | 44 px wide | Favicon only, always first. While the tab plays audio or uses the microphone, those indicators take the favicon's place. |
 | New tab (+) | 26 px button, 14 px glyph | Follows the last tab directly, 8 px after it (just clear of the active tab's foot), centered on the tab row; with few tabs it does not move to the end of the strip. Click area at least 32 px. |
 | Separators | 1 × 16 px | Between inactive tabs only, hidden next to hovered or active tabs |
 
@@ -109,7 +109,7 @@ All sizes are in logical pixels.
 |---|---|---|
 | Toolbar buttons | 32 × 28 px | 6 px radius, 18 px icons, 2 px apart |
 | Address field | 28 px tall | 7 px radius, no border, 8 px after the reload button |
-| Icons inside the field | 16 px | Site settings (left), zoom chip and star (right) |
+| Icons inside the field | 16 px | Site settings (left), zoom chip and star (right). The left icon's 16 px box sits 10 px from the field's left edge and the text starts 36 px in, in every state but the "Not secure" pill, which the text follows. |
 | Downloads button | 32 × 28 px | Appears at the right end of the toolbar, 6 px after the field, only while there are downloads |
 
 ### Ladybird button
@@ -130,8 +130,8 @@ All sizes are in logical pixels.
 | Element | Size |
 |---|---|
 | Sidebar width | 236 px |
-| Tab rows | 30 px, 6 px radius. Selected: toolbar color with a soft shadow in light; white 15% fill only in dark and private, with no ring: on the dark sidebar the fill is enough, and stacked outlines (Ladybird button, focused field, row) make the column busy. The × on each row is lighter at rest (`#9C9CA3` light, `#7A7A81` dark) and takes the `muted` color on the hovered and selected rows, so a full list does not draw a dark stripe down the sidebar. It is always there; only its tone changes. |
-| Collapsed rail | 52 px. Tiles are 36 × 32 with the favicon centered. Badges sit on the favicon's corners, 18 px round on a toolbar-colored backing with a hairline ring: × top left (on hover only), speaker bottom right (while playing or muted). Both are buttons, and opposite corners keep them apart. |
+| Tab rows | 30 px, 6 px radius. Selected: toolbar color with a soft shadow in light; white 15% fill only in dark and private, with no ring: on the dark sidebar the fill is enough, and stacked outlines (Ladybird button, focused field, row) make the column busy. The × on each row is dimmed at rest, as on a horizontal tab (75% opacity in light, 55% in dark and private), and is at full opacity on the hovered and selected rows, so a full list does not draw a dark stripe down the sidebar. It is always there; only its tone changes. |
+| Collapsed rail | 52 px. Tiles are 36 × 32 with the favicon centered. Badges sit on the favicon's corners, 18 px round on a toolbar-colored backing with a hairline ring: × top left (on hover only), speaker bottom right (while playing or muted), microphone bottom left (while in use). The × and the speaker are buttons, and opposite corners keep them apart. The microphone is not a button; it sits 2 px from the speaker and touches the × while that shows on hover. |
 | Header | Traffic lights, Ladybird button, all tabs, then empty space, then the hide-sidebar toggle at the sidebar's right edge. With the sidebar collapsed, the toolbar starts the same way: traffic lights, Ladybird button, all tabs, show-sidebar toggle. |
 | Background | `sidebar` token: the strip color in light, the toolbar color in dark and private. The page must never sit directly against near-black chrome. |
 | Sidebar on the right | Only the sidebar moves: tab list, rail and the hide/show toggle, which sits at the sidebar's inner edge (facing the page). The traffic lights, Ladybird button and All tabs button stay top left, at the start of the toolbar row, exactly as in collapsed mode. Rail badges keep their corners (× top left, speaker bottom right). Dragging a tab out of the sidebar goes sideways toward the page. On Windows, the sidebar header holds the minimize, maximize and close buttons, with the toggle to their left. Settings → Appearance → Layout shows "Sidebar on: Left / Right" below the layout cards, only while Tabs on the side is selected. |
@@ -181,7 +181,7 @@ Numbers that change in place (zoom, counts, sizes, times) use tabular figures.
 | `sidebar` | Vertical tabs sidebar and rail | `#DCDCE0` | `#2E2E31` | `#CFCFD4` |
 | `field` | Address field fill | Black 8% | White 8% | White + 1 px `#6E6E73` border |
 | `text` | Titles, URL domain | `#1D1D1F` | `#F2F2F5` | `#000000` |
-| `tab-title` | Inactive tab titles | `#3A3A40` | `#ACACB4` | `#3A3A40` |
+| `tab-title` | Inactive tab titles | `#55555C` | `#8F8F97` | `#3A3A40` |
 | `muted` | URL path, secondary text | `#5D5D64` | `#ACACB4` | `#3A3A40` |
 | `icon` | Toolbar icons | `#3A3A40` | `#DCDCE1` | `#1D1D1F` |
 | `disabled` | Disabled controls | `#B3B3B9` | `#5B5B61` | `#8E8E93` |
@@ -258,16 +258,25 @@ bluer, lighter lavender, and its dark surfaces carry less tint than other themes
 
 | Token | Private |
 |---|---|
-| `strip` | `#1D1430` |
+| `strip` | `#110A20` |
 | `toolbar` | `#2F2347` |
 | `text` | `#F3F0FA` |
-| `muted`, `tab-title` | `#B3AAC4` |
+| `muted` | `#B3AAC4` |
+| `tab-title` | `#958CA8` |
 | `icon` | `#E2DCEF` |
 | `disabled` | `#5E566E` |
 | `field` | White 9% |
-| `hover` | White 7% |
+| `hover` | White 7% (toolbar and sidebar) |
+| `strip-hover` | White 6% (background tabs, the + button and the All tabs button on the strip) |
 | `separator` | `#4A3D63` |
 | `divider` | `#0F0A19` |
+
+Hover strength follows the surface a control sits on, not the kind of control. On the
+toolbar's 7%, a hovered tab on the strip would land almost on the active tab, so the strip
+is darker and its hover is 6%. That makes strip, hovered tab and active tab about
+17 / 31 / 47 in red: steps of 14 and 16, slightly wider than normal dark (20 / 34 / 46),
+because violet tones are harder to tell apart than neutral grays. The Ladybird button keeps
+its own hover and press fills everywhere.
 
 The Ladybird button shows a filled domino mask (20 px, eye holes cut out) instead of the logomark. The window is titled
 "Ladybird (Private)" in the Window menu, app switcher and taskbar. There is no "Private"
@@ -325,9 +334,11 @@ Don't invent new shadows. Pick a level.
 
 - Drawn on a 16 px grid with a 1.5 px stroke, round caps and round joins. Outline only.
   The only filled glyphs are state fills (a bookmarked star).
-- Rendered at 16 px inside the address field, menus and panels.
-- Rendered at 18 px in toolbar buttons, with a 1.4 stroke on the 16 px grid, so they read
-  as slightly bolder next to the 28 px field.
+- Rendered at 16 px inside the address field, menus and panels, at 18 px in toolbar buttons,
+  and at 14 px on tabs.
+- Every icon from 14 to 18 px keeps the same 1.5 px line, whatever its size: 1.33 on the
+  16 px grid at 18 px, 1.5 at 16 px and 1.71 at 14 px. The Ladybird button and the native
+  window controls are drawn on their own terms.
 - Icon color is the `icon` token in the toolbar and `body` in panels. Never accent-colored.
 - Icon colors are always opaque. Never draw an icon with a translucent stroke: where its lines overlap, the color adds up and the crossings show as brighter spots. To dim an icon (disabled, inactive window), apply opacity to the whole icon at once.
 - Render icons from the vector at the screen's device pixel ratio, positioned on whole pixels. Never scale a pre-rendered bitmap.
@@ -421,6 +432,7 @@ Don't invent new shadows. Pick a level.
 - Warning pills ("Not secure", "Not wikipedia.org") use `warning-fill` with `warning-ink`
   text and icon.
 - The zoom chip is a neutral chip shown only while the zoom isn't 100%.
+- The location and microphone chips are neutral chips with a 16 px icon before their words.
 
 ### Focus
 
@@ -440,9 +452,10 @@ Don't invent new shadows. Pick a level.
 | Active | Joins the toolbar; title in full `text` color, weight 400 |
 | Dragging | Stays in the strip with a Lift shadow, flat (no tilt), slides sideways only |
 | Loading | Accent ring (20 px, 1.5 px line) around the favicon, reaching only 2 px past the favicon slot so the title keeps about 6 px of room and nothing moves. The favicon shrinks to 10 px inside the ring so square icons never touch it. |
-| Playing audio / muted | 20 px speaker button left of the close slot; click to mute. Muted keeps the struck speaker. In sidebar rows (13 px titles) the speaker is a 16 px glyph in a 22 px button, in the `icon` color, so it matches the × in weight. In the collapsed sidebar rail, the speaker is an 18 px round badge with a 13 px glyph, overlapping the favicon's bottom-right corner by about 7 px, on an opaque toolbar-colored backing with a hairline ring; it is clickable. |
+| Playing audio / muted | 20 px speaker button left of the close slot, shown while the tab was heard in the last 3.5 s; click to mute. Muted keeps the struck speaker. In sidebar rows (13 px titles) the speaker is a 16 px glyph in a 22 px button, in the `icon` color, so it matches the × in weight. In the collapsed sidebar rail, the speaker is an 18 px round badge with a 13 px glyph, overlapping the favicon's bottom-right corner by about 7 px, on an opaque toolbar-colored backing with a hairline ring; it is clickable. |
+| Using the microphone | A 14 px microphone glyph left of the speaker, or in the speaker's slot without it, in the speaker's color, shown while the page holds a capture stream and for 3 s after, whether or not the stream carries sound. It is not a button: a click on it goes to the tab, and its tooltip says "Using your microphone". In sidebar rows it is a 16 px glyph like the speaker. A tab too narrow for both shows only the microphone, so it never hides which tabs use the microphone. |
 | Needs attention | A 7 px accent dot on the favicon's corner; clears on visit |
-| Pinned | Favicon only, 44 px wide |
+| Pinned | Favicon only, 44 px wide. The microphone and the speaker take the favicon's place, side by side and centered (14 + 20 px). |
 | Crashed | Warning glyph replaces the favicon |
 
 ### Address field
@@ -458,6 +471,7 @@ Don't invent new shadows. Pick a level.
 | Bookmarked | Filled star in the `icon` color |
 | Permission requested | The permission's icon replaces the site settings icon, on the accent tint |
 | Zoomed | Zoom chip before the star |
+| Using location / microphone | "Using your location" chip before the zoom chip, and "Using your microphone" chip before that. Each says its words for 4 s after it appears, on its own timer, then shrinks to its 30 px icon. While the field has no room for a chip's words, it shows only its icon, keeping its tooltip and accessible name; resizing never restarts the timers. The field asks for room for the icons only, so a chip's words never widen the window. A click opens site settings. |
 | Blank tab | Empty and focused, placeholder "Search or enter address", no site settings icon or star |
 
 There is no content-blocker shield in the field. Content blocking is controlled from site
@@ -474,8 +488,14 @@ settings.
   ring runs around the whole surface, in place of its hairline edge. The ring never fades
   or jumps when the surface opens or closes: focus hasn't moved, so its indicator doesn't
   change either.
+- While editing, the site settings icon in the text row is replaced, in place, by the icon of
+  what Return will do: the selected row's favicon or globe, or a magnifier for a search.
 - A `sep-soft` divider, inset 8 px, separates the text row from the suggestions. Rows are
-  34 px, in a 6 px padded list.
+  34 px. The list has 6 px of padding top and bottom and 3 px at the sides, so the selected
+  row's fill sits 3 px from the surface edge, with a 4 px radius that nests in the
+  surface's 7 px corner. Inside a row, the icon sits 7 px from the row's left edge and the
+  title 33 px, which puts them on the same columns as the text row's icon (10 px) and text
+  (36 px). Icons and text form two straight columns from the address down.
 - The surface only opens when there are rows to show, and shrinks back to the field when
   there are none. It is never shown empty.
 - The top row is selected (selected-row colors), so Return acts on it.
@@ -486,7 +506,8 @@ settings.
 
 ### Site settings
 
-- Opened from the icon at the left of the field.
+- Opened from the icon at the left of the field, which shows its pressed fill for as long as the
+  panel is open. The "Not secure" pill in its place does the same.
 - Header: favicon, domain, "Certificate" link.
 - Permissions (location, camera, microphone, notifications) with Ask / Allow / Block menus.
 - "Content blocking" switch, then "Blocked on this page" with a count, which drills in to
@@ -494,6 +515,9 @@ settings.
   lists" sit at the bottom of the drill-in.
 - "Cookies and site data" drill-in.
 - Footer: "Reset permissions", "All site settings".
+- A page that is not from a website (Ladybird's own pages, files, a new tab) shows the same
+  icon, and the panel shows only the page's icon and title, one line saying it has no site
+  settings, and "All site settings".
 
 ### Downloads
 
@@ -566,6 +590,22 @@ settings.
   - Sent or deleted rows disappear. An empty list says "No crash reports waiting".
   - A "Crash report settings" link at the bottom goes to Settings → Feedback.
 
+### Sandbox off
+
+When Ladybird runs with `--disable-sandbox`, every window shows a bar directly below the
+toolbar (or at the top of the page area in the sidebar layouts):
+
+- 32 px plus a `divider` line below, in the `toolbar` color, so it reads as part of the
+  chrome, not as a page banner. The page starts below it.
+- The `warning` icon (16 px) and one sentence in `text`: "The sandbox is off. Websites are
+  less isolated from your computer."
+- No close button, no action button, no amber fill. It can't be dismissed, because the state
+  can't be changed from inside the browser, and it should be in every screenshot that ends
+  up in a bug report.
+- Bug reports and crash reports include "sandbox: off" in their prefilled details.
+- Nothing else changes: no badge on the Ladybird button, no tint, nothing in the address
+  field (which describes the site, not the browser).
+
 ### Ladybird menu
 
 - 280 px wide, 6 px padding, 26 px rows. Groups, in order:
@@ -592,9 +632,9 @@ settings.
 
 ### New tabs
 
-New tabs are blank (`about:blank` styled in the `page` color, so dark mode never flashes
+New tabs are blank (`about:newtab` styled in the `page` color, so dark mode never flashes
 white). The tab is titled "New Tab", the address field is focused and empty, and the field
-never shows "about:blank".
+never shows "about:newtab".
 
 ### Ladybird pages
 
@@ -605,8 +645,10 @@ never shows "about:blank".
 - About: the logomark, "Ladybird" in 40 px with the release badge, one tagline, and a card
   with version, build and platform plus a Copy button. Nothing else.
 - Welcome (`about:welcome`): the logomark at 56 px (0.85 line, so it doesn't get heavy), the title, then one centered column, in this order: search engine (optional,
-  nothing preselected, engines in a new random order each time, so none is favored by its
-  place), tab layout, content blocking switch, "Start browsing" (enabled as soon as the
+  nothing preselected, engines in alphabetical order; shown by name only in a five-column
+  grid, never with logos or letter tiles, which
+  would mean shipping other companies' trademarks or contacting their servers before anyone
+  has chosen), Layout (all three layouts), Color, content blocking switch, "Start browsing" (enabled as soon as the
   current settings are loaded; it never waits for a choice).
 - Error pages: icon, title, one line of detail, buttons, centered like every other
   single-message page ("Report sent"). Security errors may use two lines, because the
@@ -621,13 +663,20 @@ never shows "about:blank".
   named "General" or "Other" collects settings nobody could find.
 - Appearance, top to bottom: Theme, Color theme, Website appearance, Force dark mode,
   Layout, Show bookmarks bar, Default page zoom.
+- Color theme is a row of round swatches. The first is System (a multicolor wheel, as in
+  macOS), selected by default: the browser follows the OS accent until someone picks a
+  color. Names live in tooltips and accessible names, never under the swatches. The
+  welcome page shows the same row under "Color", right after Layout, and picking a swatch
+  there recolors the real window around the page at once; that live change is the point of
+  having it on the welcome page.
 - Layout is three picture cards: Tabs on top, Tabs on the side, Everything in the sidebar.
   It is called Layout, not Tabs, because the third choice moves the toolbar too. Each
   label names what is different about it, and each picture draws the address field where
   it really is (in the toolbar row, or at the top of the sidebar). With Tabs on the side, a
   "Sidebar on: Left / Right" control appears below the cards. Everything in the sidebar
   is always on the left, where the traffic lights are. The welcome page
-  uses the same heading and labels.
+  offers the same three cards, with the same heading, labels and pictures; in its
+  three-column grid they line up with the search engine buttons above.
 - Settings that change how websites look (Website appearance, Force dark mode, zoom) live
   in Appearance, next to the browser's own look, not in a separate section.
 - Permissions: one row per permission (camera, microphone, location, notifications, …),
@@ -724,7 +773,7 @@ zoom chip, drag and drop) is on the canvas's motion spec board.
 | Situation | Behavior |
 |---|---|
 | Tooltips | After 500 ms of hover. Once one has shown, neighbouring tooltips appear at once for the next 1.5 s. |
-| Tab close | Every tab except pinned tabs always shows its ×. A tab too narrow for both its favicon and its × shows only its favicon, and once selected, its × in the favicon's place. Nothing appears or moves on hover. Middle-click anywhere on a tab closes it. In the collapsed sidebar rail the × stays a hover badge, so favicons aren't covered. |
+| Tab close | Every tab except pinned tabs always shows its ×. A tab too narrow for both its favicon and its × shows only its favicon, and once selected, its × in the favicon's place. Nothing appears or moves on hover; the × of an inactive tab only goes from dimmed to full opacity. Middle-click anywhere on a tab closes it. In the collapsed sidebar rail the × stays a hover badge, so favicons aren't covered. |
 | Width lock | After closing a tab by clicking, tab widths stay fixed until the pointer leaves the strip, plus 300 ms, so the next × lands under the cursor. |
 | Dragging tabs | Starts after 4 px. The tab stays in the strip and slides along it until pulled 40 px away (up or down; sideways out of the sidebar in vertical mode), then comes loose as a window preview. Esc cancels. |
 | Dropping | A link, URL or file dropped on the strip opens a new tab at the marker; on the bookmarks bar it becomes a bookmark; on the page, the page decides. |

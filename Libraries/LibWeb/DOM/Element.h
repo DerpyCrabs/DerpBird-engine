@@ -12,6 +12,7 @@
 #include <AK/Concepts.h>
 #include <AK/Error.h>
 #include <AK/Optional.h>
+#include <AK/Time.h>
 #include <AK/Utf16String.h>
 #include <LibGC/RootVector.h>
 #include <LibGfx/DecodedImageFrame.h>
@@ -373,6 +374,9 @@ public:
     // elements keep 0, which is what makes them free.
     [[nodiscard]] CSS::StyleNodeID style_node_id() const { return m_style_node_id; }
     void set_style_node_id(CSS::StyleNodeID);
+
+    GC::Ptr<Element> implicit_anchor_element() const;
+    void set_implicit_anchor_element(GC::Ptr<Element>);
     // Tells the hover of the render clock what link this element is, as its href or style node changed.
     void update_hover_link();
     void record_style_environment_change();
@@ -442,7 +446,6 @@ public:
     CSS::RequiredInvalidationAfterStyleChange compose_style_pseudo_element_records(Layout::BegunRead const& read, u16 composed, u16 transition_steps, Array<CSS::InstalledStyle, computed_pseudo_elements.size()> const& before_change_styles);
 
     void set_needs_layout_tree_rebuild(Layout::BegunRead const& read, SetNeedsLayoutTreeUpdateReason, CSS::LayoutTreeRebuildRoot);
-    bool apply_box_presence_change_in_place(Layout::BegunRead const& read, SetNeedsLayoutTreeUpdateReason);
 
     Optional<CSS::PseudoElement> associated_shadow_host_pseudo_element() const;
     void set_associated_shadow_host_pseudo_element(CSS::PseudoElement pseudo_element);
@@ -697,8 +700,7 @@ public:
     bool child_style_uses_tree_counting_function() const { return m_child_style_uses_tree_counting_function; }
     void set_child_style_uses_tree_counting_function() { m_child_style_uses_tree_counting_function = true; }
 
-    // NOTE: The function is wrapped in a GC::HeapFunction immediately.
-    HTML::TaskID queue_an_element_task(HTML::Task::Source, Function<void()>, GC::Ptr<GC::Function<void()>> discard_steps = {});
+    HTML::TaskID queue_an_element_task(HTML::Task::Source, GC::Ref<GC::Function<void()>>, GC::Ptr<GC::Function<void()>> discard_steps = {});
 
     bool is_void_element() const;
     bool serializes_as_void() const;
@@ -708,7 +710,8 @@ public:
     [[nodiscard]] Vector<CSSPixelRect> get_client_rects() const;
 
     [[nodiscard]] CSSPixelRect bounding_client_rect_assuming_layout_clean() const;
-    [[nodiscard]] CSSPixelRect bounding_client_rect_assuming_layout_clean(Layout::BegunRead const& read, Compositing::AccumulatedVisualContextTree const&) const;
+    // The same, with the compositor's animations sampled at the time, as the screen shows them then.
+    [[nodiscard]] CSSPixelRect bounding_client_rect_assuming_layout_clean(Layout::BegunRead const& read, MonotonicTime visual_animation_sample_time) const;
 
     // Which principal box this element asks for, before its computed style has a say.
     virtual CSS::ElementBoxKind box_kind() const;
@@ -733,7 +736,6 @@ public:
         Yes,
     };
     bool is_potentially_scrollable(TreatOverflowClipOnBodyParentAsOverflowHidden) const;
-    bool is_scroll_container() const;
     bool is_viewport_propagation_source() const;
 
     double scroll_top() const;
@@ -991,6 +993,7 @@ protected:
     struct RareData;
 
 private:
+    void publish_implicit_anchor_element();
     void bump_dom_tree_version_for_attribute_change();
     void clear_custom_highlight_styles();
     // The attributes of an element, in order, in the same allocation as their count and capacity.

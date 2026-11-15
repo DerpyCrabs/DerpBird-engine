@@ -565,6 +565,8 @@ impl ScopeTable {
 pub struct SyntaxTree {
     /// What stays of the source once the tree is gone.
     pub(crate) script: Arc<ScriptData>,
+    /// The text of the source, which stays as it is for as long as the tree holds it.
+    pub(crate) source: ak::Utf16String,
     pub(crate) ast: Ast,
     pub(crate) root: u32,
     pub(crate) first_token_start: u32,
@@ -635,7 +637,7 @@ impl SyntaxTree {
     }
 
     fn source_text(&self) -> Utf16View<'_> {
-        Utf16View::of_string(&self.script.positions.source)
+        Utf16View::of_string(&self.source)
     }
 
     pub(crate) fn source_units(&self, start: u32, end: u32) -> Utf16View<'_> {
@@ -719,10 +721,7 @@ impl SyntaxTree {
     fn is_proto_key(&self, key: u32) -> bool {
         match self.tag(key) {
             tag::IDENT => self.a(key) == N_PROTO,
-            tag::STR => {
-                self.string_units(key).length_in_code_units() >= 9
-                    && self.string_value(key).to_utf16().as_ref() == utf16!("__proto__")
-            }
+            tag::STR => literals::string_literal_text(self.string_units(key)).view() == "__proto__",
             _ => false,
         }
     }
@@ -952,7 +951,7 @@ impl SyntaxTree {
                 let extra = self.b(node);
                 let start = self.pos(node);
                 let has_super_class = self.extra(extra) != 0;
-                self.synthetic_function(
+                let mut function = self.synthetic_function(
                     (name != NONE).then(|| self.plain_identifier(Name(name), start)),
                     start,
                     self.extra(extra + 4),
@@ -963,7 +962,10 @@ impl SyntaxTree {
                         first_position: 0,
                         rest_of_default_constructor: has_super_class.then_some(start),
                     },
-                )
+                );
+                // NB: A default constructor reads neither `this` nor `super` through an environment.
+                function.parsing_insights.uses_this_from_environment = false;
+                function
             }
             FunctionSource::ClassFieldInitializer => {
                 let initializer = self.b(node);

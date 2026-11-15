@@ -3,8 +3,8 @@
 #include "DerpBirdTaskService.h"
 #include <QStandardPaths>
 #include <QSaveFile>
-#include <LibWebView/Application.h>
-#include <LibWebView/BookmarkStore.h>
+#include <UI/Qt/Application.h>
+#include <UI/Qt/BookmarkStore.h>
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/HistoryStore.h>
 #include <LibWebView/Profile.h>
@@ -23,7 +23,7 @@ public:
         , m_worker(parse, [](auto const&) -> ErrorOr<size_t> { return 1; }, {}, 1, 300000) { }
     static QString marker()
     {
-        return QString::fromUtf8(WebView::Application::profile().paths().data.characters()) + "/ImportWelcomeSeen";
+        return QString::fromUtf8(Application::the().derpbird_profile_paths().data.characters()) + "/ImportWelcomeSeen";
     }
     static QJsonArray profiles()
     {
@@ -61,7 +61,7 @@ public:
                 }
             }
         };
-        collect(collect, WebView::Application::bookmark_store().root_items());
+        collect(collect, Application::bookmark_store().root_items());
         request["known"] = known;
         auto submitted = m_worker.submit(move(request), [this](auto result) {
             if (result.is_error()) { finish(result.release_error()); return; }
@@ -69,7 +69,7 @@ public:
             auto converted = json(m_data);
             if (converted.is_error()) { finish(converted.release_error()); return; }
             if (auto items = converted.value().as_object().get_array("bookmarks"sv); items.has_value())
-                WebView::Application::bookmark_store().import_items(*items);
+                Application::bookmark_store().import_items(*items);
             m_history = m_data["history"].toArray(); m_tabs = m_data["tabs"].toArray();
             step();
         });
@@ -119,7 +119,7 @@ private:
     }
     void step()
     {
-        auto& store = *WebView::Application::default_session().history_store;
+        auto& store = Application::history_store();
         // Yield between bounded write batches so menus and input stay responsive.
         for (int count = 0; count < 10 && m_history_index < m_history.size(); ++count) {
             auto item = m_history[m_history_index++].toObject();

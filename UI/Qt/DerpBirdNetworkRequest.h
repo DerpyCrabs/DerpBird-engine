@@ -9,6 +9,7 @@
 #include <LibRequests/RequestClient.h>
 #include <LibRequests/Request.h>
 #include <LibURL/Parser.h>
+#include <LibURL/Site.h>
 #include <LibWeb/Page/DerpBirdValueProtocol.h>
 #include <LibWebView/Application.h>
 #include <QByteArray>
@@ -134,7 +135,9 @@ private:
         if (client.is_error()) { finish("error"sv); return; }
         m_body.clear();
         m_status = 0;
-        m_request = client.value()->start_request(m_method, m_url, *m_headers, m_upload.bytes(), HTTP::CacheMode::NoStore,
+        auto same_site = URL::Site::obtain(m_origin.origin()).is_same_site(URL::Site::obtain(m_url.origin()));
+        auto cookie_context = same_site ? HTTP::Cookie::SameSiteContext::same_site() : HTTP::Cookie::SameSiteContext {};
+        m_request = client.value()->start_request(m_method, m_url, cookie_context, *m_headers, m_upload.bytes(), HTTP::CacheMode::NoStore,
             m_anonymous ? HTTP::Cookie::IncludeCredentials::No : HTTP::Cookie::IncludeCredentials::Yes);
         if (!m_request) { finish("error"sv); return; }
         if (m_stream) m_request->set_body_delivery_paused(true);

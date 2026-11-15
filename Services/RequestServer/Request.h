@@ -62,6 +62,7 @@ public:
         NonnullRefPtr<HTTP::HeaderList> request_headers,
         ByteBuffer request_body,
         HTTP::Cookie::IncludeCredentials include_credentials,
+        HTTP::Cookie::SameSiteContext,
         Optional<Requests::RequestTransferLeaseKey>,
         Optional<u32> address_selection_hint,
         bool notify_on_cache_miss, bool suppress_response_cookies = false, u8 query_response_policy = 0);
@@ -85,7 +86,7 @@ public:
         ByteString method,
         NonnullRefPtr<HTTP::HeaderList> request_headers,
         ByteBuffer request_body,
-        HTTP::Cookie::IncludeCredentials include_credentials, bool suppress_response_cookies = false, u8 query_response_policy = 0);
+        HTTP::Cookie::IncludeCredentials include_credentials, HTTP::Cookie::SameSiteContext same_site_context, bool suppress_response_cookies = false, u8 query_response_policy = 0);
 
     static NonnullOwnPtr<Request> import(
         u64 request_id,
@@ -212,6 +213,7 @@ private:
         NonnullRefPtr<HTTP::HeaderList> request_headers,
         ByteBuffer request_body,
         HTTP::Cookie::IncludeCredentials include_credentials,
+        HTTP::Cookie::SameSiteContext,
         Optional<Requests::RequestTransferLeaseKey> = {});
 
     Request(
@@ -388,6 +390,7 @@ private:
     RefPtr<Core::Timer> m_response_policy_timer;
     bool m_suppress_response_cookies { false };
     HTTP::Cookie::IncludeCredentials m_include_credentials { HTTP::Cookie::IncludeCredentials::Yes };
+    HTTP::Cookie::SameSiteContext m_same_site_context;
 
     Optional<AlternativeService> m_alternative_service;
     bool m_alternative_services_disabled { false };

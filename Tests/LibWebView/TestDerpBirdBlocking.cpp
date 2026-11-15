@@ -990,7 +990,7 @@ TEST_CASE(response_body_waits_for_header_callback_even_during_nested_event_loop)
     BlockingHTTPServer server;
     auto client = TRY_OR_FAIL(WebView::Application::request_server_client());
     auto headers = HTTP::HeaderList::create();
-    auto request = client->start_request("GET"sv, URL::Parser::basic_parse(server.endpoint()).release_value(),
+    auto request = client->start_request("GET"sv, URL::Parser::basic_parse(server.endpoint()).release_value(), {},
         *headers, {}, HTTP::CacheMode::NoStore, HTTP::Cookie::IncludeCredentials::No);
     VERIFY(request);
     bool header_finished = false, early_body = false, finished = false, expired = false;

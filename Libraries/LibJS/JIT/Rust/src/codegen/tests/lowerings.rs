@@ -17,6 +17,7 @@ use crate::ir::Float64Function;
 use crate::snapshot::KeyedFeedbackSnapshot;
 use crate::snapshot::keyed_feedback_bits;
 use ak::math;
+use libjs_runtime_macros::jit_abi;
 
 /// What the fake slow paths here produce.
 const MARKER: u64 = (value::UNDEFINED_TAG as u64) << 48 | 0xDEAD_BEEF;
@@ -39,13 +40,29 @@ const INT32_RESULTS_FEEDBACK: u8 = 1 | 1 << 1 | 1 << 3;
 /// What `run_instruction_with()` results in for code that exited.
 const EXITED: u64 = (value::UNDEFINED_TAG as u64) << 48 | 0xE817;
 
+#[jit_abi]
 extern "C" fn marker_values(vm: *mut u64, pc: u32, dst: *mut u64, _lhs: u64, _rhs: u64) -> i64 {
     // SAFETY: Compiled code passes the address of a frame slot.
     unsafe { *dst = MARKER };
     continuation_after(vm, pc)
 }
 
-extern "C" fn marker_scalar(vm: *mut u64, pc: u32, _instruction: *const u8, _value: u64) -> SlowPathResult {
+/// With records, `value` is the record, whose outputs get the marker.
+#[jit_abi]
+extern "C" fn marker_scalar(vm: *mut u64, pc: u32, instruction: *const u8, value: u64) -> SlowPathResult {
+    // SAFETY: Compiled code passes a pointer to its instruction.
+    if unsafe { slow_path_takes_record(instruction) } {
+        let record = value as *mut u64;
+        // SAFETY: As above, and the record is in the JIT frame.
+        unsafe {
+            let opcode = OpCode::from_u8(*instruction).expect("compiled code passes an instruction");
+            for (index, field) in slow_path_layout(opcode).fields.iter().enumerate() {
+                if field.role == OperandRole::Out {
+                    *record.add(index) = MARKER;
+                }
+            }
+        }
+    }
     SlowPathResult {
         control: continuation_after(vm, pc),
         value: MARKER,
@@ -54,6 +71,7 @@ extern "C" fn marker_scalar(vm: *mut u64, pc: u32, _instruction: *const u8, _val
 
 /// A fake `libjs_jit_call` that writes `MARKER` into the destination of the
 /// `Call`.
+#[jit_abi]
 extern "C" fn marker_call(vm: *mut u64, frame: *mut u64, pc: u32) -> i64 {
     let Instruction::Call { dst, .. } = decoded(vm, pc) else {
         panic!("not a Call");
@@ -64,6 +82,7 @@ extern "C" fn marker_call(vm: *mut u64, frame: *mut u64, pc: u32) -> i64 {
 }
 
 /// Counts its calls, and writes `MARKER`.
+#[jit_abi]
 extern "C" fn marker_comparison(vm: *mut u64, pc: u32, dst: *mut u64, _lhs: u64, _rhs: u64) -> i64 {
     // SAFETY: The fake VM has a word for this, and compiled code passes the
     // address of a frame slot.
@@ -75,6 +94,7 @@ extern "C" fn marker_comparison(vm: *mut u64, pc: u32, dst: *mut u64, _lhs: u64,
 }
 
 /// Counts its calls, and jumps to the true target.
+#[jit_abi]
 extern "C" fn marker_jump(vm: *mut u64, _pc: u32, _lhs: u64, _rhs: u64, if_true: u32, _if_false: u32) -> i64 {
     // SAFETY: The fake VM has a word for this.
     unsafe { *vm.add(VM_SLOW_JUMPS_WORD) += 1 };
@@ -85,6 +105,7 @@ extern "C" fn marker_jump(vm: *mut u64, _pc: u32, _lhs: u64, _rhs: u64, if_true:
 /// calls in.
 const VM_SLOW_PUTS_WORD: usize = 9;
 
+#[jit_abi]
 extern "C" fn marker_put(
     vm: *mut u64,
     pc: u32,
@@ -103,6 +124,7 @@ extern "C" fn marker_put(
 
 /// Counts its calls like `marker_put`, and throws: the interpreter is to
 /// take over.
+#[jit_abi]
 extern "C" fn marker_throw(
     vm: *mut u64,
     _pc: u32,
@@ -118,11 +140,13 @@ extern "C" fn marker_throw(
 
 /// For reads of bindings, which only reach their slow paths where a binding
 /// is uninitialized: throws, and the interpreter is to take over.
+#[jit_abi]
 extern "C" fn throwing_binding_read(_vm: *mut u64, _pc: u32) -> SlowPathResult {
     SlowPathResult { control: -1, value: 0 }
 }
 
 /// For Increment and Decrement (one output) and their postfix forms (two).
+#[jit_abi]
 extern "C" fn marker_record(vm: *mut u64, pc: u32, instruction: *const u8, outputs: *mut u64, _input: u64) -> i64 {
     // SAFETY: `outputs` is the record in the JIT frame, with a word per field.
     unsafe {
@@ -151,6 +175,7 @@ const STRING_PROTOTYPE_CLASS: u64 = 0x7300;
 
 /// What the fake cache probes find: objects whose word 0 is 1 have the
 /// property 42 in every cache, and accept every store into their word 1.
+#[jit_abi]
 extern "C" fn fake_try_get_by_id_cache(base: u64, _cache: *const u64) -> u64 {
     let object = (base & ((1 << 48) - 1)) as *const u64;
     // SAFETY: The tests only probe with objects.
@@ -161,6 +186,7 @@ extern "C" fn fake_try_get_by_id_cache(base: u64, _cache: *const u64) -> u64 {
     }
 }
 
+#[jit_abi]
 extern "C" fn fake_try_put_by_id_cache(_vm: *mut u64, _pc: u32, _instruction: *const u8, values: *const u64) -> i64 {
     // SAFETY: The record has the base, then the value; the tests only probe
     // with objects.
@@ -639,6 +665,58 @@ fn binary_operations_on_two_operands() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn double_operations_on_values_that_die_at_them() {
+    // ((a0 * a1 - a1) / a0, then a1 minus that): each product, difference and quotient dies at the next operation,
+    // as its left operand or (last) its right one, whose output then takes its register.
+    let program = assemble(|_| {
+        vec![
+            Instruction::Enter,
+            Instruction::Mul {
+                arith_feedback: 0,
+                dst: r(5),
+                lhs: argument(0),
+                rhs: argument(1),
+            },
+            Instruction::Sub {
+                arith_feedback: 1,
+                dst: r(6),
+                lhs: r(5),
+                rhs: argument(1),
+            },
+            Instruction::Div {
+                arith_feedback: 2,
+                dst: r(7),
+                lhs: r(6),
+                rhs: argument(0),
+            },
+            Instruction::Sub {
+                arith_feedback: 3,
+                dst: r(5),
+                lhs: argument(1),
+                rhs: r(7),
+            },
+            Instruction::Return { value: r(5) },
+        ]
+    });
+    let (snapshot, compiled) = compile_program(&program, |snapshot| {
+        snapshot.executables[0].feedback.arith = vec![crate::snapshot::arith_feedback::DOUBLE; 4];
+    });
+    let numbers = [0.5, -1.25, 3.0, 1e300, -0.0, f64::INFINITY, f64::NAN, 7.75];
+    for lhs in numbers {
+        for rhs in numbers {
+            let (result, _) = instruction_result(run_compiled_program(
+                &snapshot,
+                &compiled,
+                &[double(lhs), double(rhs)],
+                |_| {},
+            ));
+            let expected = box_number(rhs - (lhs * rhs - rhs) / lhs);
+            assert_eq!(result, expected, "{lhs:?} {rhs:?}: got {result:#x}");
         }
     }
 }
@@ -1276,6 +1354,12 @@ fn fake_object_layout() -> RuntimeLayout {
         typeof_strings: crate::snapshot::TypeofStrings::default(),
         fly_string_cache: 0,
         fly_string_cache_mask: 0,
+        key_concatenation_cache: 0,
+        key_concatenation_cache_mask: 0,
+        key_concatenation_cache_entry_size: 0,
+        key_concatenation_cache_lhs: 0,
+        key_concatenation_cache_rhs: 0,
+        key_concatenation_cache_string: 0,
         numeric_string_cache: 0,
         numeric_string_cache_size: 0,
         large_numeric_string_cache: 0,
@@ -1435,12 +1519,10 @@ fn object_value(object: &[u64]) -> u64 {
 fn get_by_value(base: u64, index: u64) -> u64 {
     run_instruction(
         Instruction::GetByValue {
-            value_feedback: 0,
             keyed_feedback: 0,
             dst: r(5),
             base: argument(0),
             property: argument(1),
-            base_identifier: None,
             cache: 0,
         },
         &[base, index],
@@ -1459,7 +1541,6 @@ fn put_by_value(base: u64, index: u64, src: u64) -> u64 {
                 property: argument(1),
                 src: argument(2),
                 kind: 0,
-                base_identifier: None,
                 cache: 0,
             },
             Instruction::Return { value: c(0) },
@@ -1583,16 +1664,13 @@ fn typed_array_accesses_with_constant_indices() {
                         property: c(1),
                         src: argument(1),
                         kind: 0,
-                        base_identifier: None,
                         cache: 0,
                     },
                     Instruction::GetByValue {
-                        value_feedback: 0,
                         keyed_feedback: 0,
                         dst: r(5),
                         base: argument(0),
                         property: c(1),
-                        base_identifier: None,
                         cache: 0,
                     },
                     Instruction::Return { value: r(5) },
@@ -1729,11 +1807,9 @@ fn get_length() {
     let get_length = |base: u64| {
         run_instruction(
             Instruction::GetLength {
-                value_feedback: 0,
                 keyed_feedback: 0,
                 dst: r(5),
                 base: argument(0),
-                base_identifier: None,
                 cache: 0,
             },
             &[base],
@@ -2125,7 +2201,7 @@ fn create_variable() {
     // bindings, a mutable one and a strict immutable one.
     const NAMES: [u64; 2] = [0x100, 0x200];
     let flags = [BINDING_MUTABLE, 1];
-    let create = |environment: &FakeEnvironment, identifier: u32, mode: u32, is_immutable: bool, is_strict: bool| {
+    let create = |environment: &FakeEnvironment, identifier: u32, mode: u8, is_immutable: bool, is_strict: bool| {
         let program = assemble(|_| {
             vec![
                 Instruction::Enter,
@@ -2397,6 +2473,7 @@ fn global_variables_the_snapshot_knows() {
         bits,
         cell: None,
         intrinsic: None,
+        inline_executable: None,
         typed_array: None,
         has_instance: None,
     };
@@ -2480,6 +2557,20 @@ fn global_variables_the_snapshot_knows() {
     globals.named_properties[2] = value::NULL;
     let result = run_with_global_cache(&globals, &get, &[], unassigned, 99);
     assert_eq!((result.status, result.value), (RETURNED, object));
+
+    // A variable the cache found resolves, even a binding that is still
+    // uninitialized, and a property while the global object keeps its shape.
+    let resolve = Instruction::ResolveGlobalBinding {
+        dst: r(5),
+        identifier: crate::bytecode::IdentifierTableIndex(0),
+        cache: 1,
+    };
+    let result = run_with_global_cache(&globals, &resolve, &[], binding(1, true, None), 99);
+    assert_eq!((result.status, result.value), (RETURNED, value::TRUE));
+    let result = run_with_global_cache(&globals, &resolve, &[], property(shape, 2, value::int32(12)), 99);
+    assert_eq!((result.status, result.value), (RETURNED, value::TRUE));
+    let result = run_with_global_cache(&globals, &resolve, &[], property(shape + 8, 2, value::int32(12)), 99);
+    assert_eq!(result.status, EXITED);
 }
 
 #[test]
@@ -2556,6 +2647,7 @@ fn instance_of_global_functions_walks_prototype_chains() {
                     assigned: false,
                     value: Some(GlobalValueSnapshot {
                         bits: function_value,
+                        inline_executable: None,
                         cell: None,
                         intrinsic: None,
                         typed_array: None,
@@ -2768,12 +2860,10 @@ fn every_fast_path_compiles_for_both_architectures() {
                 src: dst,
             },
             Instruction::GetByValue {
-                value_feedback: 0,
                 keyed_feedback: 0,
                 dst,
                 base: argument(0),
                 property: argument(1),
-                base_identifier: None,
                 cache: 0,
             },
             Instruction::PutByValue {
@@ -2782,15 +2872,12 @@ fn every_fast_path_compiles_for_both_architectures() {
                 property: argument(1),
                 src,
                 kind: 0,
-                base_identifier: None,
                 cache: 0,
             },
             Instruction::GetLength {
-                value_feedback: 0,
                 keyed_feedback: 0,
                 dst,
                 base: argument(0),
-                base_identifier: None,
                 cache: 0,
             },
             Instruction::GetBinding {
@@ -2978,11 +3065,9 @@ impl FakeCachedObject {
     fn get(&self, base: u64) -> u64 {
         let (result, _) = self.run(
             Instruction::GetById {
-                value_feedback: 0,
                 dst: r(5),
                 base: argument(0),
                 property: crate::bytecode::PropertyKeyTableIndex(0),
-                base_identifier: None,
                 cache: 1,
             },
             &[base],
@@ -3000,7 +3085,6 @@ impl FakeCachedObject {
                 src: argument(1),
                 kind: 0,
                 cache: 1,
-                base_identifier: None,
             },
             &[base, value],
         );
@@ -3011,11 +3095,9 @@ impl FakeCachedObject {
     fn get_length(&self) -> u64 {
         let (result, _) = self.run(
             Instruction::GetLength {
-                value_feedback: 0,
                 keyed_feedback: 0,
                 dst: r(5),
                 base: argument(0),
-                base_identifier: None,
                 cache: 1,
             },
             &[self.value()],
@@ -3076,6 +3158,7 @@ struct FakeNativeResult {
 
 const NATIVE_GETTER_RESULT: u64 = (value::UNDEFINED_TAG as u64) << 48 | 0xFEED;
 
+#[jit_abi]
 extern "C" fn fake_native_getter(_vm: u64) -> FakeNativeResult {
     FakeNativeResult {
         value: NATIVE_GETTER_RESULT,
@@ -3123,7 +3206,7 @@ fn get_by_id_reads_direct_getter_wrappers_inline_from(compressed_field: bool) {
     let target = NativeCallTarget {
         function: CellId(function.as_ptr() as u64),
         realm: CellId(0x7000),
-        entry: fake_native_getter as *const () as u64,
+        entry: core::num::NonZeroU64::new(fake_native_getter as *const () as u64),
         direct_getter: Some(DirectGetterFields {
             wrapper_implementation: 80,
             implementation_value: if compressed_field { 20 } else { 16 },
@@ -3145,11 +3228,9 @@ fn get_by_id_reads_direct_getter_wrappers_inline_from(compressed_field: bool) {
         vec![
             Instruction::Enter,
             Instruction::GetById {
-                value_feedback: 0,
                 dst: r(5),
                 base: argument(0),
                 property: crate::bytecode::PropertyKeyTableIndex(0),
-                base_identifier: None,
                 cache: 1,
             },
             Instruction::Return { value: r(5) },
@@ -3192,6 +3273,7 @@ fn get_by_id_reads_direct_getter_wrappers_inline_from(compressed_field: bool) {
 /// argument it was called with.
 const VM_NATIVE_SETTER_CALL_WORDS: usize = 10;
 
+#[jit_abi]
 extern "C" fn fake_native_setter(vm: *mut u64) -> FakeNativeResult {
     // SAFETY: The VM's word 0 is the running frame, the setter's own, and the
     // fake VM has room for the words the call is recorded in.
@@ -3221,7 +3303,7 @@ fn put_by_id_calls_native_setters_of_prototypes() {
     let target = NativeCallTarget {
         function: CellId(function.as_ptr() as u64),
         realm: CellId(0x7000),
-        entry: fake_native_setter as *const () as u64,
+        entry: core::num::NonZeroU64::new(fake_native_setter as *const () as u64),
         direct_getter: None,
     };
     let mut entry = own(
@@ -3249,7 +3331,6 @@ fn put_by_id_calls_native_setters_of_prototypes() {
                 src: argument(1),
                 kind: 0,
                 cache: 1,
-                base_identifier: None,
             },
             Instruction::Return { value: c(0) },
         ]
@@ -3428,12 +3509,10 @@ fn get_by_value_of_string_characters() {
             vec![
                 Instruction::Enter,
                 Instruction::GetByValue {
-                    value_feedback: 0,
                     keyed_feedback: 0,
                     dst: r(5),
                     base: argument(0),
                     property: argument(1),
-                    base_identifier: None,
                     cache: 0,
                 },
                 Instruction::Return { value: r(5) },
@@ -3500,13 +3579,11 @@ fn get_by_value_of_string_characters() {
 /// `arguments`, into `r(5)`.
 fn builtin_call(this_value: Operand, arguments: Vec<Operand>) -> Instruction {
     Instruction::Call {
-        value_feedback: 0,
         call_feedback: 0,
         dst: r(5),
         callee: argument(0),
         this_value,
         argument_count: arguments.len() as u32,
-        expression_string: None,
         arguments,
     }
 }
@@ -3700,26 +3777,32 @@ fn math_builtin_calls() {
     }
 }
 
+#[jit_abi]
 extern "C" fn fake_exp(number: f64) -> f64 {
     math::exp(number)
 }
 
+#[jit_abi]
 extern "C" fn fake_log(number: f64) -> f64 {
     math::log(number)
 }
 
+#[jit_abi]
 extern "C" fn fake_sin(number: f64) -> f64 {
     math::sin(number)
 }
 
+#[jit_abi]
 extern "C" fn fake_cos(number: f64) -> f64 {
     math::cos(number)
 }
 
+#[jit_abi]
 extern "C" fn fake_tan(number: f64) -> f64 {
     math::tan(number)
 }
 
+#[jit_abi]
 extern "C" fn fake_pow(base: f64, exponent: f64) -> f64 {
     math::pow(base, exponent)
 }
@@ -4055,12 +4138,10 @@ fn get_by_value_through_the_vm_keyed_lookup_cache() {
     let get = |fake: &FakeCachedObject, key: u64| {
         let (result, _) = fake.run(
             Instruction::GetByValue {
-                value_feedback: 0,
                 keyed_feedback: 0,
                 dst: r(5),
                 base: argument(0),
                 property: argument(1),
-                base_identifier: None,
                 cache: 1,
             },
             &[fake.value(), key],
@@ -4109,7 +4190,6 @@ fn put_by_value_through_the_vm_keyed_store_cache() {
                 property: argument(1),
                 src: argument(2),
                 kind: 0,
-                base_identifier: None,
                 cache: 1,
             },
             &[fake.value(), key, value],
@@ -4169,12 +4249,10 @@ fn get_by_value_through_megamorphic_property_caches() {
         let get = |fake: &FakeCachedObject, key: u64| {
             let (result, _) = fake.run(
                 Instruction::GetByValue {
-                    value_feedback: 0,
                     keyed_feedback: 0,
                     dst: r(5),
                     base: argument(0),
                     property: argument(1),
-                    base_identifier: None,
                     cache: 1,
                 },
                 &[fake.value(), key],
@@ -4234,11 +4312,9 @@ fn get_by_id_of_strings_through_property_caches() {
     let get = |base: u64, with_string_prototype: bool| {
         let (result, _) = string_prototype.run_with_prototypes(
             Instruction::GetById {
-                value_feedback: 0,
                 dst: r(5),
                 base: argument(0),
                 property: crate::bytecode::PropertyKeyTableIndex(0),
-                base_identifier: None,
                 cache: 1,
             },
             &[base],
@@ -4266,11 +4342,9 @@ fn get_by_id_of_numbers_and_booleans_through_property_caches() {
     let get = |base: u64, prototypes: PrimitivePrototypes| {
         let (result, _) = prototype.run_with_prototypes(
             Instruction::GetById {
-                value_feedback: 0,
                 dst: r(5),
                 base: argument(0),
                 property: crate::bytecode::PropertyKeyTableIndex(0),
-                base_identifier: None,
                 cache: 1,
             },
             &[base],
@@ -4314,11 +4388,9 @@ fn get_by_id_of_strings_through_megamorphic_property_caches() {
     string_prototype.caches[1] = data.as_ptr() as u64 | 2;
     let (result, _) = string_prototype.run_with_prototypes(
         Instruction::GetById {
-            value_feedback: 0,
             dst: r(5),
             base: argument(0),
             property: crate::bytecode::PropertyKeyTableIndex(0),
-            base_identifier: None,
             cache: 1,
         },
         &[fake_string(true)],
@@ -4355,12 +4427,10 @@ fn keyed_accesses_of_missing_and_added_properties_through_property_caches() {
     let get = |fake: &FakeCachedObject, key: u64| {
         let (result, _) = fake.run(
             Instruction::GetByValue {
-                value_feedback: 0,
                 keyed_feedback: 0,
                 dst: r(5),
                 base: argument(0),
                 property: argument(1),
-                base_identifier: None,
                 cache: 1,
             },
             &[fake.value(), key],
@@ -4376,7 +4446,6 @@ fn keyed_accesses_of_missing_and_added_properties_through_property_caches() {
                 property: argument(1),
                 src: argument(2),
                 kind: 0,
-                base_identifier: None,
                 cache: 1,
             },
             &[fake.value(), key, value],
@@ -4475,6 +4544,7 @@ const VM_ROPE_STRINGS_WORDS: [usize; 2] = [10, 11];
 
 /// The fake `RopeAllocationInfo::slow_path`: records its strings, and
 /// returns `ROPE_FROM_RUNTIME`.
+#[jit_abi]
 extern "C" fn fake_create_rope_string(vm: *mut u64, lhs: u64, rhs: u64) -> u64 {
     // SAFETY: The fake VM has room for the words the fakes here use.
     unsafe {
@@ -4575,4 +4645,108 @@ fn rope_strings_come_from_the_runtime_without_a_local_free_cell() {
         assert_eq!(result, string(ROPE_FROM_RUNTIME));
         assert_eq!(strings, [pointer(lhs), pointer(rhs)]);
     }
+}
+
+#[test]
+fn concatenations_that_are_keys_take_the_strings_the_vm_remembers() {
+    // The VM's cache of the concatenations that became keys, with entries
+    // of four words.
+    const MASK: u64 = 7;
+    let index = |lhs: u64, rhs: u64| (((lhs >> 4) ^ (rhs >> 4).wrapping_mul(33)) & MASK) as usize;
+    // A concatenation, which is the key of a keyed access if `key`, with a
+    // local free cell for a rope string.
+    let concatenate = |cache: &[u64], lhs: u64, rhs: u64, key: bool| {
+        let mut heap = vec![100u64, 10_000, 1000];
+        let block = FakeBlock::new(8, 0);
+        let address = block.cell().as_ptr() as u64;
+        let mut free_list = vec![0, address, address + 64, 64];
+        let program = assemble(|_| {
+            let mut instructions = vec![
+                Instruction::Enter,
+                Instruction::Add {
+                    arith_feedback: 0,
+                    dst: r(5),
+                    lhs: argument(0),
+                    rhs: argument(1),
+                },
+            ];
+            if key {
+                instructions.push(Instruction::GetByValue {
+                    keyed_feedback: 0,
+                    dst: r(6),
+                    base: argument(2),
+                    property: r(5),
+                    cache: 0,
+                });
+            }
+            instructions.push(Instruction::Return { value: r(5) });
+            instructions
+        });
+        let (result, _) = run_program_with_snapshot(
+            &program,
+            &[lhs, rhs, value::int32(0)],
+            |snapshot| {
+                snapshot.runtime.rope_allocation = crate::snapshot::RopeAllocationInfo {
+                    allocator: free_list.as_mut_ptr() as u64,
+                    cell_size: 64,
+                    template: vec![0x1234; 8],
+                    lhs_offset: 32,
+                    rhs_offset: 36,
+                    length_offset: 16,
+                    min_length: 8,
+                    slow_path: fake_create_rope_string as *const () as u64,
+                };
+                snapshot.runtime.layout.key_concatenation_cache = cache.as_ptr() as u64;
+                snapshot.runtime.layout.key_concatenation_cache_mask = MASK as u32;
+                snapshot.runtime.layout.key_concatenation_cache_entry_size = 32;
+                snapshot.runtime.layout.key_concatenation_cache_lhs = 0;
+                snapshot.runtime.layout.key_concatenation_cache_rhs = 8;
+                snapshot.runtime.layout.key_concatenation_cache_string = 16;
+                let allocation = &mut snapshot.runtime.object_allocation;
+                allocation.heap = heap.as_mut_ptr() as u64;
+                allocation.heap_allocated_bytes_offset = 0;
+                allocation.heap_threshold_offset = 8;
+                allocation.heap_total_allocated_bytes_offset = 16;
+                allocation.local_free_list_offset = 0;
+                allocation.freelist_next_offset = 0;
+                allocation.freelist_link_mask = FakeBlock::LINK_MASK;
+                allocation.local_cursor_offset = 8;
+                allocation.local_end_offset = 16;
+                allocation.local_cell_size_offset = 24;
+                // ArithFeedback::String.
+                snapshot.executables[0].feedback.arith = vec![1 << 3];
+            },
+            |_| {},
+        );
+        assert_eq!(result.status, RETURNED);
+        (result.value, u64::from(STRING_TAG) << 48 | address)
+    };
+    let (lhs, rhs) = (fake_string_of_length(5, 0), fake_string_of_length(4, 0));
+    let remembered = fake_string_of_length(9, 0);
+    let mut cache = vec![0u64; 4 * (MASK as usize + 1)];
+
+    // Nothing is remembered: a rope string.
+    let (result, rope) = concatenate(&cache, lhs, rhs, true);
+    assert_eq!(result, rope);
+
+    // The string that is remembered for both strings is the key.
+    let entry = 4 * index(lhs, rhs);
+    cache[entry..entry + 3].copy_from_slice(&[lhs, rhs, remembered]);
+    assert_eq!(concatenate(&cache, lhs, rhs, true).0, remembered);
+
+    // Other concatenations make rope strings, and so does a key whose
+    // entry remembers another string on either side.
+    let (result, rope) = concatenate(&cache, lhs, rhs, false);
+    assert_eq!(result, rope);
+    for other in [[rhs, rhs], [lhs, lhs]] {
+        cache[entry..entry + 2].copy_from_slice(&other);
+        let (result, rope) = concatenate(&cache, lhs, rhs, true);
+        assert_eq!(result, rope);
+    }
+
+    // Short strings never come from this cache.
+    let (short_lhs, short_rhs) = (fake_string_of_length(3, 0), fake_string_of_length(4, 0));
+    let entry = 4 * index(short_lhs, short_rhs);
+    cache[entry..entry + 3].copy_from_slice(&[short_lhs, short_rhs, remembered]);
+    assert_eq!(concatenate(&cache, short_lhs, short_rhs, true).0, MARKER);
 }

@@ -21,7 +21,6 @@
 #include <LibWeb/Bindings/Forward.h>
 #include <LibWeb/Bindings/IdleRequest.h>
 #include <LibWeb/DOM/EventTarget.h>
-#include <LibWeb/EventTiming/EventTiming.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/BarProp.h>
@@ -74,8 +73,8 @@ WEB_API JS::Value window_named_item_value(WrapperWorld&, JS::Realm&, HTML::Windo
 namespace Web::HTML {
 
 class IdleCallback;
-using AnimationFrameCallbackHandler = Function<void(double)>;
-using IdleCallbackHandler = Function<JS::Completion(GC::Ref<RequestIdleCallback::IdleDeadline>)>;
+using AnimationFrameCallbackHandler = GC::Ref<GC::Function<void(double)>>;
+using IdleCallbackHandler = GC::Ref<GC::Function<JS::Completion(GC::Ref<RequestIdleCallback::IdleDeadline>)>>;
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#specifier-resolution-record
 // A specifier resolution record is a struct. It has the following items:
@@ -295,6 +294,10 @@ public:
 
     void consume_history_action_user_activation();
 
+    // The system clipboard data that the paste event this window is dispatching pastes, if it pastes the clipboard.
+    Vector<Clipboard::SystemClipboardItem> const* system_clipboard_data_being_pasted() const { return m_system_clipboard_data_being_pasted; }
+    void set_system_clipboard_data_being_pasted(Vector<Clipboard::SystemClipboardItem> const* data) { m_system_clipboard_data_being_pasted = data; }
+
     // Steps 4 and 5 of both consumptions for the windows a page hosts. The UI process runs this in every page of the
     // tab, since the navigables of top's active document span its pages.
     static void consume_user_activation_of_windows_hosted_by(Page&, UserActivationConsumption);
@@ -313,8 +316,6 @@ public:
     bool find(Utf16View string);
 
     static void for_each_active(Function<IterationDecision(Window&)> callback);
-
-    EventTiming::WindowEventTimingState& event_timing_state() { return m_event_timing_state; }
 
     // https://w3c.github.io/largest-contentful-paint/#has-dispatched-scroll-event
     bool has_dispatched_scroll_event() const { return m_has_dispatched_scroll_event; }
@@ -391,6 +392,8 @@ private:
     // https://html.spec.whatwg.org/multipage/interaction.html#last-history-action-activation-timestamp
     HighResolutionTime::DOMHighResTimeStamp m_last_history_action_activation_timestamp { AK::Infinity<double> };
 
+    Vector<Clipboard::SystemClipboardItem> const* m_system_clipboard_data_being_pasted { nullptr };
+
     // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-window-status
     // When the Window object is created, the attribute must be set to the empty string. It does not do anything else.
     Utf16String m_status;
@@ -404,8 +407,6 @@ private:
 
     // https://html.spec.whatwg.org/multipage/obsolete.html#dom-external
     GC::Ptr<External> m_external;
-
-    EventTiming::WindowEventTimingState m_event_timing_state;
 
     // https://w3c.github.io/largest-contentful-paint/#has-dispatched-scroll-event
     // Each Window has has dispatched scroll event, a boolean which is initially set to false.

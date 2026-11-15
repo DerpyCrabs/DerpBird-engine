@@ -30,8 +30,10 @@
 #include <LibUnicode/TimeZone.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/Fetch/Fetching/FetchEngine.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/Scripting/Agent.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/Internals/Internals.h>
@@ -47,6 +49,7 @@
 #include <WebContent/PageClient.h>
 #include <WebContent/WebContentCompositorHost.h>
 #include <WebContent/WebDriverConnection.h>
+#include <WebContent/Worker/WorkerThread.h>
 
 #include <openssl/thread.h>
 
@@ -79,7 +82,7 @@ static void crash_signal_handler(int signo)
     }
     warnln("\n\033[31;1mCRASH\033[0m: Received signal {} ({})", name, signo);
     dump_backtrace(2, 100);
-    Core::Process::terminate_immediately(128 + signo);
+    Core::Process::terminate_immediately((WebWorker::is_worker_thread() ? WebView::worker_thread_crash_exit_status : 128) + signo);
 }
 
 static void install_crash_signal_handlers()
@@ -278,12 +281,12 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     Web::HTML::Window::set_internals_object_exposed(expose_internals_object);
     Web::HTML::WindowOrWorkerGlobalScopeMixin::set_experimental_interfaces_exposed(expose_experimental_interfaces);
 
-    Web::Bindings::initialize_main_thread_vm(Web::HTML::AgentType::SimilarOriginWindow);
+    Web::Bindings::set_collect_garbage_on_every_allocation_in_new_agents(collect_garbage_on_every_allocation);
+    Web::Bindings::initialize_agent(Web::HTML::AgentType::SimilarOriginWindow);
+    auto& agent = Web::HTML::surrounding_agent();
+    agent.fetch_executor = Web::Fetch::Fetching::create_inline_fetch_executor(agent.network_activity_observers);
     if (stats_log)
         Web::Bindings::main_thread_vm().heap().enable_stats();
-
-    if (collect_garbage_on_every_allocation)
-        Web::Bindings::main_thread_vm().heap().set_should_collect_on_every_allocation(true);
 
     if (log_all_js_exceptions) {
         JS::set_log_all_js_exceptions(true);
@@ -322,6 +325,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         stats_log->start_sampling([&heap](JsonObject& values) {
             heap.add_stats(values);
             Web::HTML::main_thread_event_loop().add_stats(values);
+            values.set("workers.agents"sv, Web::Bindings::worker_agent_count());
             values.set("fonts.system_fallback_cache_entries"sv, Gfx::system_fallback_font_cache_size());
         });
     }

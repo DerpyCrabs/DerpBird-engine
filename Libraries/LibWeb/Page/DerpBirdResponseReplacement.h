@@ -49,7 +49,7 @@ inline ErrorOr<Utf16String> replace_derpbird_json_response(Utf16String input, St
     global.define_direct_property("__input"_utf16_fly_string, JS::PrimitiveString::create(vm, move(input)), JS::default_attributes);
     global.define_direct_property("__kind"_utf16_fly_string, JS::PrimitiveString::create(vm, Utf16String::from_utf8(kind)), JS::default_attributes);
     global.define_direct_property("__query"_utf16_fly_string, JS::PrimitiveString::create(vm, Utf16String::from_utf8(query)), JS::default_attributes);
-    auto native_regex = JS::NativeFunction::create(realm, [&budget](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+    auto native_regex = JS::NativeFunction::create(realm, GC::create_function(GC::Heap::the(), GC::captures(budget), [](auto& budget, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
         for (size_t i = 0; i < 4; ++i) {
             if (!vm.argument(i).is_string()) return vm.throw_completion<JS::TypeError>("Invalid JSON regex input"_utf16);
         }
@@ -69,7 +69,7 @@ inline ErrorOr<Utf16String> replace_derpbird_json_response(Utf16String input, St
         if (result.is_error()) return vm.throw_completion<JS::TypeError>("JSON regex limit or invalid pattern"_utf16);
         if (test_only) return JS::Value(result.value().length_in_code_units() > input_length);
         return JS::PrimitiveString::create(vm, result.release_value());
-    }, 5, "__nativeRegex"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
+    }), 5, "__nativeRegex"_utf16_fly_string, GC::Ptr<JS::Realm> { &realm });
     global.define_direct_property("__nativeRegex"_utf16_fly_string, native_regex, JS::default_attributes);
     auto source = Utf16String::from_utf8(derpbird_json_response_runtime);
     auto script = JS::Script::parse(source.utf16_view(), realm);

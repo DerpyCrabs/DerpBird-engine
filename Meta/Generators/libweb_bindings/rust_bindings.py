@@ -26,6 +26,7 @@ from typing import Tuple
 
 from Generators.libweb_bindings.context import GenerationContext
 from Generators.libweb_bindings.includes import GeneratedIncludes
+from Generators.libweb_bindings.json_conversions import write_rust_dictionary_json_conversions
 from Generators.libweb_bindings.operations import idl_type_is_json_type
 from Generators.libweb_bindings.operations import operation_is_default_to_json
 from Generators.libweb_bindings.rust_members import RustAttribute
@@ -794,7 +795,11 @@ def implementation_method_signatures(
                 signatures.append(f"fn {attribute.setter_method}(&self, cx: &mut CallContext, value: Value)")
             continue
         if not attribute.attribute.inherit:
-            result_type = rust_type(attribute.attribute.type, context, what, is_result=True)
+            result_type = (
+                "Value"
+                if attribute.returns_js_value
+                else rust_type(attribute.attribute.type, context, what, is_result=True)
+            )
             signatures.append(
                 f"fn {attribute.getter_method}(&self, cx: &mut CallContext) -> WebIdlResult<{result_type}>"
             )
@@ -877,6 +882,14 @@ def implementation_method_signatures(
             )
     if members.named_properties is not None:
         signatures.append("fn supported_property_names(&self, cx: &mut CallContext) -> Vec<Utf16String>")
+    for attribute in members.static_attributes:
+        what = f"{interface.name}.{attribute.attribute.name}"
+        result_type = (
+            "Value"
+            if attribute.returns_js_value
+            else rust_type(attribute.attribute.type, context, what, is_result=True)
+        )
+        signatures.append(f"fn {attribute.getter_method}(cx: &mut CallContext) -> WebIdlResult<{result_type}>")
     for operation_set in members.static_operation_sets:
         for overload in operation_set.overloads:
             what = f"{interface.name}.{operation_set.name}()"
@@ -1124,9 +1137,9 @@ RUST_BINDINGS_IMPORTS = """    #![allow(unused_imports)]
     };
 
     use crate::bindings::conversions::{
-        ArrayBufferView, BufferSource, BufferSourceRules, CppInterface, EmptyDictionary, FromJs, ToJs, UsvString,
+        ArrayBufferView, BufferSource, BufferSourceRules, ByteString, CppInterface, EmptyDictionary, FromJs, ToJs, UsvString,
         frozen_array_to_js, implements_cpp_interface, iterator_method, record_from_js, record_to_js, rooted_sequence_to_js,
-        sequence_from_js, sequence_to_js, to_array_buffer_view, to_boolean, to_buffer_source, to_cpp_interface,
+        sequence_from_js, sequence_to_js, to_array_buffer_view, to_boolean, to_buffer_source, to_byte_string, to_cpp_interface,
         to_cpp_interface_in_union, to_dom_string,
         to_dom_string_treating_null_as_empty, to_double, to_float, to_long, to_long_enforcing_range, to_long_long,
         to_long_long_clamping, to_long_long_enforcing_range, to_object, to_promise, to_typed_array,
@@ -1151,6 +1164,7 @@ RUST_BINDINGS_IMPORTS = """    #![allow(unused_imports)]
     };
     use crate::bindings::callback::{CallbackFunction, CallbackInterface, PromiseCallbackFunction};
     use crate::bindings::event_target::{event_handler_attribute, set_event_handler_attribute};
+    use crate::bindings::global_object::window_or_worker_global_scope_from_global_object;
     use crate::bindings::promise::{WebIdlPromise, create_rejected_promise};
     use crate::bindings::{CallContext, WebIdlResult, with_custom_element_reactions};
 """
@@ -1273,7 +1287,11 @@ def write_rust_interface(
         if attribute.event_type is not None:
             write_rust_event_handler_attribute(out, attribute)
             continue
-        conversion = rust_to_js_value(attribute.attribute.type, "result", "&cx", context, f"{interface.name}.{name}")
+        conversion = (
+            "Ok(result)"
+            if attribute.returns_js_value
+            else rust_to_js_value(attribute.attribute.type, "result", "&cx", context, f"{interface.name}.{name}")
+        )
         call = f"Implementation::{attribute.getter_method}(&implementation, &mut cx)"
         if attribute.attribute.inherit:
             call = inherited_attribute_getter_call(context, interface, attribute)
@@ -1342,6 +1360,9 @@ def write_rust_interface(
     if members.async_iterator is not None:
         write_rust_async_iterator(out, context, interface)
 
+    for attribute in members.static_attributes:
+        write_rust_static_attribute_getter(out, context, interface, attribute)
+
     for operation_set in members.static_operation_sets:
         write_rust_operation_set(out, context, interface, operation_set, write_rust_static_operation)
 
@@ -1375,13 +1396,23 @@ def write_rust_interface(
         is_secure_context_only = "SecureContext" in attribute.attribute.extended_attributes
         if attribute.is_cached:
             definition = f'define_cached_attribute(vm, realm, prototype, "{name}", {getter});'
-            out.write(secure_context_only_definition(definition, is_secure_context_only))
+            out.write(
+                member_exposure_definition(
+                    definition,
+                    secure_context_only=is_secure_context_only,
+                    exposure_condition=attribute.exposure_condition,
+                )
+            )
             defined_property_names.append(name)
             continue
         has_setter = not attribute.attribute.readonly or attribute.put_forwards is not None
         setter = f"raw_native!({attribute.setter_function})" if has_setter else "None"
         definition = f'define_attribute(vm, realm, prototype, "{name}", {getter}, {setter});'
-        out.write(secure_context_only_definition(definition, is_secure_context_only))
+        out.write(
+            member_exposure_definition(
+                definition, secure_context_only=is_secure_context_only, exposure_condition=attribute.exposure_condition
+            )
+        )
         defined_property_names.append(name)
     if interface.name == "CSSStyleProperties":
         out.write(
@@ -1392,7 +1423,13 @@ def write_rust_interface(
         function = operation_set.function
         length = operation_set.length
         definition = f'define_operation(vm, realm, prototype, "{name}", raw_native!({function}), {length});'
-        out.write(window_only_definition(definition, operation_set.is_window_only))
+        out.write(
+            member_exposure_definition(
+                definition,
+                secure_context_only=operation_set.is_secure_context_only,
+                exposure_condition=operation_set.exposure_condition,
+            )
+        )
         defined_property_names.append(name)
     for name in members.unimplemented_operation_names:
         out.write(f'        define_unimplemented_property(vm, prototype, "{name}");\n')
@@ -1400,7 +1437,7 @@ def write_rust_interface(
     if members.stringifier is not None:
         function = members.stringifier.function
         definition = f'define_operation(vm, realm, prototype, "toString", raw_native!({function}), 0);'
-        out.write(window_only_definition(definition, members.stringifier.is_window_only))
+        out.write(member_exposure_definition(definition, exposure_condition=members.stringifier.exposure_condition))
         defined_property_names.append("toString")
     if members.indexed_property_getter is not None:
         getter = members.indexed_property_getter.operation
@@ -1472,13 +1509,31 @@ def write_rust_interface(
     )
     if members.constants:
         out.write("        define_constants(vm, constructor, &CONSTANTS);\n")
+    for attribute in members.static_attributes:
+        definition = (
+            f'define_attribute(vm, realm, constructor, "{attribute.attribute.name}", '
+            f"raw_native!({attribute.getter_function}), None);"
+        )
+        out.write(
+            member_exposure_definition(
+                definition,
+                secure_context_only="SecureContext" in attribute.attribute.extended_attributes,
+                exposure_condition=attribute.exposure_condition,
+            )
+        )
     for operation_set in members.static_operation_sets:
         name = operation_set.name
         definition = (
             f'define_operation(vm, realm, constructor, "{name}", raw_native!({operation_set.function}), '
             f"{operation_set.length});"
         )
-        out.write(window_only_definition(definition, operation_set.is_window_only))
+        out.write(
+            member_exposure_definition(
+                definition,
+                secure_context_only=operation_set.is_secure_context_only,
+                exposure_condition=operation_set.exposure_condition,
+            )
+        )
     out.write("    }\n")
 
     for constructor in members.constructors:
@@ -1514,7 +1569,11 @@ def namespace_function_signatures(context: GenerationContext, interface: Interfa
     signatures = []
     for attribute in members.attributes:
         what = f"{interface.name}.{attribute.attribute.name}"
-        result_type = rust_type(attribute.attribute.type, context, what, is_result=True)
+        result_type = (
+            "Value"
+            if attribute.returns_js_value
+            else rust_type(attribute.attribute.type, context, what, is_result=True)
+        )
         signatures.append(f"fn {attribute.getter_method}(cx: &mut CallContext) -> WebIdlResult<{result_type}>")
     for operation_set in members.operation_sets:
         for overload in operation_set.overloads:
@@ -1566,7 +1625,11 @@ def write_rust_namespace(out: TextIO, context: GenerationContext, interface: Int
     )
     for attribute in members.attributes:
         what = f"{interface.name}.{attribute.attribute.name}"
-        conversion = rust_to_js_value(attribute.attribute.type, "result", "&cx", context, what)
+        conversion = (
+            "Ok(result)"
+            if attribute.returns_js_value
+            else rust_to_js_value(attribute.attribute.type, "result", "&cx", context, what)
+        )
         out.write(
             f"""
     fn {attribute.getter_function}(vm: &Vm) -> ThrowCompletionOr<Value> {{
@@ -1609,29 +1672,30 @@ def write_rust_namespace(out: TextIO, context: GenerationContext, interface: Int
             f'define_operation(vm, realm, object, "{operation_set.name}", raw_native!({operation_set.function}), '
             f"{operation_set.length});"
         )
-        out.write(window_only_definition(definition, operation_set.is_window_only))
+        out.write(
+            member_exposure_definition(
+                definition,
+                secure_context_only=operation_set.is_secure_context_only,
+                exposure_condition=operation_set.exposure_condition,
+            )
+        )
     if "WithInitializer" in interface.extended_attributes:
         out.write("        Implementation::initialize(&mut CallContext::new(vm, realm), object);\n")
     out.write("    }\n}\n")
 
 
-def secure_context_only_definition(definition: str, is_secure_context_only: bool) -> str:
-    """A statement of the steps that initialize an interface prototype object, which defines a [SecureContext] member
-    only if the realm is a secure context."""
-    if not is_secure_context_only:
+def member_exposure_definition(
+    definition: str, *, secure_context_only: bool = False, exposure_condition: Optional[str] = None
+) -> str:
+    """Defines a member on the interface or prototype object when it is exposed in the realm."""
+    conditions = []
+    if secure_context_only:
+        conditions.append("realm_is_secure_context(realm)")
+    if exposure_condition is not None:
+        conditions.append(exposure_condition)
+    if not conditions:
         return f"        {definition}\n"
-    return f"""        if realm_is_secure_context(realm) {{
-            {definition}
-        }}
-"""
-
-
-def window_only_definition(definition: str, is_window_only: bool) -> str:
-    """A statement of the steps that initialize an interface object or an interface prototype object, which defines a
-    member that only a Window has only if the global object of the realm is a Window."""
-    if not is_window_only:
-        return f"        {definition}\n"
-    return f"""        if realm_is_window(realm) {{
+    return f"""        if {" && ".join(conditions)} {{
             {definition}
         }}
 """
@@ -1644,7 +1708,7 @@ def write_default_to_json(out: TextIO, context: GenerationContext, interface: In
     # NB: The inheritance stack of the interface has the interface on top and the one it inherits from at the bottom,
     #     and collecting the attribute values of the stack pops it, https://webidl.spec.whatwg.org/#collect-attribute-values-of-an-inheritance-stack
     #     so the attributes of the interfaces that others inherit from are collected first.
-    for interface_in_chain in context.inheritance_stack(interface):
+    for interface_in_chain in reversed(context.inheritance_stack(interface)):
         if not any(operation_is_default_to_json(operation) for operation in interface_in_chain.regular_operations):
             continue
         if not is_implemented_in_rust(interface_in_chain):
@@ -1656,10 +1720,17 @@ def write_default_to_json(out: TextIO, context: GenerationContext, interface: In
         for attribute in rust_members(interface_in_chain).attributes:
             if not idl_type_is_json_type(attribute.attribute.type, context):
                 continue
+            # NB: Only the attributes that are exposed in the realm are collected.
+            definition = (
+                f"let value = {module}{attribute.getter_function}(vm)?; "
+                f'set_dictionary_member(&cx, result, &PropertyKey::from_utf8("{attribute.attribute.name}"), value)?;'
+            )
             values.write(
-                f"""        let value = {module}{attribute.getter_function}(vm)?;
-        set_dictionary_member(&cx, result, &PropertyKey::from_utf8("{attribute.attribute.name}"), value)?;
-"""
+                member_exposure_definition(
+                    definition,
+                    secure_context_only="SecureContext" in attribute.attribute.extended_attributes,
+                    exposure_condition=attribute.exposure_condition,
+                )
             )
     out.write(
         f"""
@@ -1992,6 +2063,29 @@ def write_rust_stringifier(out: TextIO, function: str, method: str) -> None:
         let result = Implementation::{method}(&implementation, &mut cx)
             .map_err(|exception| exception.throw_in_current_realm(cx.vm()))?;
         result.to_js(&cx)
+    }}
+"""
+    )
+
+
+def write_rust_static_attribute_getter(
+    out: TextIO, context: GenerationContext, interface: Interface, attribute: RustAttribute
+) -> None:
+    """The native function of the getter of a static attribute, which runs in the current realm,
+    https://webidl.spec.whatwg.org/#dfn-attribute-getter"""
+    what = f"{interface.name}.{attribute.attribute.name}"
+    conversion = (
+        "Ok(result)"
+        if attribute.returns_js_value
+        else rust_to_js_value(attribute.attribute.type, "result", "&cx", context, what)
+    )
+    out.write(
+        f"""
+    fn {attribute.getter_function}(vm: &Vm) -> ThrowCompletionOr<Value> {{
+        let mut cx = CallContext::new(vm, vm.current_realm().expect("a native function runs in a realm"));
+        let result = Implementation::{attribute.getter_method}(&mut cx)
+            .map_err(|exception| exception.throw_in_current_realm(cx.vm()))?;
+        {conversion}
     }}
 """
     )
@@ -2449,18 +2543,18 @@ pub(crate) mod definitions {
 
     use ak::Utf16String;
     use libjs_rust::api::{
-        ErrorKind, ErrorType, Gc, MarkedVec, Object, PropertyKey, ThrowCompletionOr, TypedArrayBase, TypedArrayKind,
+        ErrorKind, ErrorType, Gc, JSONObject, MarkedVec, Object, PropertyKey, ThrowCompletionOr, TypedArrayBase, TypedArrayKind, Utf16View,
         Value, Vm, is_host_instance_of,
     };
 
     use crate::bindings::CallContext;
     use crate::bindings::callback::{CallbackFunction, CallbackInterface, PromiseCallbackFunction};
     use crate::bindings::conversions::{
-        ArrayBufferView, BufferSource, BufferSourceRules, CppInterface, EmptyDictionary, FromJs, ToJs, UsvString,
+        ArrayBufferView, BufferSource, BufferSourceRules, ByteString, CppInterface, EmptyDictionary, FromJs, ToJs, UsvString,
         buffer_source_if, dictionary_member, dictionary_object, enumeration_value_to_js, implements_cpp_interface,
         frozen_array_to_js, iterator_method, record_from_js, record_to_js, rooted_sequence_to_js, sequence_from_iterable, sequence_from_js,
         sequence_to_js, throw_no_union_types_matched, to_array_buffer_view, to_boolean, to_buffer_source,
-        to_cpp_interface,
+        to_byte_string, to_cpp_interface,
         to_dom_string, to_dom_string_treating_null_as_empty, to_double, to_enumeration_value, to_float, to_long,
         to_long_enforcing_range, to_long_long, to_long_long_enforcing_range, to_object, to_typed_array,
         to_unrestricted_double, to_unrestricted_float, to_unsigned_long, to_unsigned_long_enforcing_range,
@@ -2470,18 +2564,16 @@ pub(crate) mod definitions {
         Interface, Ref, create_dictionary_object, implementation_if, implementation_of, set_dictionary_member,
         to_interface,
     };
+    use crate::bindings::new_global_object::{run_in_a_new_global_object, serialize_to_json_in_a_new_global_object};
 """
     )
     for name, directions in usage.rust_dictionaries.items():
         dictionary = context.dictionaries[name]
-        if dictionary.parent_name and directions.to_js:
-            raise UnsupportedByRustBindings(
-                f"The Rust bindings convert the dictionary {name}, which inherits from another dictionary, to a JS value"
-            )
         if directions.from_js:
             write_dictionary_from_js(out, context, dictionary)
         if directions.to_js:
             write_dictionary_to_js(out, context, dictionary)
+        write_rust_dictionary_json_conversions(out, context, dictionary)
     for name, directions in usage.rust_enumerations.items():
         enumeration = context.enumerations[name]
         if directions.from_js:

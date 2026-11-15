@@ -23,6 +23,7 @@ public:
     using Open = Function<ErrorOr<Handle>(WebView::WebContentPage&, URL::URL const&, JsonObject const&)>;
     using Completion = Function<void(ErrorOr<ByteBuffer>)>;
     Open on_open;
+    Function<void(WebView::WebContentPage&, URL::URL const&, JsonObject const&, Function<void(ErrorOr<Handle>)>)> on_open_async;
     explicit DerpBirdScriptTabs(QObject* parent) : QObject(parent) { }
     ErrorOr<void> dispatch(WebView::WebContentPage& page, QString const& token,
         Web::DerpBirdValueProtocol::Request const& request, Function<bool()> valid, Completion completion)
@@ -32,7 +33,7 @@ public:
         // Release revoked handles without closing their independent browser tabs.
         m_handles.removeIf([](auto const& item) { return !item.value()->valid(); });
         if (request.method == Protocol::Method::TabOpen || request.method == Protocol::Method::TabOpenLegacy) {
-            if (!on_open) return Error::from_string_literal("Tab host is unavailable");
+            if (!on_open && !on_open_async) return Error::from_string_literal("Tab host is unavailable");
             if (m_handles.contains(key) || m_handles.size() >= 256) return Error::from_string_literal("Too many or duplicate userscript tabs");
             size_t count = 0;
             for (auto const& item : m_handles) if (item->token == token) ++count;
@@ -49,9 +50,21 @@ public:
             if (auto insert = options.get("insert"sv); insert.has_value() && !insert->is_bool()
                 && (!options.get_integer<int>("insert"sv).has_value() || *options.get_integer<int>("insert"sv) < 0))
                 return Error::from_string_literal("Invalid tab insertion index");
-            auto handle = TRY(on_open(page, *url, options));
-            m_handles.insert(key, std::make_shared<Entry>(token, move(handle), move(valid)));
-            completion(Protocol::encode(Protocol::Response { Protocol::Kind::Revision, {}, {}, {}, 0 }));
+            if (on_open_async) {
+                auto entry = std::make_shared<Entry>(token, Handle {}, move(valid));
+                m_handles.insert(key, entry);
+                on_open_async(page, *url, options, [self = QPointer(this), entry, key, completion = move(completion)](ErrorOr<Handle> handle) mutable {
+                    if (!self) return;
+                    if (handle.is_error()) { self->m_handles.remove(key); completion(handle.release_error()); return; }
+                    entry->handle = handle.release_value();
+                    if (!entry->valid()) { self->m_handles.remove(key); return; }
+                    completion(Protocol::encode(Protocol::Response { Protocol::Kind::Revision, {}, {}, {}, 0 }));
+                });
+            } else {
+                auto handle = TRY(on_open(page, *url, options));
+                m_handles.insert(key, std::make_shared<Entry>(token, move(handle), move(valid)));
+                completion(Protocol::encode(Protocol::Response { Protocol::Kind::Revision, {}, {}, {}, 0 }));
+            }
             return {};
         }
         auto entry = m_handles.value(key);

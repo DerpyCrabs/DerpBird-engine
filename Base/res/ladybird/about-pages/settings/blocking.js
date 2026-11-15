@@ -159,6 +159,7 @@ enableContentBlocking.addEventListener("change", () => {
 });
 
 addSubscription.addEventListener("click", () => {
+    subscriptionUrl.value = ensureURLHasScheme(subscriptionUrl.value);
     if (!subscriptionUrl.reportValidity() || subscriptionUrl.value.length === 0) {
         return;
     }

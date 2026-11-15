@@ -135,7 +135,7 @@ public:
         size_t bytes = 0;
         for (auto const& cookie : jar.get_all_cookies()) {
             if ((!all_partitions && cookie.partition_key != partition)
-                || !HTTP::Cookie::cookie_matches_url(cookie, *url, *host, HTTP::Cookie::Source::Http)
+                || !HTTP::Cookie::cookie_matches_url(cookie, *url, *host, HTTP::Cookie::Source::Http, HTTP::Cookie::SameSiteContext::same_site())
                 || (name.has_value() && cookie.name != *name) || (domain.has_value() && cookie.domain != *domain)
                 || (path.has_value() && cookie.path != *path)
                 || (request.key == "list"sv && details.get_bool("secure"sv).has_value() && cookie.secure != *details.get_bool("secure"sv))

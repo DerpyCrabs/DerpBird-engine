@@ -5,6 +5,7 @@
 #include <AK/NonnullRefPtr.h>
 #include <AK/RefPtr.h>
 #include <LibWeb/Export.h>
+#include <LibGC/CaptureTraits.h>
 
 namespace Web {
 
@@ -13,6 +14,7 @@ namespace Web {
 // The active callback holds a weak owner, so it cannot prolong the document.
 class WEB_API DerpBirdInsertionAuthority final : public RefCounted<DerpBirdInsertionAuthority> {
 public:
+    GC_HOLDS_NO_CELL_EDGES;
     static NonnullRefPtr<DerpBirdInsertionAuthority> create(Function<bool()> active);
     static RefPtr<DerpBirdInsertionAuthority> resolve(u64 identity);
     ~DerpBirdInsertionAuthority();

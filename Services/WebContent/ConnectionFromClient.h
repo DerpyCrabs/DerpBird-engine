@@ -117,6 +117,7 @@ private:
     virtual void content_navigable_completely_finished_loading(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id) override;
     virtual void update_local_root_container_state(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Web::HTML::ReplicatedContainerState) override;
     virtual void close_server() override;
+    virtual void start_worker_thread(IPC::TransportHandle worker_transport, Web::HTML::AgentType agent_type) override;
     virtual Messages::WebContentServer::GetWindowHandleResponse get_window_handle(Web::PageId page_id) override;
     virtual void set_window_handle(Web::PageId page_id, String handle) override;
     virtual void run_webdriver_command(Web::PageId page_id, u64 command_id, Optional<Web::HTML::CrossProcessId> navigable_id, String name, JsonValue payload, Vector<String> arguments) override;
@@ -265,7 +266,8 @@ private:
     virtual void set_content_blockers(Core::AnonymousBuffer patterns) override;
 
     virtual void set_force_dark_settings(Web::PageId page_id, bool enabled, HashMap<String, bool> per_host) override;
-    virtual void set_autoplay_settings(Web::PageId page_id, Web::HTML::AutoplayPolicy policy, Vector<Utf16String> allowlist) override;
+    virtual void set_force_dark_for_local_roots(Web::PageId page_id, bool enabled) override;
+    virtual void set_autoplay_settings(Web::PageId page_id, Web::HTML::AutoplayPolicy policy, OrderedHashMap<String, Web::HTML::AutoplayPolicy> site_policies) override;
     virtual void set_transparent_background(Web::PageId, bool) override;
     virtual void set_preferred_color_scheme(Web::PageId page_id, Web::CSS::PreferredColorScheme) override;
     virtual void set_preferred_contrast(Web::PageId page_id, Web::CSS::PreferredContrast) override;
@@ -289,6 +291,7 @@ private:
     virtual void set_is_scripting_enabled(Web::PageId page_id, bool) override;
     virtual void set_zoom_level(Web::PageId page_id, double zoom_level) override;
     virtual void set_maximum_frames_per_second(Web::PageId page_id, double) override;
+    virtual void set_screen_shows_high_dynamic_range(Web::PageId page_id, bool) override;
     virtual void set_frame_rate_capped(Web::PageId page_id, bool) override;
     virtual void set_window_position(Web::PageId page_id, Web::DevicePixelPoint) override;
     virtual void set_window_size(Web::PageId page_id, Web::DevicePixelSize) override;
@@ -353,7 +356,7 @@ private:
     virtual void find_in_page_end(Web::PageId page_id) override;
 
     virtual void paste(Web::PageId page_id, Utf16String text) override;
-    virtual void paste_from_clipboard(Web::PageId page_id) override;
+    virtual void paste_from_clipboard(Web::PageId page_id, Vector<Web::Clipboard::SystemClipboardItem> system_clipboard_data) override;
     virtual void set_marked_text_from_input_method(Web::PageId page_id, Utf16String text) override;
     virtual void commit_text_from_input_method(Web::PageId page_id, Utf16String text, i32 replacement_start, i32 replacement_length) override;
     virtual void unmark_text_from_input_method(Web::PageId page_id) override;
@@ -373,11 +376,9 @@ private:
     virtual void cookies_changed(Web::PageId page_id, Vector<HTTP::Cookie::Cookie>) override;
     virtual void broadcast_channel_message(Web::HTML::BroadcastChannelMessage message) override;
     virtual void did_worker_agent_fail_loading_script(Web::HTML::WorkerAgentOwnerToken owner_token) override;
-    virtual void did_worker_agent_report_exception(Web::HTML::WorkerAgentOwnerToken owner_token, Utf16String message, Utf16String filename, u32 lineno, u32 colno) override;
     virtual void did_worker_agent_report_content_security_policy_violation(Web::HTML::WorkerAgentOwnerToken owner_token, u64 policy_index, String effective_directive, URL::URL resource) override;
     virtual void did_worker_agent_close(Web::HTML::WorkerAgentOwnerToken owner_token) override;
     virtual void did_worker_agent_die(Web::HTML::WorkerAgentOwnerToken owner_token) override;
-    virtual void did_worker_rtc_transform_encoded_audio_frame_written(Web::HTML::WorkerAgentOwnerToken owner_token, u64 transform_id, ByteBuffer payload, u32 ssrc, u8 payload_type, u32 rtp_timestamp, u16 sequence_number) override;
 
     virtual void request_close(Web::PageId page_id) override;
     virtual void request_close_preflight(Web::PageId page_id, u64 request_id) override;

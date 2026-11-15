@@ -99,12 +99,12 @@ public:
                  Binding { "addValueChangeListener"_utf16_fly_string, "GM.addValueChangeListener"sv, Protocol::Method::Subscribe, 2 },
                  Binding { "removeValueChangeListener"_utf16_fly_string, "GM.removeValueChangeListener"sv, Protocol::Method::Unsubscribe, 1 } }) {
             if (!grants.contains_slow(binding.grant)) continue;
-            auto function = JS::NativeFunction::create(*m_realm, [weak = make_weak_ptr(), method = binding.method](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+            auto function = JS::NativeFunction::create(*m_realm, GC::create_function(GC::Heap::the(), GC::captures(make_weak_ptr(), binding.method), [](auto& weak, auto& method, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
                 if (!weak)
                     return WebIDL::create_rejected_promise(*vm.current_realm(), WebIDL::InvalidStateError::create("Userscript world was revoked"_utf16))->promise();
                 NonnullRefPtr owner { *weak };
                 return owner->invoke(method, vm);
-            }, binding.length, binding.name, GC::Ptr<JS::Realm> { m_realm.ptr() });
+            }), binding.length, binding.name, GC::Ptr<JS::Realm> { m_realm.ptr() });
             gm.define_direct_property(binding.name, function, JS::default_attributes);
         }
     }
@@ -123,11 +123,11 @@ public:
                  Binding { "GM_addValueChangeListener"_utf16_fly_string, "GM_addValueChangeListener"sv, Protocol::Method::Subscribe, 2 },
                  Binding { "GM_removeValueChangeListener"_utf16_fly_string, "GM_removeValueChangeListener"sv, Protocol::Method::Unsubscribe, 1 } }) {
             if (!grants.contains_slow(binding.grant)) continue;
-            auto function = JS::NativeFunction::create(*m_realm, [weak = make_weak_ptr(), method = binding.method](JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
+            auto function = JS::NativeFunction::create(*m_realm, GC::create_function(GC::Heap::the(), GC::captures(make_weak_ptr(), binding.method), [](auto& weak, auto& method, JS::VM& vm) -> JS::ThrowCompletionOr<JS::Value> {
                 if (!weak) return vm.throw_completion<JS::TypeError>("Userscript world was revoked"_utf16);
                 NonnullRefPtr owner { *weak };
                 return WebIDL::throw_dom_exception_if_needed(vm, *vm.current_realm(), [&] { return owner->invoke_sync(method, vm); });
-            }, binding.length, binding.name, GC::Ptr<JS::Realm> { m_realm.ptr() });
+            }), binding.length, binding.name, GC::Ptr<JS::Realm> { m_realm.ptr() });
             (destination ? *destination : m_realm->global_object()).define_direct_property(binding.name, function, JS::default_attributes);
         }
     }
@@ -152,7 +152,7 @@ public:
             ++m_deferred_events;
             m_deferred_event_bytes += bytes.value().size();
             HTML::queue_global_task(HTML::Task::Source::Unspecified, m_realm->global_object(),
-                GC::create_function(GC::Heap::the(), [weak = make_weak_ptr(), bytes = bytes.release_value()] {
+                GC::create_function(GC::Heap::the(), GC::captures(make_weak_ptr(), bytes.release_value()), [](auto& weak, auto& bytes) {
                     if (!weak) return;
                     NonnullRefPtr owner { *weak };
                     --owner->m_deferred_events;
@@ -414,22 +414,27 @@ private:
         }
         return request;
     }
-    bool wait_for_sync(Function<bool()> ready, bool transport_timeout = true)
+    struct SyncWait final : RefCounted<SyncWait> {
+        GC_HOLDS_NO_CELL_EDGES;
+        bool timed_out { false };
+        Optional<ErrorOr<ByteBuffer>> response;
+    };
+    bool wait_for_sync(RefPtr<SyncWait> response = {}, bool transport_timeout = true)
     {
-        if (ready()) return active();
-        auto timed_out = std::make_shared<bool>(false);
+        if (response ? response->response.has_value() : !m_opening) return active();
+        auto timeout = adopt_ref(*new SyncWait);
         GC::Root timer = Platform::Timer::create_single_shot(GC::Heap::the(), AK::Duration::from_seconds(30),
-            GC::create_function(GC::Heap::the(), [timed_out] { *timed_out = true; }));
+            GC::create_function(GC::Heap::the(), GC::captures(timeout), [](auto& timeout) { timeout->timed_out = true; }));
         if (transport_timeout) timer->start();
         {
             // Follow synchronous XHR: pump platform IPC/timers, not author tasks,
             // rendering callbacks or microtasks. Other browser processes stay live.
             auto pause = HTML::main_thread_event_loop().pause(HTML::EventLoop::UpdateTheRendering::No);
             Platform::EventLoopPlugin::the().spin_until(GC::create_function(GC::Heap::the(),
-                [this, ready = move(ready), timed_out] { return ready() || *timed_out || !active(); }));
+                GC::captures(make_weak_ptr(), response, timeout), [](auto& owner, auto& response, auto& timeout) { return !owner || !owner->active() || timeout->timed_out || (response ? response->response.has_value() : !owner->m_opening); }));
         }
         timer->stop();
-        return !*timed_out && active();
+        return !timeout->timed_out && active();
     }
     WebIDL::ExceptionOr<JS::Value> invoke_sync(Protocol::Method method, JS::VM& vm)
     {
@@ -447,7 +452,7 @@ private:
             return JS::Object::create(*m_realm, m_realm->intrinsics().object_prototype());
         if (m_token.is_empty()) {
             if (!m_opening) open();
-            if (!wait_for_sync([this] { return !m_opening; }) || m_token.is_empty())
+            if (!wait_for_sync() || m_token.is_empty())
                 return WebIDL::InvalidStateError::create("Userscript storage could not open"_utf16);
         }
         request.asynchronous = false;
@@ -455,14 +460,14 @@ private:
         auto encoded = Protocol::encode(request);
         if (encoded.is_error()) return WebIDL::QuotaExceededError::create("Invalid userscript storage request"_utf16);
         // Shared state outlives a timeout/revocation and any late IPC completion.
-        auto response = std::make_shared<Optional<ErrorOr<ByteBuffer>>>();
-        auto sent = m_send(encoded.release_value(), [response](ErrorOr<ByteBuffer> result) { *response = move(result); });
+        auto response = adopt_ref(*new SyncWait);
+        auto sent = m_send(encoded.release_value(), [response](ErrorOr<ByteBuffer> result) { response->response = move(result); });
         // Network lifetime is controlled by details.timeout, abort and authority
         // revocation in the native provider, not the storage RPC deadline.
         bool network = method == Protocol::Method::Network || method == Protocol::Method::NetworkLegacy;
-        if (sent.is_error() || !wait_for_sync([response] { return response->has_value(); }, !network) || (*response)->is_error())
+        if (sent.is_error() || !wait_for_sync(response, !network) || response->response->is_error())
             return WebIDL::InvalidStateError::create("Userscript storage request failed"_utf16);
-        auto decoded = Protocol::decode_response((*response)->value().bytes());
+        auto decoded = Protocol::decode_response(response->response->value().bytes());
         if (decoded.is_error()) return WebIDL::InvalidStateError::create("Invalid userscript storage reply"_utf16);
         return result_value(request, fallback[0], decoded.release_value());
     }

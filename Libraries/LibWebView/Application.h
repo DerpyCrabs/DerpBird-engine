@@ -45,10 +45,10 @@
 #include <LibWebCommon/HTML/SessionHistoryEntryDescriptor.h>
 #include <LibWebCommon/HTML/VisibilityState.h>
 #include <LibWebCommon/Loader/NavigatorCompatibilityMode.h>
+#include <LibWebCommon/Loader/UserAgent.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/Page/PageId.h>
 #include <LibWebView/BlobURLStore.h>
-#include <LibWebView/BookmarkStore.h>
 #include <LibWebView/BrowserProcess.h>
 #include <LibWebView/BrowsingSession.h>
 #include <LibWebView/DownloadStore.h>
@@ -56,6 +56,7 @@
 #include <LibWebView/FileDownloader.h>
 #include <LibWebView/Forward.h>
 #include <LibWebView/Options.h>
+#include <LibWebView/PlatformFeatureDecisions.h>
 #include <LibWebView/Process.h>
 #include <LibWebView/ProcessManager.h>
 #include <LibWebView/Profile.h>
@@ -81,7 +82,6 @@ class DerpBirdFilterIncludes;
 
 struct ApplicationSettingsObserver;
 struct ApplicationPermissionManagerObserver;
-struct ApplicationBookmarkStoreObserver;
 
 class WEBVIEW_API Application : public DevTools::DevToolsDelegate {
     AK_MAKE_NONCOPYABLE(Application);
@@ -100,7 +100,6 @@ public:
     static Profile const& profile() { return *the().m_profile; }
     BrowserProcess& browser_process() { return *m_browser_process; }
     bool should_exit_after_profile_coordination() const { return m_should_exit_after_profile_coordination; }
-    static AutocompleteService& autocomplete_service() { return *the().m_autocomplete_service; }
 
     static BrowserOptions const& browser_options() { return the().m_browser_options; }
     void set_proxy_configuration(HTTP::ProxyConfiguration);
@@ -108,6 +107,9 @@ public:
     static WebContentOptions& web_content_options() { return the().m_web_content_options; }
 
     SpellChecker* spell_checker() { return m_spell_checker.ptr(); }
+
+    // Going through history, the application can have a reason to keep what was typed to reach a page.
+
     void set_spell_checker(OwnPtr<SpellChecker>);
 
     Translator* translator() { return m_translator.ptr(); }
@@ -116,7 +118,7 @@ public:
     static FontService& font_service() { return *the().m_font_service; }
     static FontServiceHost& font_service_host() { return *the().m_font_service_host; }
     JsonValue const& site_compatibility_data() const { return m_site_compatibility_data; }
-    bool blocks_pop_ups() const;
+    bool blocks_pop_ups() const { return m_blocks_pop_ups; }
     ErrorOr<void> reload_site_compatibility_data();
 
     bool claim_cpu_profiler(ProcessType);
@@ -140,10 +142,6 @@ public:
     virtual bool supports_private_browsing_windows() const { return false; }
     virtual bool supports_client_side_window_decorations() const { return false; }
     virtual bool supports_picture_in_picture() const;
-
-    // What startup recovery does with the windows the last run left open. Only a frontend that shows the launch plan
-    // asks for more than None.
-    virtual SessionLaunchPolicy launch_restore_policy() const;
 
     // Returns true if the platform sends momentum scroll events after a touchpad flick.
     // If it does not, the compositor makes the fling.
@@ -181,11 +179,6 @@ public:
     String user_agent_string() const;
     Web::NavigatorCompatibilityMode navigator_compatibility_mode() const;
 
-    static BookmarkStore& bookmark_store() { return *the().m_bookmark_store; }
-    void update_bookmark_action_for_current_web_view();
-    void update_actions_for_active_web_view();
-    void bookmarks_changed(Badge<ApplicationBookmarkStoreObserver>);
-
     void background_networking_settings_changed(Badge<ApplicationSettingsObserver>);
     ErrorOr<void> set_derpbird_user_scripts(JsonValue snapshot);
     bool publish_derpbird_web_requests(WebContentPage&, CanonicalDocument&, String const&, String const&, u64, JsonValue, bool);
@@ -194,12 +187,9 @@ public:
 
     // True unless the user has turned location off, or there's no way to find it.
     bool sites_can_ask_for_location() const;
-    bool sites_can_ask_for_microphone() const;
-    bool sites_can_ask_for_notifications() const;
     Core::GeolocationAuthorization geolocation_authorization();
-    void location_policy_changed(Badge<ApplicationSettingsObserver>);
-    void microphone_policy_changed(Badge<ApplicationSettingsObserver>);
-    void notifications_policy_changed(Badge<ApplicationSettingsObserver>);
+
+    void permission_settings_changed(Badge<ApplicationSettingsObserver>);
     void permissions_changed(Badge<ApplicationPermissionManagerObserver>, PermissionManager const&);
 
     bool content_blocking_enabled() const;
@@ -217,31 +207,13 @@ public:
     Optional<UnixDateTime> content_blocker_list_last_updated_at(StringView identifier) const;
     JsonObject content_blocker_list_update_status(StringView identifier) const;
 
-    struct BookmarkID {
-        String id;
-        Optional<String> target_folder_id;
-        Optional<String> parent_folder_id;
-    };
-    virtual Optional<BookmarkID> bookmark_item_id_for_context_menu() const { return {}; }
-    virtual void show_bookmark_context_menu(Gfx::IntPoint, Optional<BookmarkItem const&>, [[maybe_unused]] Optional<String const&> target_folder_id, [[maybe_unused]] Optional<String const&> parent_folder_id) { }
-
-    struct BookmarkDialogResult {
-        Variant<BookmarkItem::Bookmark, BookmarkItem::Folder> data;
-        Optional<String> target_folder_id;
-    };
-    using BookmarkPromise = Core::Promise<BookmarkDialogResult>;
-
-    virtual NonnullRefPtr<BookmarkPromise> display_add_bookmark_dialog(Optional<String const&> target_folder_id = {}) const;
-    virtual NonnullRefPtr<BookmarkPromise> display_edit_bookmark_dialog([[maybe_unused]] BookmarkItem const& current_bookmark, Optional<String const&> parent_folder_id) const;
-
-    virtual NonnullRefPtr<BookmarkPromise> display_add_bookmark_folder_dialog(Optional<String const&> default_title = {}, Optional<String const&> target_folder_id = {}) const;
-    virtual NonnullRefPtr<BookmarkPromise> display_edit_bookmark_folder_dialog([[maybe_unused]] BookmarkItem const& current_folder, Optional<String const&> parent_folder_id) const;
-
     static BrowsingSession& default_session() { return *the().m_default_session; }
 
     static NonnullRefPtr<BrowsingSession> session_for_new_view(IsPrivate);
 
-    static RefPtr<BrowsingSession> existing_session(IsPrivate);
+    // Whether the windows and tabs of this run are kept for the next one. A headless run, a browser that WebDriver drives,
+    // and one that logs process statistics never join a browser already running on their profile, so they keep none.
+    bool persists_sessions() const { return m_persists_sessions; }
 
     // A RequestServer client uses the cookies of the browsing session it was created for, whatever RequestServer says.
     void did_connect_request_server_client(int client_id, BrowsingSession&, RequestServer::SiteBinding);
@@ -253,7 +225,6 @@ public:
     Vector<int> request_server_client_ids_for_testing(BrowsingSession const&) const;
 
     // NB: Null once that session has ended, so a closed private tab is not offered back afterwards.
-    static SessionStore* session_store(IsPrivate);
 
     static ProcessManager& process_manager() { return *the().m_process_manager; }
 #if defined(AK_OS_WINDOWS)
@@ -270,11 +241,14 @@ public:
     ErrorOr<Core::GeolocationProvider::WatchId, Core::GeolocationError> start_watching_geolocation_position(Core::GeolocationProvider::SuccessCallback on_success, Core::GeolocationProvider::ErrorCallback on_error);
     void stop_watching_geolocation_position(Core::GeolocationProvider::WatchId);
 
+    bool same_origin_tabs_may_share_a_process() const;
     ErrorOr<NonnullRefPtr<WebContentPage>> open_page_for_new_tab(IsPrivate);
     struct ChildFrameWebContentProcess {
         NonnullRefPtr<WebContentClient> client;
         Web::PageId page_id { 0 };
     };
+    // For what may share a process with no page. It ends once nothing keeps it.
+    ErrorOr<NonnullRefPtr<WebContentClient>> launch_web_content_process_without_page(BrowsingSession&);
     ErrorOr<ChildFrameWebContentProcess> launch_child_frame_web_content_process(IsPrivate, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state);
     Web::PageId allocate_page_id();
     Web::HTML::CrossProcessIdAllocator allocate_cross_process_id_allocator();
@@ -282,7 +256,7 @@ public:
 
     void reset_private_browsing_session();
 
-    void notify_webdriver_window_created(String const& handle);
+    virtual void notify_webdriver_window_created(String const& handle);
     void notify_webdriver_window_closed(String const& handle);
     void webdriver_browser_connection_died(Badge<WebDriverBrowserConnection>);
     void push_webdriver_session_config(ViewImplementation&);
@@ -301,9 +275,24 @@ public:
     ErrorOr<void> try_register_compositor_context(WebContentClient&, Web::CompositorContextId, Optional<Web::PageId> page_id);
     void update_compositor_viewport(Web::CompositorContextId, Gfx::IntSize viewport_size, double device_pixel_ratio, Compositing::WindowResizingInProgress = Compositing::WindowResizingInProgress::No);
     void update_compositor_ui_overlays(Web::CompositorContextId, Compositing::UIOverlays const&);
+    void update_compositor_high_dynamic_range_surfaces();
     void update_compositor_display_metadata(Web::CompositorContextId, Optional<u64> display_id, double refresh_rate);
     void update_compositor_context_visibility(Web::CompositorContextId, Web::HTML::VisibilityState);
     void update_compositor_context_presents_from_cpu_memory(Web::CompositorContextId, bool);
+
+    struct RemoteLayer {
+        u64 id { 0 };
+        Compositing::RemoteLayerHostHandle host_handle;
+    };
+    // None where the Compositor offers no remote layers, or is gone.
+    Optional<RemoteLayer> create_remote_layer();
+    void destroy_remote_layer(u64 remote_layer_id);
+    void show_context_in_remote_layer(u64 remote_layer_id, Optional<Web::CompositorContextId>);
+    void set_remote_layer_fit(u64 remote_layer_id, Optional<Gfx::IntSize> fit_within);
+    void begin_synchronized_resize(u64 remote_layer_id, u64 token);
+    void await_synchronized_resize_frame(u64 remote_layer_id, u64 token, Gfx::IntSize);
+    void commit_synchronized_resize(u64 remote_layer_id, u64 token);
+    void take_frame_snapshot(Web::CompositorContextId, Optional<Gfx::IntSize> maximum_size, Function<void(Optional<Gfx::ShareableBitmap>)>);
     bool handle_and_dispatch_key_event_in_compositor(Web::CompositorContextId, Web::KeyEvent const&, bool allow_keyboard_scroll);
     bool handle_and_dispatch_pinch_event_in_compositor(Web::CompositorContextId, Web::PinchEvent const&);
     bool handle_and_dispatch_mouse_event_in_compositor(Web::CompositorContextId, Web::MouseEvent const&);
@@ -312,22 +301,17 @@ public:
     Function<void()> on_compositor_process_death;
 
     virtual Optional<ViewImplementation&> active_web_view() const { return {}; }
-    virtual Vector<ViewImplementation&> active_window_web_views() const { return {}; }
     virtual Optional<ViewImplementation&> activate_tab_with_url(URL::URL const&, URL::ExcludeFragment) const { return {}; }
 
-    virtual Optional<ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const { return {}; }
-    virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const;
+    virtual Optional<ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab, ViewImplementation const* = nullptr) const { return {}; }
+    virtual void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab, ViewImplementation const* source_view = nullptr) const;
+    virtual void activate_or_open_tab_with_url(URL::URL const&) const;
     virtual void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const;
     virtual void open_url_in_new_window(URL::URL const&, IsPrivate) { }
-    virtual void open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor, Web::HTML::ActivateTab) const;
+    virtual void open_navigation_in_new_tab(Web::HTML::PreparedNavigationDescriptor, Web::HTML::ActivateTab, ViewImplementation const* source_view = nullptr) const;
     virtual void open_navigation_in_new_window(Web::HTML::PreparedNavigationDescriptor, IsPrivate) { }
 
     virtual void resolve_external_url_handler(URL::URL const&, ExternalURLHandlerCallback callback) const { callback(nullptr); }
-
-    void activate_or_open_tab_with_url(URL::URL const&) const;
-    void open_bookmark_in_new_tab(String const& bookmark_id, Web::HTML::ActivateTab) const;
-    void open_bookmark_folder_in_new_tabs(String const& folder_id) const;
-    void open_bookmark_in_new_window(String const& bookmark_id, IsPrivate);
 
     Main::Arguments const& command_line_arguments() const { return m_arguments; }
 
@@ -346,10 +330,6 @@ public:
 
     virtual void display_download_confirmation_dialog(StringView download_name, LexicalPath const& path) const;
     virtual void display_error_dialog(StringView error_message) const;
-    ErrorOr<String> download_file_path_for_frontend_action(FileDownloader::Download const&) const;
-    ErrorOr<String> download_directory_path_for_frontend_action(FileDownloader::Download const&) const;
-    virtual void open_download(FileDownloader::Download const&) const;
-    virtual void show_download_in_folder(FileDownloader::Download const&) const;
 
     // FIXME: We should implement UI-agnostic platform APIs to interact with the system clipboard.
     enum class ClipboardType : u8 {
@@ -361,6 +341,9 @@ public:
     virtual void set_clipboard_text(String, ClipboardType = ClipboardType::Text);
 
     virtual Web::Clipboard::SystemClipboardItem clipboard_item() const { return m_clipboard; }
+    // The clipboard can be in another process, so reading it does not have to finish right away.
+    virtual void read_clipboard_text(ClipboardType, Function<void(Utf16String)>) const;
+    virtual void read_clipboard_item(Function<void(Web::Clipboard::SystemClipboardItem)>) const;
     virtual void insert_clipboard_item(Web::Clipboard::SystemClipboardItem item) { m_clipboard = move(item); }
     void insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresentation);
 
@@ -387,56 +370,21 @@ public:
     };
     NonnullRefPtr<Core::Promise<Empty>> clear_browsing_data(ClearBrowsingDataOptions const&);
 
-    Action& reload_action() { return *m_reload_action; }
-    Action& reload_bypassing_cache_action() { return *m_reload_bypassing_cache_action; }
-    Action& copy_selection_action() { return *m_copy_selection_action; }
-    Action& undo_action() { return *m_undo_action; }
-    Action& redo_action() { return *m_redo_action; }
+    // Options every page runs with, which the user can change while browsing.
+    void set_preferred_contrast(Web::CSS::PreferredContrast);
+    void set_preferred_motion(Web::CSS::PreferredMotion);
+    void set_user_agent_string(String);
+    void set_navigator_compatibility_mode(Web::NavigatorCompatibilityMode);
+    bool scripting_enabled() const { return m_scripting_enabled; }
+    void set_scripting_enabled(bool);
+    void set_blocks_pop_ups(bool);
+    void set_shows_line_box_borders(bool);
+    void set_shows_caret_hit_test_debug_overlay(bool);
 
-    // Reflects the active view's undo/redo availability in the shared actions; call when the
-    // active view changes.
-    void update_editing_history_actions();
-    Action& cut_selection_action() { return *m_cut_selection_action; }
-    Action& paste_action() { return *m_paste_action; }
-    Action& select_all_action() { return *m_select_all_action; }
-
-    Action& open_about_page_action() { return *m_open_about_page_action; }
-    Action& open_downloads_page_action() { return *m_open_downloads_page_action; }
-    Action& open_settings_page_action() { return *m_open_settings_page_action; }
-
-    Menu& zoom_menu() { return *m_zoom_menu; }
-    Action& zoom_in_action() { return *m_zoom_in_action; }
-    Action& zoom_out_action() { return *m_zoom_out_action; }
-    Action& reset_zoom_action() { return *m_reset_zoom_action; }
-
-    Action& force_dark_action() { return *m_force_dark_action; }
-    void update_force_dark_action();
-
-    Menu& color_scheme_menu() { return *m_color_scheme_menu; }
-    Menu& contrast_menu() { return *m_contrast_menu; }
-    Menu& motion_menu() { return *m_motion_menu; }
-
-    Action& toggle_vertical_tabs_expanded_action() { return *m_toggle_vertical_tabs_expanded_action; }
-
-    Action& toggle_menu_bar_action() { return *m_toggle_menu_bar_action; }
-
-    Menu& bookmarks_menu() { return *m_bookmarks_menu; }
-    virtual void toggle_bookmark_for_view(ViewImplementation&);
-
-    Menu& show_bookmarks_bar_menu() { return *m_show_bookmarks_bar_menu; }
-    Action& toggle_bookmark_bar_action() { return *m_toggle_bookmark_bar_action; }
-
-    Menu& history_menu() { return *m_history_menu; }
-
-    Menu& inspect_menu() { return *m_inspect_menu; }
-    Action& view_source_action() { return *m_view_source_action; }
-    void update_view_source_action();
-
-    Action& report_website_issue_action() { return *m_report_website_issue_action; }
-    void update_report_website_issue_action();
-
-    Menu& debug_menu() { return *m_debug_menu; }
-    Action& show_tab_performance_monitor_action() { return *m_show_tab_performance_monitor_action; }
+    bool devtools_enabled() const { return m_devtools; }
+    void dump_cookies() const;
+    void crash_compositor_process();
+    bool has_compositor_process() const { return m_compositor_client; }
 
     FileDownloader& file_downloader() { return m_file_downloader; }
 
@@ -461,6 +409,14 @@ public:
     Function<void(JsonValue const&)> on_derpbird_scripts_changed;
     Function<void(ViewImplementation&)> on_derpbird_audio_changed;
     Function<void(WebContentPage&, CanonicalDocument&, ByteBuffer, Function<void(ErrorOr<ByteBuffer>)>)> on_derpbird_value_request;
+    // Calls back once the features are decided from this launch's probe rather than from cached facts.
+    void when_platform_features_are_current(Function<void()>);
+    PlatformFeatures::ProcessFeatures platform_features_for(FeatureProcess) const;
+    // Every feature's decision and the facts they were made from, for people to read.
+    JsonObject platform_features_report() const;
+    // The same as header lines of a report that leaves the machine: the features of one process or of all of them, the
+    // GPU, and every fact but the device's identity.
+    ByteString describe_platform_features_for_report(Optional<FeatureProcess>) const;
 
 protected:
     explicit Application(Optional<ByteString> ladybird_binary_path = {});
@@ -484,12 +440,14 @@ protected:
 
     virtual void update_tabs_display() const { }
 
-    virtual void rebuild_bookmarks_menu() const { }
+    // The user cleared the history from this time on, so the application's records of it go too.
+    virtual void did_clear_history_since(UnixDateTime) const { }
 
-    virtual void on_recently_closed_entries_changed() const { }
+    // A run stopped by SIGINT or SIGTERM ends like a quit, rather than like a crash.
+    virtual void quit_for_signal();
 
-    virtual void on_devtools_enabled() const;
-    virtual void on_devtools_disabled() const;
+    virtual void on_devtools_enabled() const { }
+    virtual void on_devtools_disabled() const { }
 
     Main::Arguments& arguments() { return m_arguments; }
 
@@ -499,15 +457,27 @@ private:
     ErrorOr<void> create_profile(Optional<StringView> profile_name, Optional<StringView> profile_path, bool force_new_process, bool temporary_profile);
     void create_mach_port_server(ByteString const& profile_identity);
     void update_website_color_scheme();
-    ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(IsPrivate, Web::PageId initial_page_id, Optional<Web::HTML::CrossProcessId> navigable_to_adopt = {}, Optional<Web::HTML::CrossProcessId> initial_document_state_id = {}, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables = {}, Optional<Web::HTML::SessionHistoryEntryDescriptor> canonical_initial_history_entry = {}, Web::HTML::VisibilityState system_visibility_state = Web::HTML::VisibilityState::Hidden);
+    ErrorOr<NonnullRefPtr<WebContentClient>> create_web_content_client(BrowsingSession&, Web::PageId initial_page_id, Optional<Web::HTML::CrossProcessId> navigable_to_adopt = {}, Optional<Web::HTML::CrossProcessId> initial_document_state_id = {}, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables = {}, Optional<Web::HTML::SessionHistoryEntryDescriptor> canonical_initial_history_entry = {}, Web::HTML::VisibilityState system_visibility_state = Web::HTML::VisibilityState::Hidden);
 
     ErrorOr<void> launch_services();
     void launch_spare_web_content_process();
+    enum class CompositorLaunch {
+        Now,
+        WhenPlatformFeaturesAreCurrent,
+    };
+    CompositorLaunch prepare_platform_features();
+    JsonArray platform_features_json(Optional<FeatureProcess>) const;
+    void system_facts_arrived(SystemFacts const&);
+    void reevaluate_platform_features();
     ErrorOr<void> launch_compositor_process();
+    void bring_up_compositor_process();
+#if defined(AK_OS_WINDOWS)
+    bool is_window_of_compositor_process(u64 window_handle);
+#endif
     void compositor_reported_gpu_device_identity(Optional<Gfx::GpuDeviceIdentity>);
     void handle_compositor_process_death();
     void recover_compositor_process();
-    void crash_compositor_process();
+    void relaunch_compositor_process(bool counts_as_crash);
     ErrorOr<void> launch_request_server();
     ErrorOr<void> launch_devtools_server();
     // Returns whether the combined rules changed.
@@ -532,19 +502,9 @@ private:
     void update_os_location_authorization();
     void schedule_permission_expiry();
 
-    void initialize_actions();
-    void update_vertical_tabs_action();
+    void initialize_page_options();
 
     WebDriverBrowserConnection* webdriver_browser_connection();
-
-    struct MenuData {
-        Menu& menu;
-        ReadonlySpan<BookmarkItem> items;
-        Optional<String const&> target_folder_id;
-    };
-    void create_bookmark_menu_items(Optional<MenuData> = {});
-
-    virtual Vector<BookmarkItem::Bookmark> bookmarks_for_all_tabs_in_current_window() const;
 
     virtual Vector<DevTools::TabDescription> tab_list() const override;
     virtual Vector<DevTools::CSSProperty> css_property_list() const override;
@@ -647,11 +607,6 @@ private:
     OwnPtr<ApplicationPermissionManagerObserver> m_permission_manager_observer;
     RefPtr<Core::Timer> m_permission_expiry_timer;
 
-    OwnPtr<BookmarkStore> m_bookmark_store;
-    OwnPtr<ApplicationBookmarkStoreObserver> m_bookmark_store_observer;
-
-    OwnPtr<AutocompleteService> m_autocomplete_service;
-
     Main::Arguments m_arguments;
     OwnPtr<Core::StatsLog> m_stats_log;
     BrowserOptions m_browser_options;
@@ -660,6 +615,7 @@ private:
     bool m_cpu_profiler_claimed { false };
     Vector<int> m_cpu_profiler_signal_handlers;
     Vector<int> m_session_signal_handlers;
+    bool m_persists_sessions { false };
     RequestServerOptions m_request_server_options;
     WebContentOptions m_web_content_options;
     RefPtr<FontService> m_font_service;
@@ -702,11 +658,25 @@ private:
     RefPtr<CompositorClient> m_compositor_client;
     RefPtr<CompositorPresentationClient> m_compositor_presentation_client;
     u64 m_compositor_presentation_id { 0 };
+    // IDs are never reused, so one from before a Compositor restart names no layer of the new process.
+    u64 m_next_remote_layer_id { 1 };
     bool m_reported_compositor_gpu_presentation_unavailable { false };
     // The last identity a Compositor reported, which outlives that Compositor until its replacement reports.
     Optional<Optional<Gfx::GpuDeviceIdentity>> m_compositor_gpu_device_identity;
     Vector<CompositorGpuDeviceIdentityCallback> m_callbacks_awaiting_compositor_gpu_device_identity;
     size_t m_compositor_restart_count { 0 };
+    // Set when the Browser ends a Compositor to relaunch it with other features, which does not count as a crash.
+    bool m_compositor_relaunch_is_planned { false };
+    ByteString m_compositor_launched_features;
+
+    FeatureOverrides m_feature_overrides;
+    HashMap<PlatformFeatures::Feature, String> m_feature_runtime_failures;
+    // The facts the decisions were made from, which are the cached ones until the probe reports.
+    SystemFacts m_system_facts;
+    Optional<PlatformFeatureDecisions> m_platform_feature_decisions;
+    OwnPtr<SystemProbeClient> m_system_probe;
+    Vector<Function<void()>> m_callbacks_awaiting_current_platform_features;
+
     enum class CompositorRecoveryState {
         Idle,
         Queued,
@@ -745,63 +715,15 @@ private:
 #endif
     OwnPtr<ProcessManager> m_process_manager;
 
-    RefPtr<Action> m_reload_action;
-    RefPtr<Action> m_reload_bypassing_cache_action;
-    RefPtr<Action> m_copy_selection_action;
-    RefPtr<Action> m_undo_action;
-    RefPtr<Action> m_redo_action;
-    RefPtr<Action> m_cut_selection_action;
-    RefPtr<Action> m_paste_action;
-    RefPtr<Action> m_select_all_action;
-
-    RefPtr<Action> m_open_about_page_action;
-    RefPtr<Action> m_open_downloads_page_action;
-    RefPtr<Action> m_open_settings_page_action;
-
-    RefPtr<Menu> m_zoom_menu;
-    RefPtr<Action> m_zoom_in_action;
-    RefPtr<Action> m_zoom_out_action;
-    RefPtr<Action> m_reset_zoom_action;
-
-    RefPtr<Action> m_force_dark_action;
-    RefPtr<Menu> m_color_scheme_menu;
     Web::CSS::PreferredColorScheme m_color_scheme { Web::CSS::PreferredColorScheme::Auto };
-
-    RefPtr<Menu> m_contrast_menu;
     Web::CSS::PreferredContrast m_contrast { Web::CSS::PreferredContrast::Auto };
-
-    RefPtr<Menu> m_motion_menu;
     Web::CSS::PreferredMotion m_motion { Web::CSS::PreferredMotion::Auto };
-
-    RefPtr<Action> m_toggle_vertical_tabs_expanded_action;
-
-    RefPtr<Action> m_toggle_menu_bar_action;
-
-    RefPtr<Menu> m_bookmarks_menu;
-    RefPtr<Action> m_toggle_bookmark_action;
-    RefPtr<Menu> m_show_bookmarks_bar_menu;
-    RefPtr<Action> m_show_bookmarks_bar_always_action;
-    RefPtr<Action> m_show_bookmarks_bar_never_action;
-    RefPtr<Action> m_show_bookmarks_bar_on_hover_action;
-    RefPtr<Action> m_toggle_bookmark_bar_action;
-    size_t m_bookmarks_menu_static_size { 0 };
-
-    RefPtr<Menu> m_history_menu;
-
-    RefPtr<Menu> m_inspect_menu;
-    RefPtr<Action> m_view_source_action;
-    RefPtr<Action> m_toggle_devtools_action;
-
-    RefPtr<Action> m_report_website_issue_action;
-
-    RefPtr<Menu> m_debug_menu;
-    RefPtr<Action> m_show_line_box_borders_action;
-    RefPtr<Action> m_show_caret_hit_test_debug_overlay_action;
-    RefPtr<Action> m_show_tab_performance_monitor_action;
-    RefPtr<Action> m_enable_scripting_action;
-    RefPtr<Action> m_block_pop_ups_action;
-    StringView m_user_agent_string;
-    StringView m_navigator_compatibility_mode;
+    String m_user_agent_string;
+    Web::NavigatorCompatibilityMode m_navigator_compatibility_mode { Web::default_navigator_compatibility_mode };
+    bool m_scripting_enabled { true };
+    bool m_blocks_pop_ups { true };
+    bool m_shows_line_box_borders { false };
+    bool m_shows_caret_hit_test_debug_overlay { false };
 
     Web::Clipboard::SystemClipboardItem m_clipboard;
 

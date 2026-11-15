@@ -101,6 +101,13 @@ thread_local! {
 
 static THREAD_SETUP: OnceLock<extern "C" fn()> = OnceLock::new();
 
+/// Runs the setup `stage_thread_set_thread_setup` installed, on a thread that serves the same purpose as a stage thread.
+pub(crate) fn run_thread_setup() {
+    if let Some(setup) = THREAD_SETUP.get() {
+        setup();
+    }
+}
+
 /// Makes each stage thread run `setup` first thing once it starts. Call it before any is handed a job; the first setup
 /// installed stays.
 #[unsafe(no_mangle)]
@@ -137,9 +144,7 @@ impl StageThread {
             .name(name.into())
             .stack_size(STAGE_THREAD_STACK_SIZE)
             .spawn(move || {
-                if let Some(setup) = THREAD_SETUP.get() {
-                    setup();
-                }
+                run_thread_setup();
                 let mut release_memory_at = None;
                 loop {
                     let last = loop {
@@ -196,6 +201,12 @@ impl StageThread {
     pub(crate) fn run<R: Send>(&self, job: impl FnOnce() -> R + Send) -> R {
         if self.is_current() {
             return job();
+        }
+        // A test that holds the Render thread in its claim of a style update gives way to a job another thread waits
+        // for, which would otherwise wait behind the hold forever.
+        #[cfg(not(test))]
+        if std::ptr::eq(self, render_thread()) {
+            crate::painting::recording_slot::yield_claim_hold_for_testing();
         }
         let mut answer = None;
         let job = JobInFrame::new(

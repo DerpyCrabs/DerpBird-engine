@@ -33,6 +33,8 @@ public:
     DerpBirdScriptNotifications notifications { this };
     DerpBirdScriptCommands commands { this };
     Function<ErrorOr<void>(WebView::WebContentPage&, bool)> window_action;
+    Function<void(WebView::WebContentPage&, bool, Function<void(ErrorOr<void>)>)> window_action_async;
+    Function<void(WebView::WebContentPage&, String const&, ByteBuffer, Function<void(ErrorOr<void>)>)> clipboard_write_async;
     explicit DerpBirdValueHost(WebView::Application& application)
         : m_application(application)
     {
@@ -145,13 +147,13 @@ public:
     }
     void shutdown(Function<void()> completion)
     {
-        if (m_stopping) return;
+        m_shutdown.append(move(completion));
+        if (m_stopping) { finish_shutdown(); return; }
         m_stopping = true;
         audio.shutdown();
         downloads.shutdown();
         notifications.shutdown();
         for (auto task : m_network.values()) if (task) task->cancel();
-        m_shutdown = move(completion);
         auto keys = m_entries.keys();
         for (auto key : keys) close_session(key);
         finish_shutdown();
@@ -254,11 +256,18 @@ private:
                 auto identity = decoded.identity.bytes_as_string_view();
                 auto token = QString::fromUtf8(identity.characters_without_null_termination(), identity.length());
                 TRY(entry->authority.window_permission(context, token, decoded.method));
+                if (window_action_async) {
+                    window_action_async(page, decoded.method == Protocol::Method::WindowClose, [done](ErrorOr<void> result) {
+                        if (result.is_error()) (*done)(result.release_error());
+                        else (*done)(Protocol::encode(Protocol::Response { Protocol::Kind::Revision, {}, {}, {}, 0 }));
+                    });
+                    return ByteBuffer {};
+                }
                 if (!window_action) return Error::from_string_literal("Window host is unavailable");
                 TRY(window_action(page, decoded.method == Protocol::Method::WindowClose));
                 return Protocol::encode(Protocol::Response { Protocol::Kind::Revision, {}, {}, {}, 0 });
             }();
-            (*done)(move(result));
+            if (result.is_error() || !result.value().is_empty()) (*done)(move(result));
             return {};
         }
         if (decoded.method == Protocol::Method::Notify || decoded.method == Protocol::Method::NotifyLegacy || decoded.method == Protocol::Method::NotifyWait || decoded.method == Protocol::Method::NotifyActivate) {
@@ -361,6 +370,13 @@ private:
                 auto identity = decoded.identity.bytes_as_string_view();
                 auto token = QString::fromUtf8(identity.characters_without_null_termination(), identity.length());
                 TRY(entry->authority.clipboard_permission(context, token, decoded.method));
+                if (clipboard_write_async) {
+                    clipboard_write_async(page, decoded.key, TRY(ByteBuffer::copy(decoded.updates[0].value->bytes())), [done](ErrorOr<void> result) {
+                        if (result.is_error()) (*done)(result.release_error());
+                        else (*done)(Protocol::encode(Protocol::Response { Protocol::Kind::Revision, {}, {}, {}, 0 }));
+                    });
+                    return {};
+                }
                 if (!qobject_cast<QGuiApplication*>(QCoreApplication::instance()))
                     return Error::from_string_literal("Clipboard requires a graphical application");
                 auto* clipboard = QGuiApplication::clipboard();
@@ -374,7 +390,7 @@ private:
                 return {};
             }();
             if (result.is_error()) (*done)(result.release_error());
-            else (*done)(Protocol::encode(Protocol::Response { Protocol::Kind::Revision, {}, {}, {}, 0 }));
+            else if (!clipboard_write_async) (*done)(Protocol::encode(Protocol::Response { Protocol::Kind::Revision, {}, {}, {}, 0 }));
             return {};
         }
         if (decoded.method == Protocol::Method::Network || decoded.method == Protocol::Method::NetworkLegacy || decoded.method == Protocol::Method::NetworkAbort || decoded.method == Protocol::Method::NetworkRead) {
@@ -462,9 +478,9 @@ private:
     }
     void finish_shutdown()
     {
-        if (m_stopping && m_entries.isEmpty() && m_closing.isEmpty() && m_shutdown) {
-            auto completion = move(m_shutdown);
-            completion();
+        if (m_stopping && m_entries.isEmpty() && m_closing.isEmpty() && !m_shutdown.is_empty()) {
+            auto completions = move(m_shutdown);
+            for (auto& completion : completions) completion();
         }
     }
     QHash<QString, QPointer<DerpBirdNetworkRequest>> m_network;
@@ -474,7 +490,7 @@ private:
     QHash<u64, std::shared_ptr<Entry>> m_closing;
     u64 m_next_serial { 1 };
     bool m_stopping { false };
-    Function<void()> m_shutdown;
+    Vector<Function<void()>> m_shutdown;
 };
 
 }

@@ -21,6 +21,7 @@ namespace Web {
 // incremental parser remains untouched for every other navigation.
 class DerpBirdHTMLFiltering final : public RefCounted<DerpBirdHTMLFiltering> {
 public:
+    void visit_edges(GC::Cell::Visitor& visitor) { visitor.visit(m_document); visitor.visit(m_container); }
     static bool start(GC::Ref<DOM::Document> document, Fetch::Infrastructure::ResponseView const& response, GC::Ptr<DOM::Document> container)
     {
         if (!document->content_blocking_enabled() || !response.body()) return false;
@@ -29,7 +30,7 @@ public:
         auto state = adopt_ref(*new DerpBirdHTMLFiltering(document, container, response.header_list(), move(rules)));
         auto& realm = document->relevant_settings_object().realm();
         response.body()->incrementally_read(realm,
-            GC::create_function(GC::Heap::the(), [state](ByteBuffer bytes) {
+            GC::create_function(GC::Heap::the(), GC::captures(state), [](auto& state, ByteBuffer bytes) {
                 if (state->m_failed) return;
                 if (bytes.size() > maximum_body_size - state->m_bytes.size()) {
                     state->m_failed = true;
@@ -38,8 +39,8 @@ public:
                 }
                 if (state->m_bytes.try_append(bytes).is_error()) state->m_failed = true;
             }),
-            GC::create_function(GC::Heap::the(), [state] { state->finish(); }),
-            GC::create_function(GC::Heap::the(), [state](JS::Value) { state->m_failed = true; state->finish(); }),
+            GC::create_function(GC::Heap::the(), GC::captures(state), [](auto& state) { state->finish(); }),
+            GC::create_function(GC::Heap::the(), GC::captures(state), [](auto& state, JS::Value) { state->m_failed = true; state->finish(); }),
             GC::Ref { realm.global_object() });
         return true;
     }
@@ -57,7 +58,7 @@ private:
             // This is the browser-owned response filter, not a page injection sink.
             // Keep the page's Trusted Types policy intact for page and userscript code.
             Bindings::wrap(Bindings::host_defined_wrapper_world(realm), realm,
-                GC::Heap::the().allocate<TrustedTypes::TrustedHTML>(move(input))), JS::default_attributes);
+                TrustedTypes::TrustedHTML::create(move(input))), JS::default_attributes);
         Utf16StringBuilder script;
         script.append(ContentBlocker::html_filter_runtime());
         script.append_ascii("\n__derpbirdFilterHTML(__derpbirdHTMLInput,"sv);
@@ -74,7 +75,7 @@ private:
         if (m_finished) return;
         m_finished = true;
         auto state = NonnullRefPtr { *this };
-        auto parse = [state] {
+        auto parse = GC::create_function(GC::Heap::the(), GC::captures(state), [](auto& state) {
             auto& document = *state->m_document;
             if (!document.is_fully_active()) return;
             Utf16String source = "<!doctype html><title>Page unavailable</title><h1>Unable to load this page</h1><p>HTML response filtering failed or the response exceeded its size limit.</p>"_utf16;
@@ -98,13 +99,13 @@ private:
             parser->set_allow_declarative_shadow_roots(HTML::HTMLParser::AllowDeclarativeShadowRoots::Yes);
             parser->run(document.url());
             HTML::HTMLLinkElement::process_link_headers(document, state->m_headers, document.url(), HTML::HTMLLinkElement::LinkHeaderPhase::Media);
-        };
-        if (m_document->ready_to_run_scripts()) parse();
-        else m_document->set_deferred_parser_start(GC::create_function(GC::Heap::the(), move(parse)));
+        });
+        if (m_document->ready_to_run_scripts()) parse->function()();
+        else m_document->set_deferred_parser_start(parse);
     }
 
-    GC::Root<DOM::Document> m_document;
-    GC::Root<DOM::Document> m_container;
+    GC::Ptr<DOM::Document> m_document;
+    GC::Ptr<DOM::Document> m_container;
     NonnullRefPtr<HTTP::HeaderList> m_headers;
     Utf16String m_rules;
     ByteBuffer m_bytes;

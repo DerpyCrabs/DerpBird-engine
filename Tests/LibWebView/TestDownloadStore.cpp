@@ -35,6 +35,7 @@ static WebView::DownloadRecord example_download(i64 id = 7)
         .created_time = UnixDateTime::from_seconds_since_epoch(1000),
         .can_restart_from_zero = true,
         .may_replace_destination = true,
+        .same_site_context = { .status = HTTP::Cookie::SameSiteStatus::CrossSite, .is_top_level_navigation = true, .is_safe_method = true },
     };
 }
 
@@ -60,6 +61,9 @@ TEST_CASE(downloads_round_trip)
     EXPECT_EQ(download.created_time, UnixDateTime::from_seconds_since_epoch(1000));
     EXPECT(download.can_restart_from_zero);
     EXPECT(download.may_replace_destination);
+    EXPECT_EQ(download.same_site_context.status, HTTP::Cookie::SameSiteStatus::CrossSite);
+    EXPECT(download.same_site_context.is_top_level_navigation);
+    EXPECT(download.same_site_context.is_safe_method);
 
     EXPECT_EQ(download.segments.size(), 2u);
     EXPECT_EQ(download.segments[0].start_offset, 0u);
@@ -267,6 +271,48 @@ TEST_CASE(a_database_left_at_an_older_schema_is_brought_forward)
 
     store->save_download(example_download(6));
     EXPECT_EQ(store->resumable_downloads().size(), 2u);
+}
+
+TEST_CASE(derpbird_download_history_schema_gains_same_site_context_without_losing_records)
+{
+    auto database = create_database();
+    MUST(database->execute_raw(R"#(
+        CREATE TABLE Downloads (
+            id INTEGER PRIMARY KEY, url TEXT NOT NULL, display_url TEXT NOT NULL,
+            destination TEXT NOT NULL, temporary_destination TEXT NOT NULL,
+            total_size INTEGER NOT NULL, etag TEXT NOT NULL, last_modified TEXT NOT NULL,
+            segments TEXT NOT NULL, created_time INTEGER NOT NULL, updated_time INTEGER NOT NULL,
+            can_restart_from_zero INTEGER NOT NULL DEFAULT 0,
+            may_replace_destination INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE DownloadHistory (
+            id INTEGER PRIMARY KEY, url TEXT NOT NULL, destination TEXT NOT NULL,
+            status INTEGER NOT NULL, downloaded_size INTEGER NOT NULL, total_size INTEGER NOT NULL,
+            error TEXT NOT NULL, created_time INTEGER NOT NULL
+        );
+        CREATE INDEX DownloadHistoryRecency ON DownloadHistory (created_time DESC, id DESC);
+        CREATE TABLE SchemaVersions (store TEXT PRIMARY KEY, version INTEGER NOT NULL);
+        INSERT INTO SchemaVersions VALUES ('Downloads', 4);
+        INSERT INTO Downloads VALUES (5, 'https://example.com/a', 'https://example.com/a',
+            '/tmp/a', '/tmp/a.download', 4096, '"e"', '', '[{"start":0,"end":4095,"next":100}]', 10, 10, 1, 0);
+        INSERT INTO DownloadHistory VALUES (9, 'https://example.com/completed', '/tmp/completed', 2, 12, 12, '', 20);
+    )#"));
+
+    EXPECT_EQ(MUST(WebView::DownloadStore::migrate_schema(database)), Database::MigrationOutcome::Success);
+    auto store = MUST(WebView::DownloadStore::create(database));
+    auto downloads = store->resumable_downloads();
+    EXPECT_EQ(downloads.size(), 1u);
+    EXPECT_EQ(downloads.first().id, 5u);
+    EXPECT_EQ(downloads.first().segments.first().next_offset, 100u);
+    EXPECT(downloads.first().can_restart_from_zero);
+    EXPECT_EQ(downloads.first().same_site_context.status, HTTP::Cookie::SameSiteStatus::SameSite);
+    EXPECT(!downloads.first().same_site_context.is_top_level_navigation);
+    EXPECT(!downloads.first().same_site_context.is_safe_method);
+    auto history = store->download_history();
+    EXPECT_EQ(history.size(), 1u);
+    EXPECT_EQ(history.first().id, 9);
+    EXPECT_EQ(history.first().destination, "/tmp/completed"_string);
+    EXPECT_EQ(store->maximum_download_id(), 9);
 }
 
 TEST_CASE(migrating_an_already_migrated_schema_is_a_no_op)

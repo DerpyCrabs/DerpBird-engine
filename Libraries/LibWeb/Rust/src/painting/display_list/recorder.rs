@@ -760,13 +760,7 @@ impl DisplayListRecorder {
         );
     }
 
-    pub fn draw_canvas(
-        &mut self,
-        dst_rect: IntRect,
-        canvas_id: CanvasId,
-        content_generation: u64,
-        scaling_mode: ScalingMode,
-    ) {
+    pub fn draw_canvas(&mut self, dst_rect: IntRect, canvas_id: CanvasId, scaling_mode: ScalingMode) {
         if dst_rect.is_empty() {
             return;
         }
@@ -774,7 +768,6 @@ impl DisplayListRecorder {
             &DrawCanvas {
                 dst_rect,
                 canvas_id,
-                content_generation,
                 scaling_mode,
             },
             &[],
@@ -909,6 +902,11 @@ impl DisplayListRecorder {
         std::mem::replace(&mut self.builder, detached.outer_builder)
             .finish()
             .bytes
+    }
+
+    /// The force-dark settings the recorder applies, which content it records while force dark is suspended has none of.
+    pub fn force_dark_settings(&self) -> Option<ForceDarkSettings> {
+        self.force_dark.as_ref().map(ForceDarkResolver::settings)
     }
 
     pub fn suspend_force_dark(&mut self) -> Option<ForceDarkResolver> {
@@ -1080,6 +1078,7 @@ impl DisplayListRecorder {
         baseline_start: FloatPoint,
         run: GlyphRunForRecording<impl IntoIterator<Item = DisplayListGlyph>>,
         color: Color,
+        stroke_width: f32,
         rect: IntRect,
         scale: f64,
         orientation: Orientation,
@@ -1092,7 +1091,12 @@ impl DisplayListRecorder {
         let color = self.resolve_color(color, force_dark_role);
         let mut payload = CommandPayloadBuilder::new::<DrawGlyphRun>(&self.builder);
         let glyphs = payload.append_objects(run.glyphs);
+        let stroke_width = stroke_width.min(crate::css::css_pixels::max_dimension_value().to_float());
+        // A miter limit of 4 lets sharp glyph corners extend four half-widths beyond the fill bounds.
+        let margin = (stroke_width * 2.0).ceil() as i32;
+        let glyph_bounding_rect = glyph_bounding_rect.inflated_edges(margin, margin, margin, margin);
         let command = DrawGlyphRun {
+            stroke_width,
             font_smoothing: run.font_smoothing,
             font_id: run.font_id,
             glyphs,
@@ -1336,10 +1340,6 @@ impl DisplayListRecorder {
         );
     }
 
-    pub fn compositor_scroll_node(&mut self, node: CompositorScrollNode) {
-        self.append_command(&node, &[]);
-    }
-
     pub fn compositor_wheel_hit_test_target(&mut self, target: CompositorWheelHitTestTarget) {
         self.append_command(&target, &[]);
     }
@@ -1365,13 +1365,5 @@ impl DisplayListRecorder {
 
     pub fn compositor_blocking_wheel_event_region(&mut self, region: CompositorBlockingWheelEventRegion) {
         self.append_command(&region, &[]);
-    }
-
-    pub fn compositor_snap_container(&mut self, container: CompositorSnapContainer) {
-        self.append_command(&container, &[]);
-    }
-
-    pub fn compositor_snap_area(&mut self, area: CompositorSnapArea) {
-        self.append_command(&area, &[]);
     }
 }

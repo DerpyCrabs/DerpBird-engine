@@ -10,13 +10,14 @@
 namespace Web {
 class DerpBirdResponseFiltering final : public RefCounted<DerpBirdResponseFiltering> {
 public:
+    void visit_edges(GC::Cell::Visitor& visitor) { visitor.visit(m_headers); visitor.visit(m_data); visitor.visit(m_cached); visitor.visit(m_complete); }
     static void wrap(JsonArray operations, GC::Root<ResourceLoader::OnHeadersReceived>& headers, GC::Root<ResourceLoader::OnDataReceived>& data,
         GC::Root<ResourceLoader::OnCachedBodyAvailable>& cached, GC::Root<ResourceLoader::OnComplete>& complete, Function<void(JsonArray const&)> applied = {}, Function<JsonArray(Fetch::Engine::NetworkTransportHandle*)> select_operations = {})
     {
         if (operations.is_empty() && !select_operations) return;
         auto state = adopt_ref(*new DerpBirdResponseFiltering(move(operations), headers, data, cached, complete, move(applied)));
         state->m_select_operations = move(select_operations);
-        headers = GC::create_function(GC::Heap::the(), [state](Fetch::Engine::NetworkTransportHandle* transport, HTTP::HeaderList const& headers, Optional<u32> status, Optional<String> const& reason, Requests::CacheState cache) {
+        headers = GC::create_function(GC::Heap::the(), GC::captures(state), [](auto& state, Fetch::Engine::NetworkTransportHandle* transport, HTTP::HeaderList const& headers, Optional<u32> status, Optional<String> const& reason, Requests::CacheState cache) {
             if (state->m_finished) return;
             if (state->m_select_operations) state->m_operations = state->m_select_operations(transport);
             auto content_type = headers.get("Content-Type"sv);
@@ -32,9 +33,9 @@ public:
             // transform owns delivery until it can release a complete local body.
             if (transport) transport->resume_body_delivery_up_to(maximum_body + 1);
         });
-        data = GC::create_function(GC::Heap::the(), [state](Requests::ResponseData data) {
+        data = GC::create_function(GC::Heap::the(), GC::captures(state), [](auto& state, Fetch::Engine::NetworkTransportHandle* transport, Requests::ResponseData data) {
             if (state->m_finished) return;
-            if (!state->m_buffering) { state->m_data->function()(move(data)); return; }
+            if (!state->m_buffering) { state->m_data->function()(transport, move(data)); return; }
             if (state->m_failed) return;
             if (data.bytes().size() > maximum_body - state->m_body.size()) {
                 state->fail("Response replacement body limit exceeded"sv);
@@ -43,23 +44,23 @@ public:
             if (state->m_body.try_append(data.bytes()).is_error())
                 state->fail("Cannot buffer response replacement"sv);
         });
-        cached = GC::create_function(GC::Heap::the(), [state](Core::ImmutableBytes data) {
+        cached = GC::create_function(GC::Heap::the(), GC::captures(state), [](auto& state, Core::ImmutableBytes data) {
             if (state->m_finished) return;
             // The following data callbacks carry slices of this cached payload.
             if (!state->m_buffering) state->m_cached->function()(move(data));
         });
-        complete = GC::create_function(GC::Heap::the(), [state](bool success, Requests::RequestTimingInfo const& timing, Optional<StringView> error) {
+        complete = GC::create_function(GC::Heap::the(), GC::captures(state), [](auto& state, bool success, Requests::RequestTimingInfo const& timing, Optional<StringView> error, Optional<ResourceLoader::NetworkRequestEnd> const& network_end) {
             if (state->m_finished) return;
             state->m_finished = true;
             state->m_transport = nullptr;
             if (!state->m_buffering || !success) {
                 state->m_body.clear();
-                state->m_complete->function()(success, timing, error);
+                state->m_complete->function()(success, timing, error, network_end);
                 return;
             }
             auto output = state->transform();
             state->m_body.clear();
-            if (output.is_error()) { state->m_complete->function()(false, timing, "Response replacement failed"sv); return; }
+            if (output.is_error()) { state->m_complete->function()(false, timing, "Response replacement failed"sv, network_end); return; }
             auto body = output.release_value();
             if (state->m_applied) state->m_applied(state->m_operations);
             auto& headers = *state->m_saved_headers;
@@ -73,8 +74,8 @@ public:
             headers.delete_("ETag"sv);
             headers.delete_("Content-MD5"sv);
             state->m_headers->function()(nullptr, headers, state->m_status, state->m_reason, Requests::CacheState::NotCached);
-            state->m_data->function()(Requests::ResponseData::from_bytes(body.bytes()));
-            state->m_complete->function()(true, timing, {});
+            state->m_data->function()(nullptr, Requests::ResponseData::from_bytes(body.bytes()));
+            state->m_complete->function()(true, timing, {}, network_end);
         });
     }
 private:
@@ -87,7 +88,7 @@ private:
         // Completion may synchronously tear down Fetch or deliver cancellation.
         // Detach first and retain only the transport we still need to stop.
         auto transport = move(m_transport);
-        m_complete->function()(false, {}, reason);
+        m_complete->function()(false, {}, reason, {});
         if (transport) transport->stop();
     }
     static constexpr size_t maximum_body = 16 * MiB;
@@ -110,10 +111,10 @@ private:
         return transformed.to_utf8();
     }
     JsonArray m_operations;
-    GC::Root<ResourceLoader::OnHeadersReceived> m_headers;
-    GC::Root<ResourceLoader::OnDataReceived> m_data;
-    GC::Root<ResourceLoader::OnCachedBodyAvailable> m_cached;
-    GC::Root<ResourceLoader::OnComplete> m_complete;
+    GC::Ptr<ResourceLoader::OnHeadersReceived> m_headers;
+    GC::Ptr<ResourceLoader::OnDataReceived> m_data;
+    GC::Ptr<ResourceLoader::OnCachedBodyAvailable> m_cached;
+    GC::Ptr<ResourceLoader::OnComplete> m_complete;
     Function<void(JsonArray const&)> m_applied;
     Function<JsonArray(Fetch::Engine::NetworkTransportHandle*)> m_select_operations;
     RefPtr<Fetch::Engine::NetworkTransportHandle> m_transport;

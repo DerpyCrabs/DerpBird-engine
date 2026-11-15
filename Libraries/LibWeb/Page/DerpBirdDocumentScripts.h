@@ -89,10 +89,10 @@ public:
                     session->m_entries.last().request_rules = TRY(DerpBirdWebRequestRegistration::create(document, definition));
             }
         }
-        session->m_observer->set_document_became_inactive([weak = session->make_weak_ptr()] {
+        session->m_observer->set_document_became_inactive(GC::create_function(GC::Heap::the(), GC::captures(session->make_weak_ptr()), [](auto& weak) {
             if (weak)
                 weak->close();
-        });
+        }));
         return session;
     }
 
