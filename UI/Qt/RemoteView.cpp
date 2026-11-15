@@ -896,7 +896,11 @@ void RemoteView::did_receive_derpbird_event(String const& event, JsonValue const
 {
     if (!value.is_object()) return;
     auto const& data = value.as_object();
-    if (event == "filter-selector"sv) {
+    if (event == "devtools"sv) {
+        if (on_derpbird_devtools) on_derpbird_devtools(value);
+    } else if (event == "devtools.inspect"sv) {
+        if (auto id = data.get_integer<i64>("node"sv); id.has_value() && on_derpbird_inspect) on_derpbird_inspect(Web::UniqueNodeID { *id });
+    } else if (event == "filter-selector"sv) {
         if (on_derpbird_filter_selector) on_derpbird_filter_selector(data.get_string("url"sv).value_or(String {}), data.get_string("selector"sv).value_or(String {}));
     } else if (event == "picker"sv) {
         auto type = data.get_integer<u8>("type"sv);

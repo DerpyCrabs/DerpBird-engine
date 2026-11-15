@@ -102,6 +102,11 @@ View::View(InitialState initial_state)
     set_page_background_color_to_system_canvas(m_websites_prefer_dark);
 }
 
+View::~View()
+{
+    if (auto* derpbird = DerpBird::the()) derpbird->release_devtools(view_id());
+}
+
 void View::initialize(Optional<WebView::CanonicalTraversable&> traversable)
 {
     initialize_tab(Web::HTML::VisibilityState::Hidden, traversable);

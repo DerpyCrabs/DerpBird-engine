@@ -23,6 +23,7 @@
 namespace Ladybird {
 
 class DerpBirdImport;
+class DerpBirdDevTools;
 class DerpBirdFilePicker;
 class BrowserWindow;
 class DerpBirdCredentialFill;
@@ -40,6 +41,7 @@ public:
     void unobserve_tab(Tab&);
     void queue_snapshot();
     void focus_address();
+    ErrorOr<void> inspect_tab(Tab&, Optional<Web::UniqueNodeID> = {});
     void update_display_metadata(double device_pixel_ratio, Optional<u64> display_id, double refresh_rate);
     Tab* tree_parent(Tab&) const;
     void group_tab_from_view(Tab& child, Optional<u64> source_view_id);
@@ -92,6 +94,7 @@ private:
     QFileSystemWatcher* m_source_watcher { nullptr };
     bool m_blocking_log_visible { false };
     QPointer<WebContentView> m_request_log_view;
+    QHash<Tab*, QPointer<DerpBirdDevTools>> m_devtools;
     BrowserWindow& m_window;
     WebContentView* m_shell { nullptr };
     QWidget* m_content { nullptr };

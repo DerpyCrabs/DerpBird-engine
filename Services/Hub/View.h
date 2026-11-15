@@ -31,6 +31,7 @@ public:
     };
 
     explicit View(InitialState);
+    virtual ~View() override;
 
     void initialize(Optional<WebView::CanonicalTraversable&>);
     InitialState initial_state_for_related_view() const;

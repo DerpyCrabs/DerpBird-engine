@@ -1,3 +1,4 @@
+#include <UI/Qt/DerpBirdDevToolsSession.h>
 #include <AK/Base64.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
@@ -224,6 +225,8 @@ DerpBird::DerpBird(ConnectionFromUI& connection)
 
 DerpBird::~DerpBird()
 {
+    for (auto session : m_devtools) if (session) delete session;
+    m_devtools.clear();
     s_derpbird = nullptr;
     WebView::ViewImplementation::for_each_view([](auto& view) {
         view.on_derpbird_request = nullptr;
@@ -290,9 +293,18 @@ void DerpBird::shell_response(u64 id, JsonValue result, Optional<String> error)
         (*completion)(move(result));
 }
 
+void DerpBird::release_devtools(u64 view_id)
+{
+    if (auto session = m_devtools.take(view_id)) delete session;
+}
+
 void DerpBird::install_view_callbacks(View& view)
 {
     auto id = view.view_id();
+    view.on_inspect_element_request = [this, id](Web::UniqueNodeID node) {
+        JsonObject event; event.set("node"sv, node.value());
+        m_connection.async_derpbird_ui_event(id, "devtools.inspect"_string, AK::move(event));
+    };
     view.on_derpbird_request = [this, id](JsonValue const& payload, Completion completion) {
         if (m_shell_pending.size() >= 256) {
             completion(Error::from_string_literal("Too many pending shell requests"));
@@ -481,6 +493,19 @@ void DerpBird::dispatch(u64 request_id, u64 view_id, String const& command, Json
         fail("Browser view is unavailable"sv);
         return;
     }
+    if (command == "devtools"sv) {
+        auto type = object.get_string("type"sv);
+        if (type == "devtools.close"sv) { if (auto session = m_devtools.take(view_id)) delete session; done(); return; }
+        auto& session = m_devtools[view_id];
+        if (!session) {
+            if (view->on_received_dom_tree || view->on_console_message || view->on_network_request_started) { fail("This tab already has a debugger"sv); return; }
+            session = new Ladybird::DerpBirdDevToolsSession(*view, this, [this, view_id](JsonValue packet) {
+                m_connection.async_derpbird_ui_event(view_id, "devtools"_string, AK::move(packet));
+            });
+        }
+        session->request(payload, [this, request_id](auto result) { finish(request_id, AK::move(result)); });
+        return;
+    }
     if (command.bytes_as_string_view().starts_with("credential."sv)) {
         credential_command(request_id, *view, command, payload);
         return;
@@ -531,11 +556,13 @@ void DerpBird::dispatch(u64 request_id, u64 view_id, String const& command, Json
     }
     if (command == "picker.start"sv) {
         view->start_node_picker([this, view_id](auto event) { JsonObject data; data.set("type"sv, to_underlying(event.type)); if (event.node_id.has_value()) data.set("node"sv, event.node_id->value()); m_connection.async_derpbird_ui_event(view_id, "picker"_string, JsonValue { move(data) }); });
+        view->push_state_to_ui();
         done();
         return;
     }
     if (command == "picker.stop"sv) {
         view->stop_node_picker();
+        view->push_state_to_ui();
         done();
         return;
     }

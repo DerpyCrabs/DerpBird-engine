@@ -59,6 +59,8 @@ public:
     Function<void(DerpBirdDocument const&, bool, Gfx::IntRect)> on_derpbird_credential_focus;
     Function<void(DerpBirdDocument const&, String, String)> on_derpbird_credential_submission;
     Function<void(String, String)> on_derpbird_filter_selector;
+    Function<void(JsonValue const&)> on_derpbird_devtools;
+    Function<void(Web::UniqueNodeID)> on_derpbird_inspect;
 
     using InputMethodState = WebView::ViewImplementation::InputMethodState;
     using NavigationListener = WebView::ViewImplementation::NavigationListener;

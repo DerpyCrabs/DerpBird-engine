@@ -26,6 +26,7 @@
 #include <UI/Qt/Application.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/DerpBirdChrome.h>
+#include <UI/Qt/DerpBirdDevTools.h>
 #include <UI/Qt/DerpBirdCredentialFill.h>
 #include <UI/Qt/DerpBirdStyleStore.h>
 #include <UI/Qt/DerpBirdScriptStore.h>
@@ -88,6 +89,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
             tab->show_bookmark_popover();
         }
     });
+    new QShortcut(QKeySequence(Qt::Key_F12), &window, [this] { if (auto* tab = m_window.current_tab()) { if (auto result = inspect_tab(*tab); result.is_error()) warnln("{}", result.error()); } });
     WebContentViewInitialState initial;
     initial.is_private = window.is_private();
     initial.maximum_frames_per_second = window.refresh_rate();
@@ -575,6 +577,20 @@ DerpBirdChrome::~DerpBirdChrome()
         release_observation(m_observed_tabs.begin().key());
 }
 
+ErrorOr<void> DerpBirdChrome::inspect_tab(Tab& tab, Optional<Web::UniqueNodeID> node)
+{
+    tab.ensure_loaded();
+    auto& tools = m_devtools[&tab];
+    if (!tools) {
+        auto& view = tab.view();
+        if (view.on_derpbird_devtools)
+            return Error::from_string_literal("This tab is already attached to another debugger");
+        tools = new DerpBirdDevTools(view, &m_window, *m_shell_preferences);
+    }
+    tools->inspect(node);
+    return {};
+}
+
 void DerpBirdChrome::observe_tab(Tab& tab)
 {
     if (m_observed_tabs.contains(&tab))
@@ -604,6 +620,9 @@ void DerpBirdChrome::observe_tab(Tab& tab)
         auto& observation = m_observed_tabs[&tab];
         observation.view = &tab.view();
         tab.view().installEventFilter(this);
+        tab.view().on_derpbird_inspect = [self = QPointer(this), target = QPointer(&tab)](Web::UniqueNodeID node) {
+            if (self && target) { if (auto result = self->inspect_tab(*target, node); result.is_error()) warnln("{}", result.error()); }
+        };
         tab.view().on_derpbird_credential_focus = [self = QPointer(this), target = QPointer(&tab), view = QPointer(&tab.view())](auto& document, bool available, Gfx::IntRect bounds) {
             if (!self || !target || !view || self->m_window.current_tab() != target) return;
             self->clear_autofill();
@@ -707,6 +726,7 @@ void DerpBirdChrome::observe_tab(Tab& tab)
 
 void DerpBirdChrome::release_observation(Tab* tab)
 {
+    if (auto tools = m_devtools.take(tab)) delete tools;
     m_favicon_cache.remove(tab);
     auto found = m_observed_tabs.find(tab);
     if (found == m_observed_tabs.end())
@@ -715,6 +735,7 @@ void DerpBirdChrome::release_observation(Tab* tab)
     m_observed_tabs.erase(found);
     delete observation.scope;
     if (auto view = observation.view) {
+        view->on_derpbird_inspect = nullptr;
         view->on_derpbird_credential_focus = nullptr;
         view->removeEventFilter(this);
         view->on_derpbird_credential_submission = nullptr;
@@ -1037,6 +1058,7 @@ ErrorOr<JsonValue> DerpBirdChrome::request(JsonValue const& data)
         return Error::from_string_literal("Invalid request");
     auto const& object = data.as_object();
     auto type = object.get_string("type"sv);
+    if (type == "devtools.bootstrap"sv) return JsonValue {};
     if (type == "snapshot"sv)
         return snapshot();
     if (type == "sources.page"sv || type == "sources.toggle"sv) {
@@ -1293,6 +1315,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         if (type == "blocking.clear"sv && tab->is_loaded()) tab->view().clear_blocking_log();
         return {};
     }
+    if (type == "tab.inspect"sv) return inspect_tab(*tab);
     auto index = m_window.tab_index(tab);
     if (type == "script.command"sv) {
         auto command_id = data.get_string("id"sv);

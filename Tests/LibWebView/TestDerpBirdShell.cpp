@@ -54,6 +54,7 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             return JsonValue::from_string(R"json({"version":1,"revision":1,"tabs":[{"id":"test","url":"https://example.test/","title":"Example","loading":false,"canGoBack":false,"canGoForward":false,"pinned":false,"private":false,"audible":false,"muted":false}],"activeTabId":"test","preferences":{"layout":"vertical","compact":false}})json"sv);
         }
         auto type = data.get_string("type"sv).value_or(String {});
+        if (type == "devtools.bootstrap"sv) return JsonValue {};
         if (type == "import.status"sv) return JsonValue::from_string(R"({"welcome":false,"profiles":[]})"sv);
         if (type.is_one_of("styles.folders"sv, "scripts.folders"sv)) return JsonValue::from_string(R"({"directories":[],"files":[]})"sv);
         if (type == "styles.list"sv) return JsonValue(style_snapshot);
