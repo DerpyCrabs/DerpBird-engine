@@ -1359,6 +1359,7 @@ void WebContentPage::did_block_resource(URL::URL url, String kind, String rule)
 void WebContentPage::did_start_network_request(u64 request_id, URL::URL url, ByteString method, Vector<HTTP::Header> request_headers, ByteBuffer request_body, Optional<String> initiator_type, String referrer_policy, bool is_navigation_request, Web::Fetch::Infrastructure::RequestPriority priority)
 {
     if (displays_tab()) {
+        view().did_start_proxy_request(request_id, url);
         if (view().request_logging_enabled()) {
             auto kind = MUST(String::formatted("Request · {}", is_navigation_request ? "Document"sv : initiator_type.has_value() ? initiator_type->bytes_as_string_view() : "Other"sv));
             view().did_start_logged_request({}, url, kind.bytes_as_string_view());
@@ -1379,6 +1380,7 @@ void WebContentPage::did_receive_network_response_body(u64 request_id, ByteBuffe
 void WebContentPage::did_finish_network_request(u64 request_id, u64 body_size, Requests::RequestTimingInfo timing_info, Optional<Requests::NetworkError> network_error)
 {
     if (displays_tab()) {
+        view().did_finish_proxy_request(request_id, network_error);
         if (view().on_network_request_finished)
             view().on_network_request_finished(request_id, body_size, timing_info, network_error);
     }

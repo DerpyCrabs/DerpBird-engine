@@ -58,6 +58,8 @@ public:
 
     Optional<Proxy const&> proxy_for(URL::URL const&) const;
 
+    String profile_for(URL::URL const&) const;
+
     bool is_empty() const { return m_omega_options.size() == 0 && !m_http_proxy.has_value() && !m_https_proxy.has_value(); }
 
     ErrorOr<void> set_omega(JsonObject, String active_profile);

@@ -493,6 +493,33 @@ void DerpBird::dispatch(u64 request_id, u64 view_id, String const& command, Json
         fail("Browser view is unavailable"sv);
         return;
     }
+    if (command == "proxy.site"sv) {
+        auto result = [&]() -> ErrorOr<JsonValue> {
+            auto requested = object.get_string("url"sv);
+            auto const& url = view->url();
+            if (!requested.has_value() || url.serialize() != *requested)
+                return Error::from_string_literal("The active page changed; reopen the proxy switcher");
+            if (!url.scheme().is_one_of("http"sv, "https"sv)) return Error::from_string_literal("Proxy rules require an HTTP or HTTPS page");
+            auto state = TRY(Ladybird::DerpBirdProxy::state());
+            auto configuration = HTTP::ProxyConfiguration::from_environment();
+            TRY(configuration.set_omega(state.get_object("options"sv).value(), state.get_string("active"sv).value()));
+            JsonObject result;
+            result.set("url"sv, url.serialize()); result.set("host"sv, url.serialized_host());
+            result.set("profile"sv, configuration.profile_for(url)); result.set("proxied"sv, configuration.proxy_for(url).has_value());
+            JsonArray failures;
+            for (auto const& [host, failure] : view->proxy_failures()) {
+                auto failed_url = URL::Parser::basic_parse(failure.url);
+                if (!failed_url.has_value()) continue;
+                JsonObject item;
+                item.set("host"sv, host); item.set("count"sv, failure.count); item.set("error"sv, failure.error);
+                item.set("profile"sv, configuration.profile_for(*failed_url)); item.set("proxied"sv, configuration.proxy_for(*failed_url).has_value());
+                TRY(failures.append(move(item)));
+            }
+            result.set("failures"sv, move(failures));
+            return JsonValue(move(result));
+        }();
+        finish(request_id, move(result)); return;
+    }
     if (command == "devtools"sv) {
         auto type = object.get_string("type"sv);
         if (type == "devtools.close"sv) { if (auto session = m_devtools.take(view_id)) delete session; done(); return; }

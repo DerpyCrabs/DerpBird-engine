@@ -493,6 +493,10 @@ public:
 
     void did_block_resource(Badge<WebContentPage>, URL::URL const&, StringView kind, String const& rule);
     void reset_blocked_resources();
+    struct ProxyFailure { u32 count { 0 }; String error; String url; };
+    void did_start_proxy_request(u64, URL::URL const&);
+    void did_finish_proxy_request(u64, Optional<Requests::NetworkError> const&);
+    auto const& proxy_failures() const { return m_proxy_failures; }
     bool request_logging_enabled() const { return m_request_logging; }
     void set_request_logging(bool enabled) { if (m_request_logging == enabled) return; m_request_logging = enabled; did_change_state(); }
     void did_start_logged_request(Badge<WebContentPage>, URL::URL const&, StringView kind);
@@ -1274,6 +1278,8 @@ protected:
 
     Vector<BlockedResource> m_blocked_resources;
     void append_request_log(URL::URL const&, StringView kind, String const& rule);
+    HashMap<u64, URL::URL> m_proxy_requests;
+    HashMap<String, ProxyFailure> m_proxy_failures;
     bool m_request_logging { false };
     CircularQueue<BlockingLogEntry, 128> m_blocking_log;
     u64 m_blocking_log_sequence { 0 };

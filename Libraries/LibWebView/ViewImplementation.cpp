@@ -1,3 +1,4 @@
+#include <LibRequests/NetworkError.h>
 /*
  * Copyright (c) 2023, Linus Groh <linusg@serenityos.org>
  *
@@ -2723,6 +2724,24 @@ void ViewImplementation::append_request_log(URL::URL const& url, StringView kind
     did_change_state();
 }
 
+void ViewImplementation::did_start_proxy_request(u64 id, URL::URL const& url)
+{
+    if (m_proxy_requests.size() >= 4096 || !url.scheme().is_one_of("http"sv, "https"sv)) return;
+    m_proxy_requests.set(id, url);
+}
+
+void ViewImplementation::did_finish_proxy_request(u64 id, Optional<Requests::NetworkError> const& error)
+{
+    auto url = m_proxy_requests.take(id);
+    if (!url.has_value() || !error.has_value()) return;
+    auto host = MUST(String::from_utf8(url->serialized_host()));
+    if (!m_proxy_failures.contains(host) && m_proxy_failures.size() >= 256) return;
+    auto& failure = m_proxy_failures.ensure(host, [] { return ProxyFailure {}; });
+    if (failure.count < 1000000) ++failure.count;
+    failure.error = MUST(String::from_utf8(Requests::network_error_to_string(*error)));
+    failure.url = url->serialize();
+}
+
 void ViewImplementation::did_start_logged_request(Badge<WebContentPage>, URL::URL const& url, StringView kind)
 {
     if (m_request_logging) append_request_log(url, kind, {});
@@ -3413,6 +3432,8 @@ void ViewImplementation::cancel_all_native_geolocation_requests()
 
 void ViewImplementation::did_start_navigation()
 {
+    m_proxy_requests.clear();
+    m_proxy_failures.clear();
     reset_blocked_resources();
     set_loading_state(true);
     dump_session_history("did-start-navigation"sv);

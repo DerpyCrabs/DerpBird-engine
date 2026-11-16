@@ -208,6 +208,18 @@ ErrorOr<void> ProxyConfiguration::set_omega(JsonObject options, String active)
         return {};
     };
     for (auto const& name : names) TRY(visit(name, 0));
+    if (options.has("-derpbirdDomainRules"sv)) {
+        auto rules = options.get_object("-derpbirdDomainRules"sv);
+        if (!rules.has_value() || rules->size() > 20000) return Error::from_string_literal("Invalid domain proxy rules");
+        Optional<Error> rule_error;
+        rules->for_each_member([&](auto const& host, auto const& target) {
+            auto address = MUST(String::formatted("https://{}/", host));
+            auto parsed = URL::Parser::basic_parse(address);
+            if (host.bytes_as_string_view().contains('*') || host.bytes_as_string_view().contains('|') || host.bytes().size() > 253 || !parsed.has_value() || parsed->serialized_host() != host || !target.is_string() || !exists(target.as_string()))
+                rule_error = Error::from_string_literal("Invalid domain proxy rule");
+        });
+        if (rule_error.has_value()) return rule_error.release_value();
+    }
     m_omega_options = move(options);
     m_active_profile = move(active);
     m_omega_endpoints = move(endpoints);
@@ -240,6 +252,33 @@ Optional<Proxy const&> ProxyConfiguration::omega_proxy_for(URL::URL const& url, 
     auto field = url.scheme().is_one_of("https"sv, "wss"sv) ? "proxyForHttps"sv : "proxyForHttp"sv;
     if (!profile->has(field)) field = "fallbackProxy"sv;
     return m_omega_endpoints.get(MUST(String::formatted("{}:{}", name, field)));
+}
+
+String ProxyConfiguration::profile_for(URL::URL const& url) const
+{
+    if (!proxy_for(url).has_value()) return "direct"_string;
+    auto name = m_active_profile.is_empty() ? "system"_string : m_active_profile;
+    if (auto rules = m_omega_options.get_object("-derpbirdDomainRules"sv); rules.has_value())
+        name = rules->get_string(url.serialized_host()).value_or(name);
+    for (size_t depth = 0; depth < 129; ++depth) {
+        if (name.is_one_of("direct"sv, "system"sv)) return name;
+        auto profile = m_omega_options.get_object(MUST(String::formatted("+{}", name)));
+        if (!profile.has_value()) return "direct"_string;
+        auto type = profile->get_string("profileType"sv).value_or(String {});
+        if (type == "SystemProfile"sv) return "system"_string;
+        if (!type.is_one_of("SwitchProfile"sv, "VirtualProfile"sv)) return name;
+        auto next = profile->get_string("defaultProfileName"sv).value_or("direct"_string);
+        if (auto rules = profile->get_array("rules"sv); rules.has_value()) {
+            for (auto const& rule : rules->values()) {
+                if (omega_condition(rule.as_object().get_object("condition"sv).value(), url)) {
+                    next = rule.as_object().get_string("profileName"sv).value();
+                    break;
+                }
+            }
+        }
+        name = move(next);
+    }
+    return "direct"_string;
 }
 
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <AK/JsonObject.h>
+#include <LibHTTP/Proxy.h>
 #include <UI/Qt/HubConnection.h>
 namespace Ladybird {
 class DerpBirdProxy {
@@ -15,10 +16,21 @@ public:
     static ErrorOr<JsonValue> replace(JsonObject const& request)
     {
         auto result = TRY(HubConnection::the().request_derpbird_sync(0, "proxy.replace"_string, request));
-        if (result.is_object()) s_state = result.as_object();
+        if (result.is_object()) { s_state = result.as_object(); s_configuration.clear(); }
         return result;
     }
+    static ErrorOr<String> profile_for(URL::URL const& url)
+    {
+        if (!s_configuration.has_value()) {
+            auto value = TRY(state());
+            auto configuration = HTTP::ProxyConfiguration::from_environment();
+            TRY(configuration.set_omega(value.get_object("options"sv).value(), value.get_string("active"sv).value()));
+            s_configuration = move(configuration);
+        }
+        return s_configuration->profile_for(url);
+    }
 private:
+    static inline Optional<HTTP::ProxyConfiguration> s_configuration;
     static inline Optional<JsonObject> s_state;
 };
 }

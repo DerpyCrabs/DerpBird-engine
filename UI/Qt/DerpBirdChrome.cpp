@@ -181,6 +181,14 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                 if (m_window.is_private() == WebView::IsPrivate::Yes || Application::the().derpbird_profile_is_temporary()) {
                     completion(Error::from_string_literal("Edit proxy settings in a regular persistent window")); return;
                 }
+                if (type == "proxy.site"sv) {
+                    auto* tab = m_window.current_tab();
+                    auto requested = data.as_object().get_string("url"sv);
+                    if (!tab || !tab->is_loaded() || !requested.has_value() || tab->view().url().serialize() != *requested) {
+                        completion(Error::from_string_literal("The active page changed; reopen the proxy switcher")); return;
+                    }
+                    tab->view().derpbird_command("proxy.site"_string, data, AK::move(completion)); return;
+                }
                 if (type == "proxy.get"sv) {
                     auto state = DerpBirdProxy::state();
                     if (state.is_error()) completion(state.release_error());
@@ -188,6 +196,12 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                     return;
                 }
                 if (type == "proxy.replace"sv) {
+                    if (auto current_url = data.as_object().get_string("currentURL"sv); current_url.has_value()) {
+                        auto* tab = m_window.current_tab();
+                        if (!tab || !tab->is_loaded() || tab->view().url().serialize() != *current_url) {
+                            completion(Error::from_string_literal("The active page changed; reopen the proxy switcher")); return;
+                        }
+                    }
                     auto result = DerpBirdProxy::replace(data.as_object());
                     if (!result.is_error()) {
                         for (auto* widget : QApplication::topLevelWidgets())
@@ -964,8 +978,12 @@ JsonValue DerpBirdChrome::snapshot()
         log.set("entries"sv, AK::move(entries));
         state.set("blockingLog"sv, AK::move(log));
     }
-    auto proxy = DerpBirdProxy::state();
-    state.set("proxyProfile"sv, proxy.is_error() ? "system"_string : proxy.value().get_string("active"sv).value_or("system"_string));
+    auto proxy_profile = "direct"_string;
+    if (auto* tab = m_window.current_tab(); tab && tab->is_loaded()) {
+        auto effective = DerpBirdProxy::profile_for(tab->view().url());
+        if (!effective.is_error()) proxy_profile = effective.release_value();
+    }
+    state.set("proxyProfile"sv, proxy_profile);
     state.set("version"sv, 1);
     state.set("revision"sv, ++m_revision);
     JsonObject preferences;

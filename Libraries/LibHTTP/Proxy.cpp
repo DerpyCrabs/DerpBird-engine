@@ -16,6 +16,7 @@
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
 #include <LibURL/URL.h>
+#include <LibURL/Parser.h>
 
 namespace HTTP {
 
@@ -185,6 +186,12 @@ ProxyConfiguration ProxyConfiguration::from_environment(EnvironmentLookup const&
 
 Optional<Proxy const&> ProxyConfiguration::proxy_for(URL::URL const& url) const
 {
+    if (url.scheme().is_one_of("http"sv, "https"sv, "ws"sv, "wss"sv)) {
+        if (auto rules = m_omega_options.get_object("-derpbirdDomainRules"sv); rules.has_value()) {
+            if (auto target = rules->get_string(url.serialized_host()); target.has_value())
+                return omega_proxy_for(url, *target);
+        }
+    }
     if (m_omega_options.size() && m_active_profile != "system"sv)
         return omega_proxy_for(url, m_active_profile);
     Optional<Proxy> const* proxy = nullptr;
