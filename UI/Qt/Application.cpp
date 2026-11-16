@@ -92,6 +92,10 @@
 #    include <UI/Qt/X11Window.h>
 #endif
 
+#ifdef LADYBIRD_HAS_WAYLAND_CLIENT
+#    include <UI/Qt/WaylandWindow.h>
+#endif
+
 #include <QAction>
 #include <QClipboard>
 #include <QDesktopServices>
@@ -1291,11 +1295,23 @@ Optional<String> Application::system_font_family() const
 #endif
 }
 
-BrowserWindow& Application::new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& configuration, BrowserWindow::IsPopupWindow is_popup_window, WebView::IsPrivate is_private, Optional<u64> hub_view_id, ShowWindow show_window, Optional<Web::HTML::PreparedNavigationDescriptor> initial_navigation)
+BrowserWindow& Application::new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& configuration, BrowserWindow::IsPopupWindow is_popup_window, WebView::IsPrivate is_private, Optional<u64> hub_view_id, ShowWindow show_window, Optional<Web::HTML::PreparedNavigationDescriptor> initial_navigation, QString agent_id)
 {
     auto* window = new BrowserWindow(initial_urls, is_popup_window, is_private, hub_view_id);
 
-    auto should_focus_location_editor = initial_urls.size() == 1 && initial_urls.first() == Application::settings().new_tab_page_url();
+    if (!agent_id.isEmpty()) {
+        window->setProperty("derpbirdAgentId", agent_id);
+        window->setWindowRole("derpbird-agent");
+        window->setAttribute(Qt::WA_ShowWithoutActivating);
+        window->setWindowTitle("DerpBird");
+#ifdef LADYBIRD_HAS_WAYLAND_CLIENT
+        set_wayland_agent_window_identity(*window);
+#endif
+#if defined(AK_OS_LINUX)
+        set_x11_agent_window_identity(*window);
+#endif
+    }
+    auto should_focus_location_editor = agent_id.isEmpty() && initial_urls.size() == 1 && initial_urls.first() == Application::settings().new_tab_page_url();
     if (should_focus_location_editor) {
         if (auto* tab = window->current_tab())
             tab->set_url_is_hidden(true);
@@ -1324,7 +1340,8 @@ BrowserWindow& Application::new_window(Vector<URL::URL> const& initial_urls, Win
 
 void Application::present_window(BrowserWindow& window, WindowConfiguration const& configuration, ShowWindow show_window)
 {
-    set_active_window(window);
+    if (window.property("derpbirdAgentId").toString().isEmpty())
+        set_active_window(window);
     QObject::connect(&window, &QObject::destroyed, m_application.ptr(), [this, window = &window] {
         if (m_active_window == window)
             m_active_window = nullptr;
@@ -1337,8 +1354,10 @@ void Application::present_window(BrowserWindow& window, WindowConfiguration cons
         else
             window.show();
 
-        window.activateWindow();
-        window.raise();
+        if (window.property("derpbirdAgentId").toString().isEmpty()) {
+            window.activateWindow();
+            window.raise();
+        }
     }
 }
 

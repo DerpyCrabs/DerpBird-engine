@@ -23,6 +23,7 @@
 namespace Ladybird {
 
 class DerpBirdImport;
+class DerpBirdActivityOverlay;
 class DerpBirdDevTools;
 class DerpBirdFilePicker;
 class BrowserWindow;
@@ -52,6 +53,7 @@ public:
 
 private:
     QString m_automation_window_id;
+    QHash<QString, QPointer<DerpBirdActivityOverlay>> m_activity_overlays;
     struct Workspace { QString id; QString name; QString icon; QString color; QPointer<Tab> last_tab; };
     QVector<Workspace> m_workspaces;
     QString m_workspace { "default" };

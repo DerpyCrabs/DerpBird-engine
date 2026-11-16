@@ -110,7 +110,10 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         };
 
         auto configuration = app->configuration_for_new_window();
-        if (auto* restored_window = app->restore_previous_session(configuration)) {
+        auto agent_id = qEnvironmentVariable("DERPBIRD_AGENT_WINDOW");
+        if (!agent_id.isEmpty()) {
+            app->new_window(browser_options.urls, configuration, Ladybird::BrowserWindow::IsPopupWindow::No, WebView::IsPrivate::No, {}, Ladybird::ShowWindow::Yes, {}, agent_id);
+        } else if (auto* restored_window = app->restore_previous_session(configuration)) {
             // A whole restored session replaces the usual startup tab, so only the URLs the user passed open with it.
             // With only pinned tabs restored, the usual startup tabs open after them.
             auto restored_everything = app->launch_restore_policy() == Ladybird::SessionLaunchPolicy::Everything;

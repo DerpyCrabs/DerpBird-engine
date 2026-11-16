@@ -128,7 +128,7 @@ public:
     Function<void(URL::URL)> on_open_file;
 
     // A page's initial navigation, when there is one, starts in place of the first initial URL.
-    BrowserWindow& new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& = {}, BrowserWindow::IsPopupWindow is_popup_window = BrowserWindow::IsPopupWindow::No, WebView::IsPrivate = WebView::IsPrivate::No, Optional<u64> hub_view_id = {}, ShowWindow = ShowWindow::Yes, Optional<Web::HTML::PreparedNavigationDescriptor> initial_navigation = {});
+    BrowserWindow& new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& = {}, BrowserWindow::IsPopupWindow is_popup_window = BrowserWindow::IsPopupWindow::No, WebView::IsPrivate = WebView::IsPrivate::No, Optional<u64> hub_view_id = {}, ShowWindow = ShowWindow::Yes, Optional<Web::HTML::PreparedNavigationDescriptor> initial_navigation = {}, QString agent_id = {});
     WindowConfiguration configuration_for_new_window() const;
 
     // Opens the windows startup recovery kept open, and returns the frontmost one, if any.

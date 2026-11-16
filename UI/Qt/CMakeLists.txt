@@ -101,6 +101,19 @@ if (LINUX AND NOT ANDROID)
         target_link_libraries(ladybird_impl PRIVATE PkgConfig::WAYLAND_CLIENT)
         target_compile_definitions(ladybird_impl PUBLIC LADYBIRD_HAS_WAYLAND_CLIENT)
     endif()
+    if (WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_FOUND)
+        pkg_get_variable(WAYLAND_SCANNER_EXECUTABLE wayland-scanner wayland_scanner)
+        set(agent_protocol_header "${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h")
+        add_custom_command(
+            OUTPUT "${agent_protocol_header}"
+            COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${CMAKE_CURRENT_SOURCE_DIR}/Protocols/xdg-shell.xml" "${agent_protocol_header}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Protocols/xdg-shell.xml"
+            VERBATIM
+        )
+        target_sources(ladybird_impl PRIVATE "${agent_protocol_header}")
+        target_include_directories(ladybird_impl PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+        target_compile_definitions(ladybird_impl PUBLIC DERPBIRD_HAS_WAYLAND_APP_ID)
+    endif()
     if (WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_FOUND AND USE_VULKAN_DMABUF_IMAGES)
         pkg_get_variable(WAYLAND_SCANNER_EXECUTABLE wayland-scanner wayland_scanner)
         foreach(protocol linux-dmabuf-v1 viewporter)

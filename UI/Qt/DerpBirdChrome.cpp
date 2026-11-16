@@ -1,3 +1,4 @@
+#include <UI/Qt/DerpBirdActivityOverlay.h>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -587,6 +588,8 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
         .owner = this,
         .state = [this] {
             JsonObject state;
+            state.set("activityFeedback"sv, true);
+            state.set("agentId"sv, ak_string_from_qstring(m_window.property("derpbirdAgentId").toString()));
             state.set("private"sv, m_window.is_private() == WebView::IsPrivate::Yes);
             state.set("profile"sv, MUST(String::from_utf8(Application::the().derpbird_profile_paths().data.view())));
             JsonArray tabs;
@@ -606,6 +609,36 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
             return JsonValue { AK::move(state) };
         },
         .request = [this](JsonValue const& data, auto done) {
+            if (data.is_object() && data.as_object().get_string("type"sv) == "automation.activity"sv) {
+                auto const& obj = data.as_object();
+                auto id = obj.get_string("tabId"sv), kind = obj.get_string("kind"sv);
+                if (!id.has_value() || !kind.has_value()) { done(Error::from_string_literal("Missing activity target")); return; }
+                Tab* target = nullptr;
+                for (int i = 0; i < m_window.tab_count(); ++i)
+                    if (tab_id(*m_window.tab_at(i)) == *id) target = m_window.tab_at(i);
+                if (!target || !target->is_loaded()) { done(JsonValue {}); return; }
+                auto key = qstring_from_ak_string(*id);
+                auto& overlay = m_activity_overlays[key];
+                if (!overlay) overlay = new DerpBirdActivityOverlay(target->view());
+                auto point = [&](StringView name) -> Optional<QPointF> {
+                    auto value = obj.get_object(name);
+                    if (!value.has_value()) return {};
+                    auto x = value->get("x"sv), y = value->get("y"sv);
+                    if (!x.has_value() || !y.has_value() || !x->is_number() || !y->is_number()) return {};
+                    auto px=x->get_double_with_precision_loss().value(), py=y->get_double_with_precision_loss().value();
+                    if (!std::isfinite(px) || !std::isfinite(py)) return {};
+                    return QPointF(px, py);
+                };
+                Optional<QRectF> field;
+                auto bounds = obj.get_object("field"sv);
+                if (bounds.has_value()) {
+                    auto x=bounds->get("x"sv), y=bounds->get("y"sv), w=bounds->get("width"sv), h=bounds->get("height"sv);
+                    if (x.has_value() && y.has_value() && w.has_value() && h.has_value() && x->is_number() && y->is_number() && w->is_number() && h->is_number())
+                        field = QRectF(x->get_double_with_precision_loss().value(), y->get_double_with_precision_loss().value(), w->get_double_with_precision_loss().value(), h->get_double_with_precision_loss().value());
+                }
+                overlay->activity(qstring_from_ak_string(*kind), point("point"sv), point("from"sv), field);
+                done(JsonValue {}); return;
+            }
             if (data.is_object() && data.as_object().get_string("type"sv) == "automation.screenshot"sv) {
                 DerpBirdWindowScreenshot::capture(m_window, AK::move(done));
                 return;
@@ -654,17 +687,8 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
         },
         .changed = [this] { queue_snapshot(); },
     });
-    new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_A), &window, [this] {
-        auto& automation = DerpBirdAutomation::the();
-        QString message;
-        if (automation.enabled()) { automation.disable(); message = "AI browser access disabled"; }
-        else if (auto result = automation.enable(); result.is_error()) message = qstring_from_ak_string(MUST(String::formatted("{}", result.error())));
-        else message = "AI browser access enabled: " + automation.endpoint();
-        QToolTip::showText(m_window.mapToGlobal(QPoint(24, 24)), message, &m_window, {}, 10000);
-    });
-    if (qEnvironmentVariableIsSet("DERPBIRD_AUTOMATION_SOCKET")) {
-        if (auto result = DerpBirdAutomation::the().enable(); result.is_error()) warnln("Automation: {}", result.error());
-    }
+    // Same-user local automation is available for every browser by default.
+    if (auto result = DerpBirdAutomation::the().enable(); result.is_error()) warnln("Automation: {}", result.error());
     m_shell->load(URL::Parser::basic_parse("about:derpbird"sv).release_value());
 }
 
@@ -861,6 +885,8 @@ void DerpBirdChrome::release_observation(Tab* tab)
 
 void DerpBirdChrome::unobserve_tab(Tab& tab)
 {
+    auto overlay = m_activity_overlays.take(qstring_from_ak_string(tab_id(tab)));
+    if (overlay) delete overlay;
     if (tab.session_tab_id().has_value()) m_tree_tabs.remove(*tab.session_tab_id());
     remove_split(&tab);
     m_favicon_cache.remove(&tab);
@@ -1427,7 +1453,8 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         if (type == "window.new"sv || *is_private != (m_window.is_private() == WebView::IsPrivate::Yes)) {
             Application::the().new_window(
                 { *parsed }, {}, BrowserWindow::IsPopupWindow::No,
-                *is_private ? WebView::IsPrivate::Yes : WebView::IsPrivate::No);
+                *is_private ? WebView::IsPrivate::Yes : WebView::IsPrivate::No, {}, ShowWindow::Yes, {},
+                data.get_string("agentId"sv).has_value() ? qstring_from_ak_string(*data.get_string("agentId"sv)) : QString {});
         } else {
             m_window.new_tab_from_url(*parsed, Web::HTML::ActivateTab::Yes,
                 BrowserWindow::TabLocation::end());

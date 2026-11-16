@@ -7,11 +7,45 @@
 #include <UI/Qt/WaylandWindow.h>
 
 #include <QGuiApplication>
+#include <QWidget>
+#include <QWindow>
+#ifdef DERPBIRD_HAS_WAYLAND_APP_ID
+#    include <qpa/qplatformwindow_p.h>
+// Generated listeners cast away const, as in WaylandPageSurface.cpp.
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wcast-qual"
+#    include <xdg-shell-client-protocol.h>
+#    pragma GCC diagnostic pop
+#endif
 
 #include <string.h>
 #include <wayland-client.h>
 
 namespace Ladybird {
+
+void set_wayland_agent_window_identity(QWidget& widget)
+{
+#ifdef DERPBIRD_HAS_WAYLAND_APP_ID
+    if (!qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>())
+        return;
+    widget.winId(); // Create the platform window before show(), without mapping it.
+    auto* window = widget.windowHandle();
+    auto* native = window->nativeInterface<QNativeInterface::Private::QWaylandWindow>();
+    if (!native)
+        return;
+    auto apply = [native] {
+        if (auto* toplevel = native->surfaceRole<xdg_toplevel>())
+            xdg_toplevel_set_app_id(toplevel, "org.derpbird.Agent");
+    };
+    // Qt emits this after its default app_id, before the initial surface commit.
+    // Keep the connection for hide/show surface recreation as well.
+    QObject::connect(native, &QNativeInterface::Private::QWaylandWindow::surfaceRoleCreated, &widget, apply);
+    apply();
+#else
+    Q_UNUSED(widget);
+#endif
+}
+
 
 bool wayland_compositor_moves_dragged_windows()
 {

@@ -33,6 +33,16 @@ static xcb_connection_t* x11_connection()
     return x11_application->connection();
 }
 
+void set_x11_agent_window_identity(QWidget& widget)
+{
+    auto* connection = x11_connection();
+    if (!connection)
+        return;
+    static constexpr char identity[] = "derpbird-agent\0org.derpbird.Agent";
+    xcb_icccm_set_wm_class(connection, static_cast<xcb_window_t>(widget.winId()), sizeof(identity), identity);
+    xcb_flush(connection);
+}
+
 void set_x11_window_aspect_ratio(QWidget& widget, Gfx::IntSize aspect_ratio)
 {
     auto* connection = x11_connection();

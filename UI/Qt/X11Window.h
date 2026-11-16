@@ -12,6 +12,8 @@ class QWidget;
 
 namespace Ladybird {
 
+void set_x11_agent_window_identity(QWidget&);
+
 // Does nothing unless the widget's window is on an X11 display.
 void set_x11_window_aspect_ratio(QWidget&, Gfx::IntSize);
 
