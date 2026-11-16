@@ -852,6 +852,7 @@ JsonValue Settings::serialize_json() const
     if (m_tab_settings.vertical_tabs_expanded_width.has_value())
         tab_settings.set(VERTICAL_TABS_EXPANDED_WIDTH_KEY, *m_tab_settings.vertical_tabs_expanded_width);
     tab_settings.set(EVERYTHING_IN_SIDEBAR_KEY, m_tab_settings.everything_in_sidebar);
+    tab_settings.set("addressBarOnBottom"sv, m_tab_settings.address_bar_on_bottom);
     settings.set(TAB_SETTINGS_KEY, move(tab_settings));
 
     JsonObject browsing_behavior;
@@ -1273,6 +1274,7 @@ TabSettings Settings::parse_tab_settings(JsonValue const& settings)
     if (auto everything_in_sidebar = settings.as_object().get_bool(EVERYTHING_IN_SIDEBAR_KEY); everything_in_sidebar.has_value())
         tab_settings.everything_in_sidebar = *everything_in_sidebar;
 
+    tab_settings.address_bar_on_bottom = settings.as_object().get_bool("addressBarOnBottom"sv).value_or(false);
     return tab_settings;
 }
 

@@ -989,6 +989,11 @@ JsonValue DerpBirdChrome::snapshot()
     JsonObject preferences;
     auto const& settings = Application::settings().tab_settings();
     preferences.set("layout"sv, settings.vertical_tabs_enabled ? "vertical"sv : "horizontal"sv);
+    JsonObject chrome_layout;
+    chrome_layout.set("preset"sv, settings.vertical_tabs_enabled ? (settings.everything_in_sidebar ? "compact"sv : "sidebar"sv) : (settings.address_bar_on_bottom ? "bottom"sv : "classic"sv));
+    chrome_layout.set("side"sv, settings.vertical_tabs_position == WebView::VerticalTabsPosition::Right ? "right"sv : "left"sv);
+    chrome_layout.set("address"sv, settings.address_bar_on_bottom ? "bottom"sv : "top"sv);
+    preferences.set("chromeLayout"sv, AK::move(chrome_layout));
     preferences.set("sidebarWidth"sv, clamp<int>(settings.vertical_tabs_expanded_width.value_or(196), 120, 600));
     preferences.set("wrapTabs"sv, m_shell_preferences->value("wrapTabs", false).toBool());
     state.set("preferences"sv, AK::move(preferences));
@@ -1067,7 +1072,7 @@ void DerpBirdChrome::focus_address()
     m_shell->setFocus();
     // This constant program only runs in the dedicated shell view.
     m_shell->run_javascript(
-        "window.dispatchEvent(new Event('derpbird-shell-keyboard-focus'));document.getElementById('location')?.select()"_string);
+        "window.dispatchEvent(new Event('derpbird-shell-keyboard-focus'));window.dispatchEvent(new Event('derpbird-focus-address'))"_string);
 }
 
 ErrorOr<JsonValue> DerpBirdChrome::request(JsonValue const& data)
@@ -1191,12 +1196,32 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         m_blocking_log_visible = *visible;
         return {};
     }
+    if (type == "shell.set-chrome-layout"sv) {
+        auto layout = data.get_object("layout"sv);
+        if (!layout.has_value()) return Error::from_string_literal("Invalid chrome layout");
+        auto preset = layout->get_string("preset"sv);
+        auto side = layout->get_string("side"sv);
+        auto address = layout->get_string("address"sv);
+        if (!preset.has_value() || !preset->is_one_of("classic"sv, "sidebar"sv, "bottom"sv, "compact"sv)
+            || !side.has_value() || !side->is_one_of("left"sv, "right"sv)
+            || !address.has_value() || !address->is_one_of("top"sv, "bottom"sv))
+            return Error::from_string_literal("Invalid chrome layout");
+        auto settings = Application::settings().tab_settings();
+        settings.vertical_tabs_enabled = preset->is_one_of("sidebar"sv, "compact"sv);
+        settings.everything_in_sidebar = *preset == "compact"sv;
+        settings.vertical_tabs_position = *side == "right"sv ? WebView::VerticalTabsPosition::Right : WebView::VerticalTabsPosition::Left;
+        settings.address_bar_on_bottom = *preset == "bottom"sv || (*preset != "classic"sv && *address == "bottom"sv);
+        Application::settings().set_tab_settings(settings);
+        return {};
+    }
     if (type == "shell.set-layout"sv) {
         auto layout = data.get_string("layout"sv);
         if (!layout.has_value() || !layout->is_one_of("vertical"sv, "horizontal"sv))
             return Error::from_string_literal("Invalid tab layout");
         auto settings = Application::settings().tab_settings();
         settings.vertical_tabs_enabled = *layout == "vertical"sv;
+        settings.everything_in_sidebar = false;
+        settings.address_bar_on_bottom = false;
         Application::settings().set_tab_settings(settings);
         return {};
     }

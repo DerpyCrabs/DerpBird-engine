@@ -98,6 +98,7 @@ struct TabSettings {
     // With vertical tabs, the open sidebar also holds the navigation buttons, the address field and the toolbar's other
     // buttons, and there is no toolbar row. The sidebar is then always on the left.
     bool everything_in_sidebar { false };
+    bool address_bar_on_bottom { false };
     Optional<u16> vertical_tabs_expanded_width;
 };
 

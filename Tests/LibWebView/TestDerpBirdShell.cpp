@@ -1,5 +1,8 @@
 #include "HeadlessTest.h"
 #include <AK/JsonObject.h>
+#include <LibWebView/Settings.h>
+#include <LibCore/StandardPaths.h>
+#include <LibFileSystem/FileSystem.h>
 #include <AK/JsonArray.h>
 #include <LibCore/Environment.h>
 #include <LibCore/System.h>
@@ -82,6 +85,20 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             result.set("scripts"sv, *script_snapshot.get_array("items"sv));
             return JsonValue(move(result));
         }
+        if (data.get_string("type"sv) == "proxy.site"sv) {
+            auto profile = proxy_state.get_string("active"sv).value_or("direct"_string);
+            if (auto options = proxy_state.get_object("options"sv); options.has_value()) {
+                if (auto rules = options->get_object("-derpbirdDomainRules"sv); rules.has_value())
+                    profile = rules->get_string("example.test"sv).value_or(profile);
+            }
+            JsonObject site;
+            site.set("url"sv, "https://example.test/"sv);
+            site.set("host"sv, "example.test"sv);
+            site.set("profile"sv, profile);
+            site.set("proxied"sv, profile != "direct"sv);
+            site.set("failures"sv, JsonArray {});
+            return JsonValue(move(site));
+        }
         if (data.get_string("type"sv) == "proxy.get"sv) return JsonValue(proxy_state);
         if (data.get_string("type"sv) == "proxy.replace"sv) {
             HTTP::ProxyConfiguration configuration;
@@ -129,6 +146,50 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
     VERIFY(!crashed);
     EXPECT_EQ(creations, 1u);
 
+    view->start_sending_console_output(true, true);
+    // Verify geometry and input identity in the shipping engine for every layout.
+    String layout_result;
+    view->on_console_message = [&](WebView::ConsoleOutput message) {
+        if (auto* log = message.output.get_pointer<WebView::ConsoleLog>(); log && log->arguments.size() == 1 && log->arguments[0].is_string()) {
+            auto text = log->arguments[0].as_string();
+            if (text.bytes_as_string_view().starts_with("LAYOUT:"sv)) layout_result = text;
+        }
+    };
+    view->run_javascript(R"JS((async()=>{
+      const check=(value,message)=>{if(!value)throw Error(message)};
+      const paint=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      const tab=(id)=>({id,url:'https://example.test/',title:id,loading:false,canGoBack:false,canGoForward:false,pinned:false,private:false,audible:false,muted:false});
+      let revision=10;
+      const emit=(layout,group=true)=>document.dispatchEvent(new CustomEvent('WebUIMessage',{detail:{name:'derpbird.snapshot',data:{version:1,revision:++revision,tabs:group?[tab('test'),{...tab('child'),parentId:'test'}]:[tab('test')],activeTabId:'test',preferences:{layout:['sidebar','compact'].includes(layout.preset)?'vertical':'horizontal',chromeLayout:layout}}}}));
+      const layouts=[{preset:'classic',side:'left',address:'top'},{preset:'bottom',side:'left',address:'bottom'},...['left','right'].flatMap(side=>[{preset:'compact',side,address:'top'},...['top','bottom'].map(address=>({preset:'sidebar',side,address}))])];
+      try {
+        for(const layout of layouts){
+          emit(layout);await paint();
+          const content=document.querySelector('#content-surface').getBoundingClientRect();
+          const tabs=document.querySelector('.tabs').getBoundingClientRect();
+          const nav=document.querySelector('.navigation').getBoundingClientRect();
+          check(content.width>0&&content.height>0,'empty content');
+          if(layout.preset==='sidebar'||layout.preset==='compact')check(layout.side==='right'?tabs.left>=content.right-1:tabs.right<=content.left+1,'sidebar overlaps content');
+          if(layout.preset!=='compact')check(layout.preset==='bottom'||layout.address==='bottom'?nav.top>=content.bottom-1:nav.bottom<=content.top+1,'address overlaps content');
+          check(document.querySelector('[data-tab-id=child]').closest('.tree-child'),'missing group');
+          const row=document.querySelector('[data-tab-id=test]');
+          window.dispatchEvent(new Event('derpbird-focus-address'));await paint();
+          const compact=layout.preset==='compact',selector=compact?'#palette-location':'#location';
+          const input=document.querySelector(selector);check(document.activeElement===input,'address focus');
+          input.value='typed.example';input.dispatchEvent(new Event('input',{bubbles:true}));await paint();input.setSelectionRange(2,6);
+          emit(layout);await paint();
+          check(document.querySelector(selector)===input&&document.activeElement===input,'input replaced or blurred');
+          check(input.value==='typed.example'&&input.selectionStart===2&&input.selectionEnd===6,'input caret jumped');
+          check(document.querySelector('[data-tab-id=test]')===row,'tab row replaced');
+          if(compact){check(!document.querySelector('.address-suggestions'),'duplicate suggestions');document.querySelector('[aria-label="Close address palette"]').click();await paint();check(!document.querySelector('.address-palette'),'palette close');}
+        }
+        emit({preset:'sidebar',side:'left',address:'top'},false);await paint();console.log('LAYOUT:OK');
+      }catch(error){console.log('LAYOUT:'+error.message)}
+    })())JS"_string);
+    Core::EventLoop::current().spin_until([&] { return !layout_result.is_empty() || crashed; });
+    VERIFY(!crashed);
+    EXPECT_EQ(layout_result, "LAYOUT:OK"sv);
+
     // Exercise the actual compiled proxy editor in Ladybird, not a DOM emulator.
     String proxy_result;
     view->on_console_message = [&](WebView::ConsoleOutput message) {
@@ -155,14 +216,14 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
         const button=t=>Array.from(document.querySelectorAll('.proxy-manager button')).find(b=>b.textContent===t);
         try {
             document.querySelector('[aria-label="Proxy switcher"]').click();
-            await wait(()=>document.querySelectorAll('.proxy-profile-option:not(:disabled)').length===2);
+            await wait(()=>document.querySelectorAll('.proxy-profile-list .proxy-profile-option:not(:disabled)').length===2);
             const anchor=document.querySelector('[aria-label="Proxy switcher"]');
             const bounds=anchor.getBoundingClientRect();
             if(bounds.width<24 || anchor.scrollWidth>anchor.clientWidth || anchor.textContent.trim())throw new Error('Toolbar icon is clipped');
             const popup=document.querySelector('.proxy-popup').getBoundingClientRect();
             if(popup.width>310 || popup.height>400 || popup.top<bounds.bottom || popup.right>innerWidth)throw new Error('Popup geometry');
             await shot('01-empty-menu');
-            document.querySelectorAll('.proxy-profile-option')[1].click();
+            document.querySelectorAll('.proxy-profile-list .proxy-profile-option')[1].click();
             await wait(()=>!document.querySelector('.proxy-popup'));
             document.querySelector('[aria-label="Proxy switcher"]').click();await wait(()=>document.querySelector('.proxy-profile-option[aria-pressed="true"]:not(:disabled)')?.textContent.includes('System proxy'));
             document.querySelector('[aria-label="Proxy switcher"]').click();await wait(()=>!document.querySelector('.proxy-popup'));
@@ -226,12 +287,12 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             await shot('04-rule-editor');
             document.querySelector('[aria-label="Close proxy settings"]').click();
             document.querySelector('[aria-label="Proxy switcher"]').click();
-            await wait(()=>document.querySelectorAll('.proxy-profile-option').length===4);
+            await wait(()=>document.querySelectorAll('.proxy-profile-list .proxy-profile-option').length===4);
             await wait(()=>!document.querySelector('.proxy-profile-option[aria-pressed="true"]').disabled);
             (document.activeElement ?? document).dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));
             if(document.activeElement!==document.querySelector('.proxy-popup-settings'))throw new Error('Menu End key');
             (document.activeElement ?? document).dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}));
-            if(document.activeElement!==document.querySelector('.proxy-profile-option[aria-pressed="true"]'))throw new Error('Menu arrow key');
+            if(document.activeElement!==document.querySelector('#site-proxy-failures'))throw new Error('Menu arrow key');
             await shot('05-profile-menu');
             (document.activeElement ?? document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
             await wait(()=>!document.querySelector('.proxy-popup'));
@@ -276,7 +337,7 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             document.querySelector('[aria-label="Close scripts"]').click();
             await wait(()=>!document.querySelector('.source-manager'));
             console.log('PROXY:PASS');
-        } catch(error) {console.log('PROXY:FAIL:'+error.message)}
+        } catch(error) {console.log('PROXY:FAIL:'+error.message+': '+document.querySelector('.proxy-popup')?.textContent)}
     })())JS"_string);
     Core::EventLoop::current().spin_until([&] { return !proxy_result.is_empty() || crashed; });
     VERIFY(!crashed);
@@ -350,4 +411,43 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
     EXPECT(view->page().web_ui());
     EXPECT_EQ(snapshots, 3u);
     EXPECT_EQ(creations, 1u);
+}
+
+TEST_CASE(derpbird_layout_settings_survive_restart)
+{
+    auto path = LexicalPath::join(Core::StandardPaths::tempfile_directory(), ByteString::formatted("test-derpbird-layout-{}.json", Core::System::getpid())).string();
+    if (FileSystem::exists(path)) MUST(FileSystem::remove(path, FileSystem::RecursionMode::Disallowed));
+    for (bool vertical : { false, true }) {
+        for (bool compact : { false, true }) {
+            for (bool bottom : { false, true }) {
+                for (auto side : { WebView::VerticalTabsPosition::Left, WebView::VerticalTabsPosition::Right }) {
+                    {
+                        auto settings = WebView::Settings::create(path);
+                        auto tabs = settings.tab_settings();
+                        tabs.vertical_tabs_enabled = vertical;
+                        tabs.everything_in_sidebar = compact;
+                        tabs.address_bar_on_bottom = bottom;
+                        tabs.vertical_tabs_position = side;
+                        tabs.vertical_tabs_expanded_width = 275;
+                        settings.set_tab_settings(tabs);
+                    }
+                    auto restored = WebView::Settings::create(path);
+                    auto const& tabs = restored.tab_settings();
+                    EXPECT_EQ(tabs.vertical_tabs_enabled, vertical);
+                    EXPECT_EQ(tabs.everything_in_sidebar, compact);
+                    EXPECT_EQ(tabs.address_bar_on_bottom, bottom);
+                    EXPECT_EQ(tabs.vertical_tabs_position, side);
+                    EXPECT_EQ(tabs.vertical_tabs_expanded_width.value(), 275);
+                }
+            }
+        }
+    }
+    auto legacy = WebView::Settings::parse_tab_settings(MUST(JsonValue::from_string(R"({"verticalTabsEnabled":true,"everythingInSidebar":true,"verticalTabsPosition":"right"})"sv)));
+    EXPECT(legacy.vertical_tabs_enabled);
+    EXPECT(legacy.everything_in_sidebar);
+    EXPECT_EQ(legacy.vertical_tabs_position, WebView::VerticalTabsPosition::Right);
+    EXPECT(!legacy.address_bar_on_bottom);
+    auto invalid = WebView::Settings::parse_tab_settings(MUST(JsonValue::from_string(R"({"addressBarOnBottom":"true"})"sv)));
+    EXPECT(!invalid.address_bar_on_bottom);
+    MUST(FileSystem::remove(path, FileSystem::RecursionMode::Disallowed));
 }
