@@ -1,3 +1,6 @@
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <UI/Qt/PlainText.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
@@ -74,6 +77,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     if (auto result = Application::the().derpbird_script_store(); result.is_error())
         warnln("Unable to load userscripts: {}", result.error());
     m_shell_preferences = std::make_unique<QSettings>(QString::fromUtf8(Application::the().derpbird_profile_paths().config.characters()) + "/DerpBirdChrome.ini", QSettings::IniFormat);
+    load_workspaces();
     // Browser commands must also work while focus belongs to a web page.
     // The native menu/toolbar is hidden when this chrome is active.
     new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_H), &window, [this] {
@@ -570,7 +574,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     m_content->hide();
     m_content->layout()->setEnabled(false);
     connect(&window.tab_widget(), &TabWidget::current_tab_changed, this,
-        [this] { clear_autofill(); if (m_credential_fill) m_credential_fill->cancel(); m_credential_proposal.clear(); place_content(); queue_snapshot(); });
+        [this] { workspace_tab_changed(); clear_autofill(); if (m_credential_fill) m_credential_fill->cancel(); m_credential_proposal.clear(); place_content(); queue_snapshot(); });
     connect(window.tab_widget().tab_bar(), &QTabBar::tabMoved, this,
         [this] { queue_snapshot(); });
     for (int i = 0; i < window.tab_count(); ++i)
@@ -614,6 +618,12 @@ void DerpBirdChrome::observe_tab(Tab& tab)
         auto parent = m_window.session().tab_tree_parent(*tab.session_tab_id());
         if (!parent.is_error()) tab.setProperty("derpbirdTreeParent", static_cast<qlonglong>(parent.value().value_or(0)));
     }
+    auto workspace = m_workspace;
+    if (m_window.is_private() == WebView::IsPrivate::No && tab.session_tab_id().has_value())
+        workspace = m_shell_preferences->value(QString("workspaceTabs/%1").arg(*tab.session_tab_id()), workspace).toString();
+    if (std::none_of(m_workspaces.begin(), m_workspaces.end(), [&](auto const& w) { return w.id == workspace; })) workspace = "default";
+    assign_workspace(tab, workspace);
+    if (m_window.current_tab() == &tab) workspace_tab_changed();
     auto* scope = new QObject(this);
     m_observed_tabs.insert(&tab, Observation { .scope = scope });
     if (tab.property("derpbirdId").isNull())
@@ -856,6 +866,7 @@ void DerpBirdChrome::group_tab_from_view(Tab& child, Optional<u64> source_view_i
 
 ErrorOr<void> DerpBirdChrome::move_tree_tab(Tab& source, Tab& target, StringView placement)
 {
+    if (tab_workspace(source) != tab_workspace(target)) return Error::from_string_literal("Tabs belong to different workspaces");
     if (&source == &target) return {};
     if (!placement.is_one_of("before"sv, "after"sv, "inside"sv)) return Error::from_string_literal("Invalid drop position");
     if (source.is_pinned() != target.is_pinned()) return Error::from_string_literal("Unpin the tab before grouping it");
@@ -904,6 +915,7 @@ JsonValue DerpBirdChrome::snapshot()
     JsonArray tabs;
     for (int i = 0; i < m_window.tab_count(); ++i) {
         auto& tab = *m_window.tab_at(i);
+        if (tab_workspace(tab) != m_workspace) continue;
         JsonObject entry;
         entry.set("id"sv, tab_id(tab));
         entry.set("url"sv, tab.url().serialize());
@@ -934,6 +946,19 @@ JsonValue DerpBirdChrome::snapshot()
         tabs.must_append(AK::move(entry));
     }
     JsonObject state;
+    JsonObject workspaces;
+    JsonArray workspace_items;
+    for (auto const& w : m_workspaces) {
+        JsonObject item;
+        item.set("id"sv, ak_string_from_qstring(w.id));
+        item.set("name"sv, ak_string_from_qstring(w.name));
+        item.set("icon"sv, ak_string_from_qstring(w.icon));
+        item.set("color"sv, ak_string_from_qstring(w.color));
+        workspace_items.must_append(AK::move(item));
+    }
+    workspaces.set("active"sv, ak_string_from_qstring(m_workspace));
+    workspaces.set("items"sv, AK::move(workspace_items));
+    state.set("workspaces"sv, AK::move(workspaces));
     state.set("addressSuggestions"sv, m_address_suggestions);
     StringBuilder dynamic_rules;
     for (auto line : Application::settings().custom_content_blocker_filters().bytes_as_string_view().split_view('\n')) {
@@ -1000,7 +1025,7 @@ JsonValue DerpBirdChrome::snapshot()
     state.set("tabs"sv, AK::move(tabs));
     JsonArray splits;
     for (auto const& split : m_splits) {
-        if (!split.first || !split.second) continue;
+        if (!split.first || !split.second || tab_workspace(*split.first) != m_workspace) continue;
         JsonObject item;
         item.set("id"sv, tab_id(*split.first));
         item.set("firstTabId"sv, tab_id(*split.first));
@@ -1033,6 +1058,25 @@ void DerpBirdChrome::clear_autofill()
 
 bool DerpBirdChrome::eventFilter(QObject* watched, QEvent* event)
 {
+    // The native tab bar still owns all workspaces. Keep its keyboard cycling
+    // inside the set shown by the web shell, including when page content owns focus.
+    if (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress) {
+        auto* key = static_cast<QKeyEvent*>(event);
+        if (key->modifiers().testFlag(Qt::ControlModifier) && !key->modifiers().testFlag(Qt::AltModifier)
+            && (key->key() == Qt::Key_Tab || key->key() == Qt::Key_Backtab || key->key() == Qt::Key_PageUp || key->key() == Qt::Key_PageDown)) {
+            key->accept();
+            if (event->type() == QEvent::ShortcutOverride) return true;
+            int direction = key->key() == Qt::Key_PageUp || key->key() == Qt::Key_Backtab || key->modifiers().testFlag(Qt::ShiftModifier) ? -1 : 1;
+            auto count = m_window.tab_count();
+            auto current = m_window.tab_index(m_window.current_tab());
+            for (int offset = 1; offset <= count; ++offset) {
+                auto index = (current + direction * offset + count) % count;
+                if (tab_workspace(*m_window.tab_at(index)) == m_workspace) { m_window.activate_tab(index); break; }
+            }
+            return true;
+        }
+    }
+
     if (watched == m_shell && event->type() == QEvent::MouseButtonPress) {
         // A pending tab tooltip must not cover the context menu or take its input.
         if (m_shell->on_leave_tooltip_area) m_shell->on_leave_tooltip_area();
@@ -1243,6 +1287,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         Application::settings().set_tab_settings(Application::settings().tab_settings());
         return {};
     }
+    if (type.bytes_as_string_view().starts_with("workspace."sv)) return workspace_command(data, type);
     if (type == "shell.viewport"sv) {
         auto rect = data.get("rect"sv);
         auto overlays = data.get_array("overlays"sv);
@@ -1265,8 +1310,11 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
             return Error::from_string_literal("Unknown browser page");
         auto url = URL::Parser::basic_parse(TRY(String::formatted("about:{}", *name))).release_value();
         // Reuse a page only within this window's session, including private mode.
-        if (!m_window.activate_tab_with_url(url, URL::ExcludeFragment::Yes))
-            m_window.new_tab_from_url(url, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+        for (int i = 0; i < m_window.tab_count(); ++i) {
+            auto* candidate = m_window.tab_at(i);
+            if (tab_workspace(*candidate) == m_workspace && candidate->url() == url) { m_window.activate_tab(i); return {}; }
+        }
+        m_window.new_tab_from_url(url, Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
         return {};
     }
     if (type == "tab.create"sv || type == "window.new"sv) {
@@ -1440,7 +1488,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         if (!target_id.has_value() || !edge.has_value() || !edge->is_one_of("left"sv, "right"sv, "top"sv, "bottom"sv)) return Error::from_string_literal("Invalid split target");
         Tab* target = nullptr;
         for (int i = 0; i < m_window.tab_count(); ++i) if (tab_id(*m_window.tab_at(i)) == *target_id) target = m_window.tab_at(i);
-        if (!target || target == tab || target->is_pinned() || tab->is_pinned()) return Error::from_string_literal("Split requires two different unpinned tabs");
+        if (!target || tab_workspace(*target) != tab_workspace(*tab) || target == tab || target->is_pinned() || tab->is_pinned()) return Error::from_string_literal("Split requires two different unpinned tabs");
         remove_split(tab); remove_split(target);
         // A split is a single tab-strip item; detach the dragged member from a tree group.
         TRY(detach_tree_tab(*tab));
@@ -1535,13 +1583,13 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
             if (target_index < 0) return;
             // Select the survivor first, avoiding lazy loads of tabs about to close.
             auto* current = window->current_tab();
-            if (current && current != target && !current->is_pinned()
+            if (current && current != target && current->property("derpbirdWorkspace") == target->property("derpbirdWorkspace") && !current->is_pinned()
                 && (!right_only || window->tab_index(current) > target_index))
                 window->activate_tab(target_index);
             for (int i = window->tab_count() - 1; window && target && i >= 0; --i) {
                 if (right_only && i <= window->tab_index(target)) break;
                 auto* candidate = window->tab_at(i);
-                if (candidate != target && !candidate->is_pinned()) window->request_to_close_tab(i);
+                if (candidate != target && !candidate->is_pinned() && candidate->property("derpbirdWorkspace") == target->property("derpbirdWorkspace")) window->request_to_close_tab(i);
             }
         });
         return {};
@@ -1713,3 +1761,104 @@ void DerpBirdChrome::place_content()
 }
 
 } // namespace Ladybird
+
+namespace Ladybird {
+QString DerpBirdChrome::workspace_key() const
+{
+    return QString("workspaces/%1").arg(m_window.session_window_id().value_or(0));
+}
+void DerpBirdChrome::load_workspaces()
+{
+    m_workspaces.append({ "default", "Default", "research", "sage", {} });
+    if (m_window.is_private() == WebView::IsPrivate::Yes) return;
+    auto rows = QJsonDocument::fromJson(m_shell_preferences->value(workspace_key()).toByteArray()).array();
+    for (auto row : rows) {
+        auto w = row.toObject();
+        auto id = w["id"].toString(), name = w["name"].toString(), icon = w["icon"].toString(), color = w["color"].toString();
+        if (id.isEmpty() || id.size() > 128 || name.trimmed().isEmpty() || name.size() > 32 || m_workspaces.size() >= 64
+            || !QStringList { "research", "home", "code", "leaf" }.contains(icon) || !QStringList { "sage", "peach", "lilac", "blue" }.contains(color)) continue;
+        auto found = std::find_if(m_workspaces.begin(), m_workspaces.end(), [&](auto const& item) { return item.id == id; });
+        if (found != m_workspaces.end()) *found = { id, name, icon, color, {} };
+        else m_workspaces.append({ id, name, icon, color, {} });
+    }
+}
+void DerpBirdChrome::save_workspaces()
+{
+    if (m_window.is_private() == WebView::IsPrivate::Yes) return;
+    QJsonArray rows;
+    for (auto const& w : m_workspaces) rows.append(QJsonObject { { "id", w.id }, { "name", w.name }, { "icon", w.icon }, { "color", w.color } });
+    m_shell_preferences->setValue(workspace_key(), QJsonDocument(rows).toJson(QJsonDocument::Compact));
+    m_shell_preferences->sync();
+}
+QString DerpBirdChrome::tab_workspace(Tab const& tab) const
+{
+    return tab.property("derpbirdWorkspace").toString();
+}
+void DerpBirdChrome::assign_workspace(Tab& tab, QString const& id)
+{
+    tab.setProperty("derpbirdWorkspace", id);
+    if (m_window.is_private() == WebView::IsPrivate::No && tab.session_tab_id().has_value())
+        m_shell_preferences->setValue(QString("workspaceTabs/%1").arg(*tab.session_tab_id()), id);
+}
+void DerpBirdChrome::workspace_tab_changed()
+{
+    auto* tab = m_window.current_tab();
+    if (!tab) return;
+    if (tab_workspace(*tab).isEmpty()) assign_workspace(*tab, m_workspace);
+    if (tab_workspace(*tab) != m_workspace) {
+        auto previous = std::find_if(m_workspaces.begin(), m_workspaces.end(), [&](auto const& w) { return w.id == m_workspace; });
+        if (previous != m_workspaces.end() && previous->last_tab && m_window.tab_index(previous->last_tab) < 0) {
+            previous->last_tab = nullptr;
+            for (int i = 0; i < m_window.tab_count(); ++i) {
+                if (tab_workspace(*m_window.tab_at(i)) == m_workspace) { m_window.activate_tab(i); return; }
+            }
+            m_window.new_tab_from_url(Application::settings().new_tab_page_url(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+            return;
+        }
+    }
+    m_workspace = tab_workspace(*tab);
+    for (auto& w : m_workspaces) if (w.id == m_workspace) w.last_tab = tab;
+    m_address_suggestions = JsonValue {};
+    m_pending_suggestions = JsonValue {};
+    ++m_suggestion_query;
+}
+ErrorOr<void> DerpBirdChrome::workspace_command(JsonObject const& data, StringView type)
+{
+    if (type == "workspace.switch"sv) {
+        auto id = data.get_string("id"sv);
+        if (!id.has_value()) return Error::from_string_literal("Missing workspace");
+        auto found = std::find_if(m_workspaces.begin(), m_workspaces.end(), [&](auto const& w) { return ak_string_from_qstring(w.id) == *id; });
+        if (found == m_workspaces.end()) return Error::from_string_literal("Unknown workspace");
+        if (found->id == m_workspace) return {};
+        m_workspace = found->id;
+        auto* target = found->last_tab.data();
+        if (!target) for (int i = 0; i < m_window.tab_count(); ++i) if (tab_workspace(*m_window.tab_at(i)) == m_workspace) { target = m_window.tab_at(i); break; }
+        if (target) m_window.activate_tab(m_window.tab_index(target));
+        else m_window.new_tab_from_url(Application::settings().new_tab_page_url(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+        queue_snapshot();
+        return {};
+    }
+    if (type != "workspace.create"sv && type != "workspace.update"sv) return Error::from_string_literal("Unknown workspace command");
+    auto name = data.get_string("name"sv), icon = data.get_string("icon"sv), color = data.get_string("color"sv);
+    if (!name.has_value() || !icon.has_value() || !color.has_value() || !icon->is_one_of("research"sv, "home"sv, "code"sv, "leaf"sv) || !color->is_one_of("sage"sv, "peach"sv, "lilac"sv, "blue"sv))
+        return Error::from_string_literal("Invalid workspace");
+    auto title = qstring_from_ak_string(*name).trimmed();
+    if (title.isEmpty() || title.size() > 32) return Error::from_string_literal("Invalid workspace name");
+    if (type == "workspace.create"sv) {
+        if (m_workspaces.size() >= 64) return Error::from_string_literal("Workspace limit reached");
+        m_workspace = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        m_workspaces.append({ m_workspace, title, qstring_from_ak_string(*icon), qstring_from_ak_string(*color), {} });
+        save_workspaces();
+        m_window.new_tab_from_url(Application::settings().new_tab_page_url(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+    } else {
+        auto id = data.get_string("id"sv);
+        auto found = std::find_if(m_workspaces.begin(), m_workspaces.end(), [&](auto const& w) { return id.has_value() && ak_string_from_qstring(w.id) == *id; });
+        if (found == m_workspaces.end()) return Error::from_string_literal("Unknown workspace");
+        found->name = title; found->icon = qstring_from_ak_string(*icon); found->color = qstring_from_ak_string(*color);
+        save_workspaces();
+    }
+    if (m_window.is_private() == WebView::IsPrivate::No && m_shell_preferences->status() != QSettings::NoError) return Error::from_string_literal("Cannot save workspaces");
+    queue_snapshot();
+    return {};
+}
+}

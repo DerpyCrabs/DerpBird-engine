@@ -51,6 +51,16 @@ public:
 
 
 private:
+    struct Workspace { QString id; QString name; QString icon; QString color; QPointer<Tab> last_tab; };
+    QVector<Workspace> m_workspaces;
+    QString m_workspace { "default" };
+    QString workspace_key() const;
+    void load_workspaces();
+    void save_workspaces();
+    void assign_workspace(Tab&, QString const&);
+    QString tab_workspace(Tab const&) const;
+    void workspace_tab_changed();
+    ErrorOr<void> workspace_command(JsonObject const&, StringView);
     QPointer<DerpBirdImport> m_import;
     DerpBirdFilePicker* m_file_picker { nullptr };
     bool m_password_import { false };
