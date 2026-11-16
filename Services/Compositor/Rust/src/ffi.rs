@@ -411,11 +411,17 @@ pub unsafe extern "C" fn compositor_core_paint_screenshot(
     context_id: u64,
     surface: *mut c_void,
     now_nanoseconds: i64,
+    document_origin: bool,
 ) -> bool {
     let Some(surface) = core.raster().retain_surface(surface) else {
         return false;
     };
-    core.paint_screenshot(CompositorContextId(context_id), &surface, time(now_nanoseconds))
+    core.paint_screenshot(
+        CompositorContextId(context_id),
+        &surface,
+        time(now_nanoseconds),
+        document_origin,
+    )
 }
 
 /// The surface that holds the frame on screen as a whole, with one reference that the caller takes over, and the size

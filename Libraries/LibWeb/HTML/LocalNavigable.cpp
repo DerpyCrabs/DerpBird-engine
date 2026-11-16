@@ -7473,7 +7473,7 @@ void LocalNavigable::render_screenshot_of_painted_subtree(NonnullRefPtr<Gfx::Bit
     }
     // The screenshot is of what the compositor composes, so every frame committed before it is presented first.
     main_thread_event_loop().take_committed_frames_in();
-    compositor_context().request_screenshot(move(target), move(callback));
+    compositor_context().request_screenshot(move(target), move(callback), paint_config.screenshot_document_origin);
 }
 
 void LocalNavigable::abort_in_flight_smooth_scrolls(Web::AsyncScrollNodeStableID stable_node_id)

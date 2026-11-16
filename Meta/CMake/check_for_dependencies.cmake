@@ -148,7 +148,7 @@ else()
 endif()
 
 if (ENABLE_GUI_TARGETS AND NOT (ANDROID OR VCPKG_TARGET_ANDROID))
-    set(LADYBIRD_QT_COMPONENTS Core Gui Widgets)
+    set(LADYBIRD_QT_COMPONENTS Core Gui Widgets Network)
     if (NOT APPLE)
         list(APPEND LADYBIRD_QT_COMPONENTS Positioning)
     endif()

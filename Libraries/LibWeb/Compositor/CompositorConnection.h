@@ -95,7 +95,7 @@ public:
     void viewport_size_updated(Web::CompositorContextId, Gfx::IntSize, double device_pixel_ratio, Compositing::WindowResizingInProgress);
     bool request_rendering_opportunity(Web::CompositorContextId, double maximum_frames_per_second);
     void hurry_rendering_opportunity(Web::CompositorContextId);
-    void request_screenshot(Web::CompositorContextId, NonnullRefPtr<Gfx::Bitmap>, Function<void(ScreenshotResult)>&&);
+    void request_screenshot(Web::CompositorContextId, NonnullRefPtr<Gfx::Bitmap>, Function<void(ScreenshotResult)>&&, bool document_origin = false);
     // Has the processes that own the context's descendants in other processes paint them, and calls `callback` once the
     // compositor has their frames, or once it is lost.
     void prepare_remote_descendants_for_screenshot(Web::CompositorContextId, Function<void()>&& callback);

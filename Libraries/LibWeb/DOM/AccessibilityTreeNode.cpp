@@ -22,6 +22,8 @@
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/Range.h>
 #include <LibWeb/DOM/Text.h>
+#include <LibWeb/WebDriver/ElementReference.h>
+#include <LibWeb/HTML/LocalNavigable.h>
 #include <LibWeb/HTML/HTMLAnchorElement.h>
 #include <LibWeb/HTML/HTMLAreaElement.h>
 #include <LibWeb/HTML/HTMLDetailsElement.h>
@@ -127,6 +129,10 @@ void AccessibilityTreeNode::serialize_tree_as_json(JsonObjectSerializer<Utf16Str
     }
 
     MUST(object.add("id"sv, value()->unique_id().value()));
+    // The inspector and automation share the engine's accessible names and roles.
+    // A WebDriver reference retains document identity, unlike a bare DOM node ID.
+    if (auto navigable = value()->navigable(); navigable && navigable->active_browsing_context())
+        MUST(object.add("sharedId"sv, WebDriver::get_or_create_a_node_reference(*navigable->active_browsing_context(), *value())));
 
     if (value()->has_child_nodes()) {
         auto node_children = MUST(object.add_array("children"sv));

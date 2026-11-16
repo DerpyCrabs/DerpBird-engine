@@ -123,10 +123,10 @@ void CompositorContextHandle::hurry_rendering_opportunity()
     m_host.hurry_rendering_opportunity(m_context_id);
 }
 
-void CompositorContextHandle::request_screenshot(NonnullRefPtr<Gfx::Bitmap> target_bitmap, Function<void(ScreenshotResult)>&& callback)
+void CompositorContextHandle::request_screenshot(NonnullRefPtr<Gfx::Bitmap> target_bitmap, Function<void(ScreenshotResult)>&& callback, bool document_origin)
 {
     m_host.flush_canvas_2d_stream();
-    m_host.request_screenshot(m_context_id, move(target_bitmap), move(callback));
+    m_host.request_screenshot(m_context_id, move(target_bitmap), move(callback), document_origin);
 }
 
 void CompositorContextHandle::prepare_remote_descendants_for_screenshot(Function<void()>&& callback)
@@ -615,10 +615,10 @@ void CompositorHost::prepare_remote_descendants_for_screenshot(Web::CompositorCo
     callback();
 }
 
-void CompositorHost::request_screenshot(Web::CompositorContextId context_id, NonnullRefPtr<Gfx::Bitmap> target_bitmap, Function<void(ScreenshotResult)>&& callback)
+void CompositorHost::request_screenshot(Web::CompositorContextId context_id, NonnullRefPtr<Gfx::Bitmap> target_bitmap, Function<void(ScreenshotResult)>&& callback, bool document_origin)
 {
     if (auto* connection = compositor_connection()) {
-        connection->request_screenshot(context_id, move(target_bitmap), move(callback));
+        connection->request_screenshot(context_id, move(target_bitmap), move(callback), document_origin);
         return;
     }
     if (callback)

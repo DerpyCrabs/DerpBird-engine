@@ -13,6 +13,7 @@
 #include <QUuid>
 #include <UI/Qt/WebContentView.h>
 #include <UI/Qt/StringUtils.h>
+#include <UI/Qt/DerpBirdAutomation.h>
 #include <LibCore/Process.h>
 #include <LibGamepad/SDLGamepadSource.h>
 #include <LibWebView/CrashReportOutbox.h>
@@ -92,6 +93,7 @@ void HubConnection::derpbird_result(u64 request_id, JsonValue result, Optional<S
 
 void HubConnection::derpbird_ui_event(u64 view_id, String event, JsonValue data)
 {
+    if (event == "automation"sv) { DerpBirdAutomation::the().publish_event(AK::move(data)); return; }
     if (event == "tab.highlight"sv) {
         for (auto* widget : QApplication::topLevelWidgets()) {
             auto* window = as_if<BrowserWindow>(widget);

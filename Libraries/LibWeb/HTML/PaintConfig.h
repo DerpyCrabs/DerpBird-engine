@@ -18,6 +18,7 @@ inline constexpr i32 default_force_dark_background_threshold = 205;
 
 struct PaintConfig {
     bool paint_overlay { false };
+    bool screenshot_document_origin { false };
     bool should_show_line_box_borders { false };
     bool should_show_caret_hit_test_debug_overlay { false };
     bool force_dark_enabled { false };

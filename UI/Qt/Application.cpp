@@ -1183,7 +1183,9 @@ void Application::will_create_event_loop(Main::Arguments& arguments)
     new PNGMimeConverter;
 #endif
 #if defined(AK_OS_LINUX)
-    QGuiApplication::setDesktopFileName(QStringLiteral("org.ladybird.Ladybird"));
+    QGuiApplication::setDesktopFileName(qEnvironmentVariable("DERPBIRD_AGENT") == "1"
+            ? QStringLiteral("org.derpbird.Agent")
+            : QStringLiteral("org.ladybird.Ladybird"));
     Ladybird::clip_translucent_windows_that_cannot_blend();
 #endif
 #if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)

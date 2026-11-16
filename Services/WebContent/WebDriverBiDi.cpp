@@ -105,6 +105,38 @@ void run_webdriver_bidi_command(PageClient& page_client, u64 command_id, Web::HT
 
     if (method == "script.evaluate"sv)
         return Web::WebDriver::BiDi::evaluate(*navigable, params, move(on_complete));
+    if (method == "derpbird.dialog"sv) {
+        auto& page = navigable->page();
+        if (!page.has_pending_dialog()) return on_complete->function()(JsonValue {});
+        JsonObject result;
+        switch (page.pending_dialog()) {
+        case Web::Page::PendingDialog::Alert: result.set("type"sv, "alert"sv); break;
+        case Web::Page::PendingDialog::Confirm: result.set("type"sv, "confirm"sv); break;
+        case Web::Page::PendingDialog::Prompt: result.set("type"sv, "prompt"sv); break;
+        case Web::Page::PendingDialog::BeforeUnload: result.set("type"sv, "beforeunload"sv); break;
+        case Web::Page::PendingDialog::None: break;
+        }
+        if (page.pending_dialog_text().has_value()) result.set("message"sv, page.pending_dialog_text()->to_utf8());
+        return on_complete->function()(JsonValue { move(result) });
+    }
+    if (method == "browsingContext.handleUserPrompt"sv) {
+        auto& page = navigable->page();
+        if (!page.has_pending_dialog()) return on_complete->function()(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::NoSuchAlert, "No user dialog is currently open"sv));
+        if (auto text = params.get_string("userText"sv); text.has_value()) {
+            if (page.pending_dialog() != Web::Page::PendingDialog::Prompt) return on_complete->function()(Web::WebDriver::Error::from_code(Web::WebDriver::ErrorCode::InvalidArgument, "Only prompt dialogs accept text"sv));
+            page.client().page_did_request_set_prompt_text(Utf16String::from_utf8(*text));
+        }
+        auto closed = GC::create_function(GC::Heap::the(), GC::captures(on_complete), [](auto& on_complete) { on_complete->function()(JsonValue {}); });
+        if (params.get_bool("accept"sv).value_or(true)) page.accept_dialog(closed);
+        else page.dismiss_dialog(closed);
+        return;
+    }
+    if (method == "derpbird.snapshot"sv) {
+        auto* local = as_if<Web::HTML::LocalNavigable>(*navigable);
+        if (!local || !local->active_document()) return on_complete->function()(no_such_frame());
+        auto tree = MUST(JsonValue::from_string(local->active_document()->dump_accessibility_tree_as_json().to_utf8()));
+        return on_complete->function()(move(tree));
+    }
     if (method == "script.callFunction"sv)
         return Web::WebDriver::BiDi::call_function(*navigable, params, move(on_complete));
     if (method == "script.disown"sv)

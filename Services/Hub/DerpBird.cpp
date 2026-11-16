@@ -1,4 +1,5 @@
 #include <UI/Qt/DerpBirdDevToolsSession.h>
+#include <UI/Qt/DerpBirdAutomationBackend.h>
 #include <AK/Base64.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
@@ -418,6 +419,26 @@ void DerpBird::dispatch(u64 request_id, u64 view_id, String const& command, Json
 {
     auto fail = [&](StringView message) { finish(request_id, Error::from_string_view(message)); };
     auto done = [&] { finish(request_id, JsonValue {}); };
+    if (command == "automation.enable"sv) {
+        if (!m_automation) {
+            if (WebView::WebDriverBiDi::the()) { fail("A WebDriver session is already active"sv); return; }
+            m_automation = new Ladybird::DerpBirdAutomationBackend(this, [this](JsonValue packet) {
+                m_connection.async_derpbird_ui_event(0, "automation"_string, AK::move(packet));
+            });
+        }
+        done(); return;
+    }
+    if (command == "automation.disable"sv) { delete m_automation.data(); done(); return; }
+    if (command == "automation.command"sv) {
+        if (!m_automation || !payload.is_object()) { fail("Automation is disabled"sv); return; }
+        auto method = payload.as_object().get_string("method"sv);
+        auto params = payload.as_object().get_object("params"sv);
+        if (!method.has_value() || !params.has_value()) { fail("Invalid automation command"sv); return; }
+        m_automation->request(*method, JsonValue { *params }, [self = QPointer(this), request_id](JsonValue result) {
+            if (self) self->finish(request_id, AK::move(result));
+        });
+        return;
+    }
     if (command == "profile"sv) {
         auto const& profile = Application::profile();
         auto const& paths = profile.paths();

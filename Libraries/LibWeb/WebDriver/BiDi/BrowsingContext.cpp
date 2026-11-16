@@ -1018,11 +1018,11 @@ void capture_screenshot(HTML::Navigable& navigable, JsonObject const& params, On
         // 11. Let source x be rect's x coordinate multiplied by ratio, and let source y be rect's y coordinate multiplied
         //     by ratio.
         // NB: The compositor captures the viewport, so the source rectangle is measured from the viewport's origin.
-        // FIXME: Paint the parts of the document outside the viewport that the "document" origin includes, which are
-        //        left blank.
+        // Document captures replay the same display list with only the root scroll offset cleared.
         auto viewport_rect = get_the_origin_rectangle(document, "viewport"sv);
-        auto source_x = (rect.x - viewport_rect.x) * ratio;
-        auto source_y = (rect.y - viewport_rect.y) * ratio;
+        bool document_origin = origin == "document"sv;
+        auto source_x = (rect.x - (document_origin ? 0 : viewport_rect.x)) * ratio;
+        auto source_y = (rect.y - (document_origin ? 0 : viewport_rect.y)) * ratio;
         if (!(fabs(source_x) <= NumericLimits<i32>::max() / 2) || !(fabs(source_y) <= NumericLimits<i32>::max() / 2))
             return state->complete(Error::from_code(ErrorCode::UnsupportedOperation, "The screenshot is too large"sv));
 
@@ -1047,12 +1047,18 @@ void capture_screenshot(HTML::Navigable& navigable, JsonObject const& params, On
         if (viewport_device_rect.is_empty())
             return state->complete(Error::from_code(ErrorCode::UnableToCaptureScreen, "The viewport is empty"sv));
 
-        auto framebuffer = Gfx::Bitmap::create_shareable(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, viewport_device_rect.size());
+        auto capture_width = document_origin ? ceil((rect.x + rect.width) * ratio) : viewport_device_rect.width();
+        auto capture_height = document_origin ? ceil((rect.y + rect.height) * ratio) : viewport_device_rect.height();
+        if (!(capture_width > 0 && capture_height > 0 && capture_width <= MAXIMUM_FRAMEBUFFER_DIMENSION
+                && capture_height <= MAXIMUM_FRAMEBUFFER_DIMENSION && capture_width * capture_height <= 64 * 1024 * 1024))
+            return state->complete(Error::from_code(ErrorCode::UnsupportedOperation, "The screenshot is too large"sv));
+        Gfx::IntSize capture_size { static_cast<int>(capture_width), static_cast<int>(capture_height) };
+        auto framebuffer = Gfx::Bitmap::create_shareable(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, capture_size);
         if (framebuffer.is_error())
             return state->complete(Error::from_code(ErrorCode::UnableToCaptureScreen, "Unable to allocate the screenshot"sv));
 
         auto bitmap = framebuffer.release_value();
-        HTML::PaintConfig paint_config { .canvas_fill_rect = Gfx::IntRect { {}, viewport_device_rect.size() } };
+        HTML::PaintConfig paint_config { .screenshot_document_origin = document_origin, .canvas_fill_rect = Gfx::IntRect { {}, capture_size } };
         navigable->render_screenshot(bitmap, paint_config, [state, framebuffer = bitmap, source_rectangle, destination_size, format_type = move(format_type), format_quality](auto result) mutable {
             if (result == Compositor::ScreenshotResult::Failed)
                 return state->complete(Error::from_code(ErrorCode::UnsupportedOperation, "The compositor did not take the screenshot"sv));

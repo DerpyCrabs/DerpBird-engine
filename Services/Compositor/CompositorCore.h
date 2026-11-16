@@ -73,7 +73,7 @@ public:
     void canvas_content_changed(WebContentClientId, Compositing::CanvasId);
 
     // Answers false for a context with nothing to paint yet.
-    bool paint_screenshot(Web::CompositorContextId, Gfx::PaintingSurface&);
+    bool paint_screenshot(Web::CompositorContextId, Gfx::PaintingSurface&, bool document_origin);
     struct PresentedFrame {
         NonnullRefPtr<Gfx::PaintingSurface> surface;
         Gfx::IntSize frame_size;

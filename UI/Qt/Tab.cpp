@@ -50,6 +50,7 @@
 #include <QDialogButtonBox>
 #include <QDynamicPropertyChangeEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFont>
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -876,6 +877,25 @@ void Tab::initialize(Optional<u64> hub_view_id)
     view().on_screen_wake_lock_state_changed = [this](auto wake_lock_state) {
         set_screen_wake_lock_state(wake_lock_state);
     };
+}
+
+ErrorOr<void> Tab::complete_file_picker(QStringList const& paths)
+{
+    if (!m_file_picker_dialog) return Error::from_string_literal("No file chooser is open for this tab");
+    if (paths.size() > 100 || (paths.size() > 1 && m_file_picker_dialog->fileMode() != QFileDialog::ExistingFiles))
+        return Error::from_string_literal("File chooser does not accept this number of files");
+    Vector<Web::HTML::SelectedFile> files;
+    for (auto const& path : paths) {
+        QFileInfo info(path);
+        if (!info.isAbsolute() || !info.isFile()) return Error::from_string_literal("Upload requires absolute paths to regular files");
+        files.append(TRY(WebView::create_selected_file(ak_byte_string_from_qstring(path))));
+    }
+    auto* dialog = m_file_picker_dialog.data();
+    m_file_picker_dialog = nullptr;
+    QObject::disconnect(dialog, nullptr, this, nullptr);
+    dialog->close();
+    view().file_picker_closed(AK::move(files));
+    return {};
 }
 
 void Tab::create_tab_context_menu()

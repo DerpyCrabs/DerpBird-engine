@@ -650,10 +650,11 @@ impl CompositorCore {
         context_id: CompositorContextId,
         target: &SurfaceHandle,
         now: MonotonicTime,
+        document_origin: bool,
     ) -> bool {
         let _entered = self.enter();
 
-        let painted = self.paint_screenshot_inner(context_id, target, now);
+        let painted = self.paint_screenshot_inner(context_id, target, now, document_origin);
         self.finish_entry(now);
         painted
     }

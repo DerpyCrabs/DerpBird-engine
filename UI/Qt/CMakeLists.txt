@@ -84,7 +84,7 @@ if (NOT APPLE AND NOT WIN32 AND NOT ANDROID)
     )
 endif()
 
-target_link_libraries(ladybird_impl PUBLIC derpbird_qt_event_loop Qt::Core Qt::Gui Qt::Widgets)
+target_link_libraries(ladybird_impl PUBLIC derpbird_qt_event_loop Qt::Core Qt::Gui Qt::Widgets Qt::Network)
 target_link_libraries(ladybird_impl PRIVATE LibRegex LibRequests LibHTTP LibImageDecoderClient LibDatabase LibFileSystem LibUnicode)
 
 if (TARGET Qt6::Positioning)

@@ -51,6 +51,7 @@ public:
 
 
 private:
+    QString m_automation_window_id;
     struct Workspace { QString id; QString name; QString icon; QString color; QPointer<Tab> last_tab; };
     QVector<Workspace> m_workspaces;
     QString m_workspace { "default" };

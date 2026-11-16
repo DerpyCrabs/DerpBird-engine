@@ -912,13 +912,13 @@ void CompositorState::present_frame(Web::CompositorContextId context_id, Gfx::In
     m_core.present_frame_of_page(context_id, viewport_rect);
 }
 
-bool CompositorState::request_screenshot(Web::CompositorContextId context_id, Gfx::ShareableBitmap& target_bitmap)
+bool CompositorState::request_screenshot(Web::CompositorContextId context_id, Gfx::ShareableBitmap& target_bitmap, bool document_origin)
 {
     VERIFY(presented_context_if_present(context_id));
     if (!target_bitmap.is_valid() || !target_bitmap.bitmap())
         return false;
     auto target_surface = Gfx::PaintingSurface::wrap_bitmap(*target_bitmap.bitmap());
-    return m_core.paint_screenshot(context_id, *target_surface);
+    return m_core.paint_screenshot(context_id, *target_surface, document_origin);
 }
 
 // How long a screenshot waits for the processes that paint its context's descendants. One whose script never yields

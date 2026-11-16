@@ -1470,6 +1470,9 @@ void HTMLInputElement::create_file_input_shadow_tree()
     auto on_button_click_function = JS::NativeFunction::create(realm, on_button_click, 0, Utf16FlyString {}, &realm);
     auto on_button_click_callback = GC::Heap::the().allocate<WebIDL::CallbackType>(on_button_click_function, realm);
     m_file_button->add_event_listener_without_options(UIEvents::EventNames::click, DOM::IDLEventListener::create(on_button_click_callback));
+    // The internal filename label is itself an activation target, so clicking it
+    // does not run the host input's activation behavior. It opens the same picker.
+    m_file_label->add_event_listener_without_options(UIEvents::EventNames::click, DOM::IDLEventListener::create(on_button_click_callback));
 
     update_file_input_shadow_tree();
 

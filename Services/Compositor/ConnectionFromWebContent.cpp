@@ -498,11 +498,11 @@ void ConnectionFromWebContent::did_paint_contexts_for_screenshot(u64 preparation
     m_compositor_state->did_paint_contexts_for_screenshot(*this, preparation_id);
 }
 
-void ConnectionFromWebContent::request_screenshot(Web::CompositorContextId context_id, Compositing::ScreenshotRequestId request_id, Gfx::ShareableBitmap target_bitmap)
+void ConnectionFromWebContent::request_screenshot(Web::CompositorContextId context_id, Compositing::ScreenshotRequestId request_id, Gfx::ShareableBitmap target_bitmap, bool document_origin)
 {
     if (!context_is_owned_by_this_connection(context_id))
         return;
-    if (m_compositor_state->request_screenshot(context_id, target_bitmap))
+    if (m_compositor_state->request_screenshot(context_id, target_bitmap, document_origin))
         async_did_complete_screenshot(request_id);
     else
         async_did_fail_screenshot(request_id);

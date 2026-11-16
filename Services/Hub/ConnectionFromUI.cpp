@@ -93,9 +93,11 @@ struct InputFromUI final : public Web::BrowserInputData {
     u64 input_id { 0 };
 };
 
-u64 ConnectionFromUI::input_id_of(Web::BrowserInputData const& browser_data)
+Optional<u64> ConnectionFromUI::input_id_of(Web::BrowserInputData const& browser_data)
 {
-    return as<InputFromUI>(browser_data).input_id;
+    if (auto* input = as_if<InputFromUI>(browser_data))
+        return input->input_id;
+    return {};
 }
 
 template<typename EventType>

@@ -15,6 +15,7 @@ namespace Ladybird {
 
 class DerpBirdValueHost;
 class DerpBirdDevToolsSession;
+class DerpBirdAutomationBackend;
 
 }
 namespace Hub {
@@ -53,6 +54,7 @@ private:
     void credential_command(u64 request_id, View&, String const&, JsonValue const&);
     ConnectionFromUI& m_connection;
     OwnPtr<Ladybird::DerpBirdValueHost> m_values;
+    QPointer<Ladybird::DerpBirdAutomationBackend> m_automation;
     QHash<u64, QPointer<Ladybird::DerpBirdDevToolsSession>> m_devtools;
     HashMap<u64, Completion> m_ui_pending;
     HashMap<u64, Completion> m_shell_pending;

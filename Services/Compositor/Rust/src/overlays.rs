@@ -279,6 +279,10 @@ thread_local! {
 }
 
 impl OverlayPicture {
+    pub fn clear_scrollbars_for_document_screenshot(&mut self) {
+        self.scrollbars.clear();
+    }
+
     /// Paints the overlays over a frame: the scrollbars the compositor paints, and unless they are left out, the
     /// overlays of the browser.
     pub fn paint(&self, painter: &mut impl ReplayPainter, paints_ui_overlays: bool) {

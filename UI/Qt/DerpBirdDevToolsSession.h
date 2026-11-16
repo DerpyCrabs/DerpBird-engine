@@ -124,7 +124,11 @@ public:
             if (!m_target || !value.is_object()) { completion(Error::from_string_literal("Inspected tab closed")); return; }
             auto const& request = value.as_object();
             auto type = request.get_string("type"sv);
-            if (type == "devtools.bootstrap"sv) {
+            if (type == "devtools.snapshot"sv) {
+                // Reading through automation must not consume the UI's pending updates.
+                completion(to_ak(snapshot()));
+                refresh();
+            } else if (type == "devtools.bootstrap"sv) {
                 m_ready = true;
                 completion(to_ak(snapshot()));
                 m_new_messages = {}; m_dirty.clear();

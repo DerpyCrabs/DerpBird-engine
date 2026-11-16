@@ -153,6 +153,7 @@ struct ScreenshotRequestForPaintThread {
     Web::CompositorContextId context_id;
     Compositing::ScreenshotRequestId request_id;
     Gfx::ShareableBitmap target;
+    bool document_origin { false };
 };
 
 void CompositorConnection::hand_poster_to_paint_thread()
@@ -752,7 +753,7 @@ bool CompositorConnection::read_webgl_buffer_sub_data(Compositing::CanvasId canv
     return response->success();
 }
 
-void CompositorConnection::request_screenshot(Web::CompositorContextId context_id, NonnullRefPtr<Gfx::Bitmap> target_bitmap, Function<void(ScreenshotResult)>&& callback)
+void CompositorConnection::request_screenshot(Web::CompositorContextId context_id, NonnullRefPtr<Gfx::Bitmap> target_bitmap, Function<void(ScreenshotResult)>&& callback, bool document_origin)
 {
     if (!can_send_message_to_compositor()) {
         if (callback)
@@ -766,7 +767,7 @@ void CompositorConnection::request_screenshot(Web::CompositorContextId context_i
     auto request_id = Compositing::ScreenshotRequestId { m_next_screenshot_request_id++ };
     m_screenshots.set(request_id, PendingScreenshot { move(target_bitmap), move(callback) });
     // The screenshot is of what the compositor composes, so it goes after the frames handed to the Paint thread before.
-    paint_stage_request_screenshot(new ScreenshotRequestForPaintThread { context_id, request_id, move(shareable_bitmap) });
+    paint_stage_request_screenshot(new ScreenshotRequestForPaintThread { context_id, request_id, move(shareable_bitmap), document_origin });
 }
 
 void CompositorConnection::key_event(u64 page_id, Web::KeyEvent event)
@@ -976,7 +977,7 @@ extern "C" WEB_API void web_compositor_shared_buffer_release(void* owner)
 extern "C" WEB_API bool web_compositor_post_screenshot_request(void* poster, void* request_pointer)
 {
     auto request = adopt_own(*static_cast<Web::Compositor::ScreenshotRequestForPaintThread*>(request_pointer));
-    auto encoded_message = MUST(Messages::CompositorWebContentServer::RequestScreenshot::static_encode(request->context_id, request->request_id, request->target));
+    auto encoded_message = MUST(Messages::CompositorWebContentServer::RequestScreenshot::static_encode(request->context_id, request->request_id, request->target, request->document_origin));
     return static_cast<IPC::ThreadSafeMessagePoster*>(poster)->try_post(encoded_message);
 }
 

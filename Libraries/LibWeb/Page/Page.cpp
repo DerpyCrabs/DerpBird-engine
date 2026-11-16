@@ -354,7 +354,7 @@ void Page::process_screenshot_requests()
                 continue;
             }
             auto bitmap = bitmap_or_error.release_value();
-            HTML::PaintConfig paint_config { .paint_overlay = true, .canvas_fill_rect = rect.to_type<int>() };
+            HTML::PaintConfig paint_config { .paint_overlay = true, .screenshot_document_origin = true, .canvas_fill_rect = rect.to_type<int>() };
             navigable->render_screenshot(bitmap, paint_config, [bitmap, &client](auto result) {
                 if (result == Compositor::ScreenshotResult::Failed) {
                     client.page_did_take_screenshot({});

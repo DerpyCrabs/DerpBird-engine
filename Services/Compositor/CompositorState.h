@@ -149,7 +149,7 @@ public:
     void hurry_rendering_opportunity(Web::CompositorContextId);
     // Asks for the next display tick the context's maximum rate lets through, for its render clock.
     void request_clock_tick(Web::CompositorContextId, double maximum_frames_per_second);
-    bool request_screenshot(Web::CompositorContextId, Gfx::ShareableBitmap&);
+    bool request_screenshot(Web::CompositorContextId, Gfx::ShareableBitmap&, bool document_origin);
     // Has each process that owns a descendant of the context in another process paint it, along with whatever lies below
     // it, and tells the requester once every one of them has handed over its frames, or gone away.
     void prepare_remote_descendants_for_screenshot(CompositorStateWebContentClient& requester, Web::CompositorContextId, u64 request_id);

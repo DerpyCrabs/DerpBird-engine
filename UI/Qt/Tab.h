@@ -82,6 +82,8 @@ public:
     Tab(BrowserWindow* window, Optional<u64> hub_view_id = {});
     Tab(BrowserWindow* window, DeferredTab);
     virtual ~Tab() override;
+    bool has_file_picker() const { return !m_file_picker_dialog.isNull(); }
+    ErrorOr<void> complete_file_picker(QStringList const& paths);
 
     WebContentView& view()
     {

@@ -272,9 +272,9 @@ void CompositorCore::canvas_content_changed(WebContentClientId client, Compositi
     RustFFI::compositor_core_canvas_content_changed(m_core, client.value(), canvas_id.value(), now().nanoseconds());
 }
 
-bool CompositorCore::paint_screenshot(Web::CompositorContextId context_id, Gfx::PaintingSurface& surface)
+bool CompositorCore::paint_screenshot(Web::CompositorContextId context_id, Gfx::PaintingSurface& surface, bool document_origin)
 {
-    return RustFFI::compositor_core_paint_screenshot(m_core, context_id.value(), &surface, now().nanoseconds());
+    return RustFFI::compositor_core_paint_screenshot(m_core, context_id.value(), &surface, now().nanoseconds(), document_origin);
 }
 
 Optional<CompositorCore::PresentedFrame> CompositorCore::presented_frame_for_snapshot(Web::CompositorContextId context_id)

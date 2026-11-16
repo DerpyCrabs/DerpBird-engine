@@ -85,7 +85,7 @@ private:
     virtual void request_rendering_opportunity(Web::CompositorContextId, double maximum_frames_per_second) override;
     virtual void hurry_rendering_opportunity(Web::CompositorContextId) override;
     virtual void present_frame(Web::CompositorContextId, Gfx::IntRect viewport_rect) override;
-    virtual void request_screenshot(Web::CompositorContextId, Compositing::ScreenshotRequestId request_id, Gfx::ShareableBitmap target_bitmap) override;
+    virtual void request_screenshot(Web::CompositorContextId, Compositing::ScreenshotRequestId request_id, Gfx::ShareableBitmap target_bitmap, bool document_origin) override;
     virtual void prepare_remote_descendants_for_screenshot(Web::CompositorContextId, u64 request_id) override;
     virtual void did_paint_contexts_for_screenshot(u64 preparation_id) override;
 

@@ -107,10 +107,19 @@ static ErrorOr<Optional<Vector<String>>, Web::WebDriver::Error> get_optional_non
 }
 
 WebDriverBiDi::WebDriverBiDi(WebDriverBrowserConnection& connection)
-    : m_connection(connection)
+    : WebDriverBiDi(Transport {
+        .complete_command = [&connection](u64 id, Web::WebDriver::Response response) { connection.async_command_complete(id, move(response)); },
+        .emit_event = [&connection](String name, JsonValue params, Vector<String> contexts, Vector<String> user_contexts) { connection.async_bidi_event(move(name), move(params), move(contexts), move(user_contexts)); },
+    })
+{
+}
+
+WebDriverBiDi::WebDriverBiDi(Transport transport)
+    : m_transport(move(transport))
     , m_next_content_command_id(FIRST_CONTENT_COMMAND_ID)
 {
     VERIFY(!s_the);
+    VERIFY(m_transport.complete_command && m_transport.emit_event);
     s_the = this;
 }
 
@@ -129,7 +138,7 @@ WebDriverBiDi::~WebDriverBiDi()
 
 void WebDriverBiDi::complete_command(u64 command_id, Web::WebDriver::Response response)
 {
-    m_connection.async_command_complete(command_id, move(response));
+    m_transport.complete_command(command_id, move(response));
 }
 
 bool WebDriverBiDi::did_complete_content_command(u64 command_id, Web::WebDriver::Response& response)
@@ -288,7 +297,7 @@ static ErrorOr<CanonicalTraversable*, Web::WebDriver::Error> get_a_top_level_tra
 
 void WebDriverBiDi::emit_event(StringView name, JsonValue params, Vector<String> top_level_traversable_ids)
 {
-    m_connection.async_bidi_event(MUST(String::from_utf8(name)), move(params), move(top_level_traversable_ids), { MUST(String::from_utf8(DEFAULT_USER_CONTEXT_ID)) });
+    m_transport.emit_event(MUST(String::from_utf8(name)), move(params), move(top_level_traversable_ids), { MUST(String::from_utf8(DEFAULT_USER_CONTEXT_ID)) });
 }
 
 void WebDriverBiDi::emit_event_for_navigable(StringView name, JsonValue params, CanonicalNavigable const& navigable)
@@ -1057,9 +1066,9 @@ void WebDriverBiDi::run_command(u64 command_id, String const& method, JsonValue 
     ensure_session_is_active();
 
     // NB: A command may complete after the connection to WebDriver, and this object with it, went away.
-    auto on_complete = [command_id](Web::WebDriver::Response response) {
-        if (auto* webdriver_bidi = WebDriverBiDi::the())
-            webdriver_bidi->complete_command(command_id, move(response));
+    auto on_complete = [self = make_weak_ptr(), command_id](Web::WebDriver::Response response) {
+        if (self)
+            self->complete_command(command_id, move(response));
     };
 
     if (!params_value.is_object()) {
@@ -1122,7 +1131,7 @@ void WebDriverBiDi::run_command(u64 command_id, String const& method, JsonValue 
         return browsing_context_set_viewport(params, move(on_complete));
     if (method == "browsingContext.traverseHistory"sv)
         return browsing_context_traverse_history(params, move(on_complete));
-    if (method.is_one_of("browsingContext.captureScreenshot"sv, "browsingContext.locateNodes"sv, "input.performActions"sv, "input.releaseActions"sv))
+    if (method.is_one_of("browsingContext.captureScreenshot"sv, "browsingContext.locateNodes"sv, "browsingContext.handleUserPrompt"sv, "input.performActions"sv, "input.releaseActions"sv, "derpbird.snapshot"sv, "derpbird.dialog"sv))
         return route_to_navigable(method, params, move(on_complete));
 
     if (method == "script.addPreloadScript"sv)

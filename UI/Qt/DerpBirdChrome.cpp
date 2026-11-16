@@ -29,6 +29,9 @@
 #include <UI/Qt/Application.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/DerpBirdChrome.h>
+#include <UI/Qt/DerpBirdAutomation.h>
+#include <UI/Qt/DerpBirdWindowScreenshot.h>
+#include <QToolTip>
 #include <UI/Qt/DerpBirdDevTools.h>
 #include <UI/Qt/DerpBirdCredentialFill.h>
 #include <UI/Qt/DerpBirdStyleStore.h>
@@ -579,11 +582,95 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
         [this] { queue_snapshot(); });
     for (int i = 0; i < window.tab_count(); ++i)
         observe_tab(*window.tab_at(i));
+    m_automation_window_id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    DerpBirdAutomation::the().add_window(m_automation_window_id, {
+        .owner = this,
+        .state = [this] {
+            JsonObject state;
+            state.set("private"sv, m_window.is_private() == WebView::IsPrivate::Yes);
+            state.set("profile"sv, MUST(String::from_utf8(Application::the().derpbird_profile_paths().data.view())));
+            JsonArray tabs;
+            for (int i = 0; i < m_window.tab_count(); ++i) {
+                auto& tab = *m_window.tab_at(i);
+                JsonObject item;
+                item.set("id"sv, tab_id(tab));
+                item.set("url"sv, tab.url().serialize());
+                item.set("title"sv, ak_string_from_qstring(tab.title()));
+                item.set("workspace"sv, ak_string_from_qstring(tab_workspace(tab)));
+                item.set("active"sv, m_window.current_tab() == &tab);
+                item.set("fileChooser"sv, tab.has_file_picker());
+                if (tab.is_loaded()) item.set("context"sv, tab.view().handle());
+                MUST(tabs.append(AK::move(item)));
+            }
+            state.set("tabs"sv, AK::move(tabs));
+            return JsonValue { AK::move(state) };
+        },
+        .request = [this](JsonValue const& data, auto done) {
+            if (data.is_object() && data.as_object().get_string("type"sv) == "automation.screenshot"sv) {
+                DerpBirdWindowScreenshot::capture(m_window, AK::move(done));
+                return;
+            }
+            if (data.is_object() && data.as_object().get_string("type"sv) == "automation.resize"sv) {
+                auto width = data.as_object().get_integer<int>("width"sv);
+                auto height = data.as_object().get_integer<int>("height"sv);
+                if (!width.has_value() || !height.has_value() || *width < 1 || *height < 1 || *width > 8192 || *height > 8192) { done(Error::from_string_literal("Invalid window size")); return; }
+                m_window.resize(*width, *height);
+                done(JsonValue {}); return;
+            }
+            if (data.is_object() && data.as_object().get_string("type"sv) == "automation.files"sv) {
+                auto id = data.as_object().get_string("tabId"sv);
+                auto paths = data.as_object().get_array("paths"sv);
+                if (!id.has_value() || !paths.has_value() || paths->size() > 100) { done(Error::from_string_literal("Invalid file selection")); return; }
+                QStringList files;
+                for (auto const& path : paths->values()) {
+                    if (!path.is_string()) { done(Error::from_string_literal("Invalid file path")); return; }
+                    files.append(qstring_from_ak_string(path.as_string()));
+                }
+                for (int i = 0; i < m_window.tab_count(); ++i) {
+                    auto& tab = *m_window.tab_at(i);
+                    if (tab_id(tab) != *id) continue;
+                    auto result = tab.complete_file_picker(files);
+                    if (result.is_error()) done(result.release_error()); else done(JsonValue {});
+                    return;
+                }
+                done(Error::from_string_literal("File chooser tab closed")); return;
+            }
+            if (data.is_object() && data.as_object().get_string("type"sv) == "automation.devtools"sv) {
+                auto id = data.as_object().get_string("tabId"sv);
+                auto request = data.as_object().get_object("request"sv);
+                auto type = request.has_value() ? request->get_string("type"sv) : Optional<String> {};
+                if (!id.has_value() || !type.has_value() || !type->is_one_of("devtools.snapshot"sv, "devtools.response"sv, "devtools.source"sv, "devtools.refresh"sv, "devtools.clear"sv)) {
+                    done(Error::from_string_literal("Invalid automation developer tools request")); return;
+                }
+                for (int i = 0; i < m_window.tab_count(); ++i) {
+                    auto& tab = *m_window.tab_at(i);
+                    if (tab_id(tab) != *id) continue;
+                    if (auto result = inspect_tab(tab); result.is_error()) { done(result.release_error()); return; }
+                    tab.view().derpbird_command("devtools"_string, JsonValue { *request }, AK::move(done)); return;
+                }
+                done(Error::from_string_literal("Inspected tab closed")); return;
+            }
+            m_shell->on_derpbird_request(data, AK::move(done));
+        },
+        .changed = [this] { queue_snapshot(); },
+    });
+    new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_A), &window, [this] {
+        auto& automation = DerpBirdAutomation::the();
+        QString message;
+        if (automation.enabled()) { automation.disable(); message = "AI browser access disabled"; }
+        else if (auto result = automation.enable(); result.is_error()) message = qstring_from_ak_string(MUST(String::formatted("{}", result.error())));
+        else message = "AI browser access enabled: " + automation.endpoint();
+        QToolTip::showText(m_window.mapToGlobal(QPoint(24, 24)), message, &m_window, {}, 10000);
+    });
+    if (qEnvironmentVariableIsSet("DERPBIRD_AUTOMATION_SOCKET")) {
+        if (auto result = DerpBirdAutomation::the().enable(); result.is_error()) warnln("Automation: {}", result.error());
+    }
     m_shell->load(URL::Parser::basic_parse("about:derpbird"sv).release_value());
 }
 
 DerpBirdChrome::~DerpBirdChrome()
 {
+    DerpBirdAutomation::the().remove_window(m_automation_window_id);
     if (m_request_log_view) m_request_log_view->set_request_logging(false);
     if (m_autocomplete) { m_autocomplete->on_autocomplete_query_complete = nullptr; m_autocomplete->cancel_pending_query(); }
     if (m_source_download) delete m_source_download.data();
@@ -1009,6 +1096,11 @@ JsonValue DerpBirdChrome::snapshot()
         if (!effective.is_error()) proxy_profile = effective.release_value();
     }
     state.set("proxyProfile"sv, proxy_profile);
+    JsonObject automation;
+    automation.set("enabled"sv, DerpBirdAutomation::the().enabled());
+    automation.set("clients"sv, DerpBirdAutomation::the().client_count());
+    automation.set("endpoint"sv, ak_string_from_qstring(DerpBirdAutomation::the().endpoint()));
+    state.set("automation"sv, AK::move(automation));
     state.set("version"sv, 1);
     state.set("revision"sv, ++m_revision);
     JsonObject preferences;
@@ -1234,6 +1326,13 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         return Error::from_string_literal("Invalid command");
     auto const& data = value.as_object();
     auto type = data.get_string("type"sv).value_or(String {});
+    if (type == "automation.set-enabled"sv) {
+        auto enabled = data.get_bool("enabled"sv);
+        if (!enabled.has_value()) return Error::from_string_literal("Missing automation state");
+        if (*enabled) TRY(DerpBirdAutomation::the().enable());
+        else DerpBirdAutomation::the().disable();
+        return {};
+    }
     if (type == "blocking.log"sv) {
         auto visible = data.get_bool("visible"sv);
         if (!visible.has_value()) return Error::from_string_literal("Missing log visibility");

@@ -23,6 +23,7 @@
 #include <LibWebCommon/WebDriver/BiDi.h>
 #include <LibWebCommon/WebDriver/Response.h>
 #include <LibWebView/Forward.h>
+#include <LibWebView/Export.h>
 
 namespace WebView {
 
@@ -31,8 +32,8 @@ class WebDriverBiDiNetwork;
 
 // https://w3c.github.io/webdriver-bidi/
 // NB: The browser process runs the commands of a BiDi session that involve navigables, and routes those that run in the
-//     process hosting a navigable's document to it. It exists only while WebDriver drives the browser.
-class WebDriverBiDi : public Weakable<WebDriverBiDi> {
+//     process hosting a navigable's document to it. The transport owns the session.
+class WEBVIEW_API WebDriverBiDi : public Weakable<WebDriverBiDi> {
     AK_MAKE_NONCOPYABLE(WebDriverBiDi);
     AK_ALLOC_WITH_KMALLOC;
     AK_MAKE_NONMOVABLE(WebDriverBiDi);
@@ -41,6 +42,11 @@ public:
     static WebDriverBiDi* the() { return s_the; }
 
     explicit WebDriverBiDi(WebDriverBrowserConnection&);
+    struct Transport {
+        Function<void(u64, Web::WebDriver::Response)> complete_command;
+        Function<void(String, JsonValue, Vector<String>, Vector<String>)> emit_event;
+    };
+    explicit WebDriverBiDi(Transport);
     ~WebDriverBiDi();
 
     void run_command(u64 command_id, String const& method, JsonValue params);
@@ -158,7 +164,7 @@ private:
     void script_get_realms(JsonObject const& params, CommandResult);
     void route_to_script_target(String const& method, JsonObject const& params, CommandResult);
 
-    WebDriverBrowserConnection& m_connection;
+    Transport m_transport;
 
     HashTable<String> m_enabled_events;
     HashMap<String, Optional<Vector<String>>> m_enabled_event_contexts;

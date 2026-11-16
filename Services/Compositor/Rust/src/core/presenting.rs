@@ -1091,6 +1091,7 @@ impl CompositorCore {
         context_id: CompositorContextId,
         target: &SurfaceHandle,
         now: MonotonicTime,
+        document_origin: bool,
     ) -> bool {
         let (Some(context), Some(presenting)) = (self.context_if_present(context_id), self.presenting_of(context_id))
         else {
@@ -1100,7 +1101,22 @@ impl CompositorCore {
             return false;
         };
         let nested_display_lists = context.borrow().nested_display_lists();
-        let screenshot_inputs = context.borrow_mut().frame_inputs_for_screenshot(now);
+        let mut screenshot_inputs = context.borrow_mut().frame_inputs_for_screenshot(now);
+        // Change only this snapshot: the live page's scroll position and viewport are untouched.
+        if document_origin {
+            let inputs = &mut screenshot_inputs.frame_inputs;
+            if let Some(index) = inputs.viewport_scroll_node_index {
+                inputs
+                    .presented_scroll_state_snapshot
+                    .set_device_offset_for_index(index, Default::default());
+                libcompositing_rust::scrolling::resolve_sticky_offsets(
+                    &inputs.visual_context_tree,
+                    &mut inputs.presented_scroll_state_snapshot,
+                );
+            }
+            inputs.scrollbars.clear();
+            inputs.overlays.clear_scrollbars_for_document_screenshot();
+        }
         let nested_contexts = ContextsNestedIn {
             core: self,
             parent_context_id: context_id,
