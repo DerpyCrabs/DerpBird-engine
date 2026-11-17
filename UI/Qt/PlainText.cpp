@@ -104,13 +104,16 @@ public:
     // NB: A window with a parent on Windows would raise that parent as it shows.
 #if defined(Q_OS_WINDOWS)
     explicit PlainTextToolTipWindow(QWidget&)
-        : QWidget(nullptr, Qt::ToolTip | Qt::BypassGraphicsProxyWidget)
+        : QWidget(nullptr, Qt::ToolTip | Qt::BypassGraphicsProxyWidget | Qt::WindowTransparentForInput)
 #else
     explicit PlainTextToolTipWindow(QWidget& parent)
-        : QWidget(&parent, Qt::ToolTip | Qt::BypassGraphicsProxyWidget)
+        : QWidget(&parent, Qt::ToolTip | Qt::BypassGraphicsProxyWidget | Qt::WindowTransparentForInput)
 #endif
     {
         setAttribute(Qt::WA_ShowWithoutActivating);
+        // A tooltip may overlap the next tab or its close button. It must never
+        // steal that control's pointer press or interrupt a drag gesture.
+        setAttribute(Qt::WA_TransparentForMouseEvents);
         setFont(QToolTip::font());
         setMouseTracking(true);
         ensurePolished();

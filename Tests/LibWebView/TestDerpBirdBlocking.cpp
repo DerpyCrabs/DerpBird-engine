@@ -695,12 +695,20 @@ TEST_CASE(derpbird_blocking_method_prevents_network_requests)
     check("console.log(String(!!window.advertisementRan))"_string, "true"sv);
 
     if (getenv("DERPBIRD_BLOCKER_PERF")) {
-        set_scriptlets("127.0.0.1##.perf-card:has-text(Sponsored)\n"sv);
-        for (size_t sample = 0; sample < 3; ++sample) {
-            for (bool enabled : { false, true }) {
-                view->page().async_set_content_blocking_policy(enabled, {});
-                navigate("/procedural-performance"sv);
-                auto script = MUST(String::formatted("globalThis.perfEnabled={};\n{}", enabled ? "true"sv : "false"sv, R"JS(
+        // Alternate A/B ordering to reduce warmup/order bias. Keep unrelated
+        // mutations outside the hidden cards to isolate unnecessary rescans.
+        for (size_t rule_count : { 1u, 20u }) {
+            StringBuilder filters;
+            filters.append("127.0.0.1##.perf-card:has-text(Sponsored)\n"sv);
+            for (size_t i = 1; i < rule_count; ++i)
+                filters.appendff("127.0.0.1##.perf-card:has-text(NeverMatches{})\n", i);
+            set_scriptlets(filters.string_view());
+            for (size_t sample = 0; sample < 3; ++sample) {
+                for (bool first : { false, true }) {
+                    bool enabled = first != (sample % 2 == 1);
+                    view->page().async_set_content_blocking_policy(enabled, {});
+                    navigate("/procedural-performance"sv);
+                    auto script = MUST(String::formatted("globalThis.perfEnabled={};\n{}", enabled ? "true"sv : "false"sv, R"JS(
 (async()=>{
  const count=2000, gaps=[];
  let previous=performance.now();
@@ -719,18 +727,34 @@ TEST_CASE(derpbird_blocking_method_prevents_network_requests)
  }
  const settled=performance.now();
  await new Promise(resolve=>setTimeout(resolve,100));
- clearInterval(heartbeat);
  const matched=nodes.filter(node=>(getComputedStyle(node).display==='none')===expected).length;
  gaps.sort((a,b)=>a-b);
- console.log(JSON.stringify({count,enabled:expected,ready,matched,insertMs:inserted-started,
-   settleMs:settled-started,heartbeatMaxMs:Math.max(...gaps),heartbeatP95Ms:gaps[Math.floor(gaps.length*.95)]}));
+ const initialMax=Math.max(...gaps),initialP95=gaps[Math.floor(gaps.length*.95)];
+ gaps.length=0;
+ const clock=document.createElement('output');document.body.appendChild(clock);
+ await new Promise(resolve=>setTimeout(resolve,50));
+ gaps.length=0;previous=performance.now();
+ const churnStart=performance.now();
+ for(let i=0;i<30;i++){
+   clock.setAttribute('data-clock',String(i));
+   await new Promise(resolve=>setTimeout(resolve,20));
+ }
+ const churnMs=performance.now()-churnStart;
+ clearInterval(heartbeat);
+ gaps.sort((a,b)=>a-b);
+ const finalMatched=nodes.filter(node=>(getComputedStyle(node).display==='none')===expected).length;
+ console.log(JSON.stringify({count,enabled:expected,ready,matched,finalMatched,insertMs:inserted-started,
+   settleMs:settled-started,heartbeatMaxMs:initialMax,heartbeatP95Ms:initialP95,
+   churnMs,churnHeartbeatMaxMs:Math.max(...gaps),churnHeartbeatP95Ms:gaps[Math.floor(gaps.length*.95)]}));
 })()
-)JS"sv));
-                auto result = check(move(script), {});
-                outln("DERPBIRD_PROCEDURAL_PERF sample={} {}", sample, result);
-                auto metrics = MUST(JsonValue::from_string(result)).as_object();
-                EXPECT(metrics.get_bool("ready"sv).value_or(false));
-                EXPECT_EQ(metrics.get_u64("matched"sv).value_or(0), 2000u);
+    )JS"sv));
+                    auto result = check(move(script), {});
+                    outln("DERPBIRD_PROCEDURAL_PERF rules={} sample={} {}", rule_count, sample, result);
+                    auto metrics = MUST(JsonValue::from_string(result)).as_object();
+                    EXPECT(metrics.get_bool("ready"sv).value_or(false));
+                    EXPECT_EQ(metrics.get_u64("matched"sv).value_or(0), 2000u);
+                    EXPECT_EQ(metrics.get_u64("finalMatched"sv).value_or(0), 2000u);
+                }
             }
         }
     }

@@ -2355,10 +2355,16 @@ void Document::set_url(URL::URL const& url)
     // A same-document navigation can enter or leave a user-style scope.
     // Use the document URL, never a page-controlled <base> URL.
     if (m_derpbird_user_styles.has_value()) {
+        auto previous_styles = move(*m_derpbird_user_styles);
         invalidate_derpbird_user_styles();
-        style_scope().invalidate_user_style_sheet();
-        if (style_computer_if_created())
-            CSS::record_non_author_stylesheets(*this);
+        // Reevaluate URL scopes and matching diagnostics, but retain parsed
+        // sheets when the effective CSS (including order and wrappers) is the
+        // same. SPA history updates commonly leave every style unchanged.
+        if (previous_styles != derpbird_user_styles()) {
+            style_scope().invalidate_user_style_sheet();
+            if (style_computer_if_created())
+                CSS::record_non_author_stylesheets(*this);
+        }
     }
 }
 

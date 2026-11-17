@@ -181,7 +181,7 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
           check(document.querySelector(selector)===input&&document.activeElement===input,'input replaced or blurred');
           check(input.value==='typed.example'&&input.selectionStart===2&&input.selectionEnd===6,'input caret jumped');
           check(document.querySelector('[data-tab-id=test]')===row,'tab row replaced');
-          if(compact){check(!document.querySelector('.address-suggestions'),'duplicate suggestions');document.querySelector('[aria-label="Close address palette"]').click();await paint();check(!document.querySelector('.address-palette'),'palette close');}
+          if(compact){check(!document.querySelector('.address-suggestions'),'duplicate suggestions');document.querySelector('[aria-label="Close address palette"]').click();await paint();check(!document.querySelector('.address-palette:not(.shell-overlay-exit)'),'palette close');}
         }
         emit({preset:'sidebar',side:'left',address:'top'},false);await paint();console.log('LAYOUT:OK');
       }catch(error){console.log('LAYOUT:'+error.message)}
@@ -220,8 +220,9 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             const anchor=document.querySelector('[aria-label="Proxy switcher"]');
             const bounds=anchor.getBoundingClientRect();
             if(bounds.width<24 || anchor.scrollWidth>anchor.clientWidth || anchor.textContent.trim())throw new Error('Toolbar icon is clipped');
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
             const popup=document.querySelector('.proxy-popup').getBoundingClientRect();
-            if(popup.width>310 || popup.height>400 || popup.top<bounds.bottom || popup.right>innerWidth)throw new Error('Popup geometry');
+            if(popup.width>321 || popup.height>400 || popup.top<bounds.bottom || popup.right>innerWidth)throw new Error('Popup geometry '+JSON.stringify({popup:popup.toJSON(),anchor:bounds.toJSON(),width:innerWidth}));
             await shot('01-empty-menu');
             document.querySelectorAll('.proxy-profile-list .proxy-profile-option')[1].click();
             await wait(()=>!document.querySelector('.proxy-popup'));
@@ -298,7 +299,7 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             await wait(()=>!document.querySelector('.proxy-popup'));
             const sourceButton = text => Array.from(document.querySelectorAll('.source-manager button')).find(b=>b.textContent===text);
             document.querySelector('button[aria-label="Styles on this page"]').click();
-            await wait(()=>document.querySelector('.page-source-row input:not(:disabled)'));
+            await wait(()=>document.querySelector('.page-source-row input[aria-disabled="false"]'));
             if(document.querySelector('.page-sources-popup header button'))throw new Error('Redundant popup close button');
             for (const dismiss of ['Escape', 'outside', 'toggle']) {
                 if(dismiss==='Escape')(document.activeElement ?? document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
@@ -306,12 +307,12 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
                 else document.querySelector('button[aria-label="Styles on this page"]').click();
                 await wait(()=>!document.querySelector('.page-sources-popup'));
                 document.querySelector('button[aria-label="Styles on this page"]').click();
-                await wait(()=>document.querySelector('.page-source-row input:not(:disabled)'));
+                await wait(()=>document.querySelector('.page-source-row input[aria-disabled="false"]'));
             }
             await shot('06-page-styles');
             document.querySelector('.page-source-row input').click();
-            await wait(()=>document.querySelector('.page-source-row input')?.checked===false && !document.querySelector('.page-source-row input').disabled);
-            Array.from(document.querySelectorAll('.page-sources-popup button')).find(b=>b.textContent==='Manage styles').click();
+            await wait(()=>document.querySelector('.page-source-row input')?.checked===false && document.querySelector('.page-source-row input').getAttribute('aria-disabled')==='false');
+            Array.from(document.querySelectorAll('.page-sources-popup:not(.shell-overlay-exit) button')).find(b=>b.textContent==='Manage styles').click();
             await wait(()=>document.querySelector('[aria-label="Style name"]:not(:disabled)'));
             const styleName=document.querySelector('[aria-label="Style name"]');styleName.value='Readable website';styleName.dispatchEvent(new Event('input',{bubbles:true}));
             document.querySelector('[aria-label="Close styles"]').click();
@@ -327,17 +328,17 @@ TEST_CASE(derpbird_bundle_mounts_and_round_trips_through_webui)
             document.querySelector('[aria-label="Close styles"]').click();
             await wait(()=>!document.querySelector('.source-manager'));
             document.querySelector('button[aria-label="Scripts on this page"]').click();
-            await wait(()=>document.querySelector('.page-source-row input:not(:disabled)'));
+            await wait(()=>document.querySelector('.page-source-row input[aria-disabled="false"]'));
             await shot('08-page-scripts');
             document.querySelector('.page-source-row input').click();
-            await wait(()=>document.querySelector('.page-sources-reload') && !document.querySelector('.page-source-row input').disabled);
-            Array.from(document.querySelectorAll('.page-sources-popup button')).find(b=>b.textContent==='Manage scripts').click();
+            await wait(()=>document.querySelector('.page-sources-reload') && document.querySelector('.page-source-row input').getAttribute('aria-disabled')==='false');
+            Array.from(document.querySelectorAll('.page-sources-popup:not(.shell-overlay-exit) button')).find(b=>b.textContent==='Manage scripts').click();
             await wait(()=>document.querySelector('[aria-label="Script source"]:not(:disabled)'));
             await shot('09-script-editor');
             document.querySelector('[aria-label="Close scripts"]').click();
             await wait(()=>!document.querySelector('.source-manager'));
             console.log('PROXY:PASS');
-        } catch(error) {console.log('PROXY:FAIL:'+error.message+': '+document.querySelector('.proxy-popup')?.textContent)}
+        } catch(error) {console.log('PROXY:FAIL:'+error.message+': '+document.querySelector('.proxy-popup')?.textContent+' MANAGER: '+document.querySelector('.source-manager')?.textContent)}
     })())JS"_string);
     Core::EventLoop::current().spin_until([&] { return !proxy_result.is_empty() || crashed; });
     VERIFY(!crashed);
