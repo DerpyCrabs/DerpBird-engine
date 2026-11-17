@@ -361,6 +361,16 @@ private:
     bool m_tab_preview_request_in_flight { false };
     QPointer<ScreenshotViewer> m_screenshot_viewer;
     Vector<QPointer<QWidget>> m_floating_surfaces;
+    bool can_composite_floating_surfaces() const;
+    bool update_floating_surface_overlay();
+    void schedule_floating_surface_update();
+    bool m_floating_surface_update_queued { false };
+    bool m_rendering_floating_surfaces { false };
+    bool m_floating_surface_overlay_failed { false };
+    QImage m_last_floating_overlay_image;
+    QPoint m_last_floating_overlay_position;
+    QImage m_hover_overlay_image;
+    QPoint m_hover_overlay_position;
     bool m_suggestions_over_page { false };
     PageOverlay* m_web_compat_report_overlay { nullptr };
 

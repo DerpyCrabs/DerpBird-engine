@@ -501,7 +501,8 @@ public:
     void set_request_logging(bool enabled) { if (m_request_logging == enabled) return; m_request_logging = enabled; did_change_state(); }
     void did_start_logged_request(Badge<WebContentPage>, URL::URL const&, StringView kind);
     auto const& blocking_log() const { return m_blocking_log; }
-    void clear_blocking_log() { if (m_blocking_log.is_empty()) return; m_blocking_log.clear(); did_change_state(); }
+    Function<void(bool reset)> on_blocking_log_change;
+    void clear_blocking_log() { if (m_blocking_log.is_empty()) return; m_blocking_log.clear(); if (on_blocking_log_change) on_blocking_log_change(true); }
     void notify_content_blocking_changed();
     ContentBlockingSnapshot content_blocking_snapshot() const;
 

@@ -376,16 +376,6 @@ JsonValue DerpBird::view_state(View const& view) const
     result.set("document"sv, open ? document_token(view.traversable().active_document().id()) : String {});
     if (auto context = view.derpbird_context_document(); context.has_value())
         result.set("contextDocument"sv, document_token(*context));
-    JsonArray log;
-    for (auto const& entry : view.blocking_log()) {
-        JsonObject value;
-        value.set("sequence"sv, entry.sequence);
-        value.set("url"sv, entry.url);
-        value.set("kind"sv, entry.kind);
-        value.set("rule"sv, entry.rule);
-        log.must_append(move(value));
-    }
-    result.set("log"sv, move(log));
     if (open)
         result.set("scriptCommands"sv, m_values->list_commands(view.page(), view.derpbird_context_document()));
     else
@@ -560,13 +550,13 @@ void DerpBird::dispatch(u64 request_id, u64 view_id, String const& command, Json
     }
     if (command == "logging.set"sv) {
         view->set_request_logging(object.get_bool("enabled"sv).value_or(false));
-        view->push_state_to_ui();
+        view->push_blocking_log_to_ui(true);
         done();
         return;
     }
     if (command == "logging.clear"sv) {
         view->clear_blocking_log();
-        view->push_state_to_ui();
+        view->push_blocking_log_to_ui(true);
         done();
         return;
     }

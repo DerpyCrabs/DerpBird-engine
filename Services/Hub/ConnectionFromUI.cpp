@@ -104,8 +104,9 @@ template<typename EventType>
 static void enqueue_input_from_ui(View& view, u64 input_id, EventType event)
 {
     event.browser_data = make<InputFromUI>(view.view_id(), input_id);
+    // Input acknowledgements and state changes have separate notifications.
+    // Rebuilding the full state here makes pointer traffic compete with frames.
     view.enqueue_input_event(move(event));
-    view.push_state_to_ui();
 }
 
 void ConnectionFromUI::view_enqueue_key_event(u64 view_id, u64 input_id, Web::KeyEvent event)
@@ -896,7 +897,6 @@ void ConnectionFromUI::view_set_window_position(u64 view_id, Gfx::IntPoint posit
 {
     if (auto* view = find_view(view_id)) {
         view->set_window_position(position);
-        view->push_state_to_ui();
     }
 }
 
@@ -904,7 +904,6 @@ void ConnectionFromUI::view_set_window_size(u64 view_id, Gfx::IntSize size)
 {
     if (auto* view = find_view(view_id)) {
         view->set_window_size(size);
-        view->push_state_to_ui();
     }
 }
 
@@ -968,7 +967,6 @@ void ConnectionFromUI::view_set_presents_from_cpu_memory(u64 view_id, bool prese
 {
     if (auto* view = find_view(view_id)) {
         view->set_presents_from_cpu_memory(presents_from_cpu_memory);
-        view->push_state_to_ui();
     }
 }
 

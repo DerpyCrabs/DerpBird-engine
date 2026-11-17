@@ -813,9 +813,7 @@ bool RemoteView::derpbird_page_open() const
 }
 JsonArray RemoteView::derpbird_blocking_log() const
 {
-    if (!m_state.derpbird_state.is_object()) return {};
-    auto entries = m_state.derpbird_state.as_object().get_array("log"sv);
-    return entries.has_value() ? *entries : JsonArray {};
+    return m_blocking_log;
 }
 JsonArray RemoteView::derpbird_script_commands() const
 {
@@ -896,7 +894,22 @@ void RemoteView::did_receive_derpbird_event(String const& event, JsonValue const
 {
     if (!value.is_object()) return;
     auto const& data = value.as_object();
-    if (event == "devtools"sv) {
+    if (event == "blocking-log"sv) {
+        JsonArray merged;
+        auto first = data.get_integer<u64>("firstSequence"sv).value_or(0);
+        if (!data.get_bool("reset"sv).value_or(false)) {
+            for (auto const& entry : m_blocking_log.values()) {
+                if (entry.as_object().get_integer<u64>("sequence"sv).value_or(0) >= first)
+                    merged.must_append(entry);
+            }
+        }
+        if (auto entries = data.get_array("entries"sv); entries.has_value()) {
+            for (auto const& entry : entries->values())
+                merged.must_append(entry);
+        }
+        m_blocking_log = move(merged);
+        if (on_blocking_log_change) on_blocking_log_change();
+    } else if (event == "devtools"sv) {
         if (on_derpbird_devtools) on_derpbird_devtools(value);
     } else if (event == "devtools.inspect"sv) {
         if (auto id = data.get_integer<i64>("node"sv); id.has_value() && on_derpbird_inspect) on_derpbird_inspect(Web::UniqueNodeID { *id });

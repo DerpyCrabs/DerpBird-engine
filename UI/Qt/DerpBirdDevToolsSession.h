@@ -6,6 +6,7 @@
 #include <LibWebCommon/WebView/ConsoleOutput.h>
 #include <LibWebCommon/WebView/DOMNodeProperties.h>
 #include <LibWebCommon/WebView/Debugger.h>
+#include <LibWebCommon/WebView/Mutation.h>
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibWebView/ViewImplementation.h>
 
@@ -32,12 +33,27 @@ public:
         m_flush.setInterval(50);
         connect(&m_flush, &QTimer::timeout, this, [this] { flush(); });
         m_dom_refresh.setSingleShot(true); m_dom_refresh.setInterval(100);
-        connect(&m_dom_refresh, &QTimer::timeout, this, [this] { if(m_target) { m_target->inspect_dom_tree(); if(!m_node.isEmpty()) inspect(Web::UniqueNodeID { m_node.toLongLong() }, false); } });
-        target.on_dom_mutation_received = [this](auto) { if(!m_dom_refresh.isActive()) m_dom_refresh.start(); };
+        connect(&m_dom_refresh, &QTimer::timeout, this, [this] { if(m_target && m_elements_active && !m_node.isEmpty()) inspect(Web::UniqueNodeID { m_node.toLongLong() }, false); });
+        target.on_dom_mutation_received = [this](auto mutation) {
+            if (!m_elements_active) return;
+            auto replacement = QJsonDocument::fromJson(to_qstring(mutation.serialized_target).toUtf8()).object();
+            // Detached/removed nodes are absent from the inspected tree. Their
+            // insertion is delivered as a replacement of the connected parent.
+            if (!replace_dom_node(replacement)) return;
+            if (!m_node.isEmpty() && !m_dom_paths.contains(m_node)) { m_node.clear(); m_styles = {}; m_styles_dirty = true; m_style_loading = false; }
+            if (!m_dom_dirty) {
+                m_dom_mutations.append(replacement);
+                // Bound queued traffic even when the page mutates faster than the UI.
+                if (m_dom_mutations.size() >= 256) { m_dom_dirty = true; m_dom_mutations = {}; }
+            }
+            if (!m_node.isEmpty() && !m_dom_refresh.isActive()) m_dom_refresh.start();
+            schedule();
+        };
         target.set_listen_for_dom_mutations(true);
         target.on_received_dom_tree = [this](JsonObject tree) {
             m_dom = QJsonDocument::fromJson(to_qstring(JsonValue(AK::move(tree)).serialized()).toUtf8()).object();
-            m_dom_dirty = true; schedule();
+            m_dom_request_pending = false; m_dom_paths.clear(); index_dom(m_dom, {});
+            m_dom_mutations = {}; m_dom_dirty = true; schedule();
         };
         target.on_received_dom_node_properties = [this](WebView::DOMNodeProperties properties) {
             if (properties.type != WebView::DOMNodeProperties::Type::ComputedStyle) return;
@@ -110,11 +126,12 @@ public:
         target.on_devtools_source_available = [this](auto source) { add_source(source); schedule(); };
         WebView::ViewImplementation::NavigationListener navigation;
         navigation.on_load_start = [this](auto const&) {
+            m_dom_request_pending = false; m_dom_paths.clear(); m_dom_mutations = {};
             ++m_generation; m_evaluation_waiting = false; m_style_loading = false; m_dom = {}; m_styles = {}; m_node.clear(); m_sources = {}; m_source_ids.clear(); m_dom_dirty = m_styles_dirty = m_sources_dirty = true;
             if (auto done = std::exchange(m_evaluation, {})) (*done)(Error::from_string_literal("Page navigated"));
             schedule();
         };
-        navigation.on_load_finish = [this](auto const&) { if(m_target) m_target->set_listen_for_dom_mutations(true); refresh(); };
+        navigation.on_load_finish = [this](auto const&) { if(m_target) m_target->set_listen_for_dom_mutations(m_elements_active); refresh(); };
         m_navigation = target.add_navigation_listener(AK::move(navigation));
         target.did_connect_devtools_client();
         target.start_sending_console_output(true, true);
@@ -124,7 +141,18 @@ public:
             if (!m_target || !value.is_object()) { completion(Error::from_string_literal("Inspected tab closed")); return; }
             auto const& request = value.as_object();
             auto type = request.get_string("type"sv);
-            if (type == "devtools.snapshot"sv) {
+            if (type == "devtools.panel"sv) {
+                auto panel = request.get_string("panel"sv);
+                if (!panel.has_value() || !panel->is_one_of("Elements"sv, "Console"sv, "Sources"sv, "Network"sv)) { completion(Error::from_string_literal("Invalid developer tools panel")); return; }
+                auto active = panel == "Elements"sv;
+                if (active != m_elements_active) {
+                    m_elements_active = active;
+                    m_target->set_listen_for_dom_mutations(active);
+                    if (active) request_dom();
+                    else m_dom_refresh.stop();
+                }
+                completion(JsonValue {});
+            } else if (type == "devtools.snapshot"sv) {
                 // Reading through automation must not consume the UI's pending updates.
                 completion(to_ak(snapshot()));
                 refresh();
@@ -235,10 +263,53 @@ private:
         if (name.isEmpty()) name = "(inline script)";
         m_sources.append(QJsonObject { {"id", key}, {"name", name}, {"text", ""} }); m_sources_dirty = true;
     }
+    void request_dom()
+    {
+        if (!m_target || m_dom_request_pending) return;
+        m_dom_request_pending = true;
+        m_target->inspect_dom_tree();
+    }
+    static QString dom_id(QJsonObject const& node) { return QString::number(node.value("id").toInteger()); }
+    void index_dom(QJsonObject const& root, QVector<int> path, bool remove = false)
+    {
+        struct Entry { QJsonObject node; QVector<int> path; };
+        QVector<Entry> pending { { root, path } };
+        while (!pending.isEmpty()) {
+            auto entry = pending.takeLast();
+            if (entry.node.contains("id")) {
+                if (remove) m_dom_paths.remove(dom_id(entry.node));
+                else m_dom_paths.insert(dom_id(entry.node), entry.path);
+            }
+            auto children = entry.node.value("children").toArray();
+            for (int i = 0; i < children.size(); ++i) {
+                auto child_path = entry.path; child_path.append(i);
+                pending.append({ children[i].toObject(), child_path });
+            }
+        }
+    }
+    bool replace_dom_node(QJsonObject replacement)
+    {
+        if (!replacement.contains("id")) return false;
+        auto found = m_dom_paths.constFind(dom_id(replacement));
+        if (found == m_dom_paths.cend()) return false;
+        auto path = *found;
+        QVector<QJsonObject> ancestors;
+        auto node = m_dom;
+        for (auto child : path) { ancestors.append(node); node = node.value("children").toArray()[child].toObject(); }
+        index_dom(node, path, true);
+        index_dom(replacement, path);
+        // Copy only the changed branch, not a serialized copy of the whole document.
+        for (int depth = path.size(); depth-- > 0;) {
+            auto parent = ancestors[depth]; auto children = parent.value("children").toArray();
+            children[path[depth]] = replacement; parent["children"] = children; replacement = parent;
+        }
+        m_dom = replacement;
+        return true;
+    }
     void refresh()
     {
         if (!m_target) return;
-        m_target->inspect_dom_tree();
+        request_dom();
         auto generation = m_generation;
         m_target->retrieve_devtools_sources([self = QPointer(this), generation](auto result) {
             if (!self || self->m_generation != generation || result.is_error()) return;
@@ -259,7 +330,8 @@ private:
         QJsonObject update;
         if (!m_dirty.isEmpty()) { QJsonArray rows; for (auto const& id : m_dirty) rows.append(m_requests[id]); update["requests"] = rows; m_dirty.clear(); }
         if (!m_new_messages.isEmpty()) { update["messages"] = m_new_messages; m_new_messages = {}; }
-        if (m_dom_dirty) { update["dom"] = m_dom; m_dom_dirty = false; }
+        if (m_dom_dirty) { update["dom"] = m_dom; m_dom_dirty = false; m_dom_mutations = {}; }
+        else if (!m_dom_mutations.isEmpty()) { update["domMutations"] = m_dom_mutations; m_dom_mutations = {}; }
         if (m_sources_dirty) { update["sources"] = m_sources; m_sources_dirty = false; }
         if (m_styles_dirty) { update["styles"] = m_styles; update["nodeId"] = m_node; m_styles_dirty = false; }
         if (m_reveal_node) { update["revealElement"] = true; m_reveal_node = false; }
@@ -277,6 +349,9 @@ private:
     Vector<Web::HTML::ScriptRegistryIdentifier> m_pending_sources;
     QJsonArray m_messages, m_new_messages, m_sources;
     QJsonObject m_dom, m_styles;
+    QHash<QString, QVector<int>> m_dom_paths;
+    QJsonArray m_dom_mutations;
+    bool m_elements_active { true }, m_dom_request_pending { false };
     QString m_node, m_style_node;
     bool m_reveal_node { false };
     bool m_style_loading { false }, m_evaluation_waiting { false };

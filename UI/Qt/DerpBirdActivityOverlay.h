@@ -7,6 +7,8 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
+#include <QPicture>
+#include <QVariant>
 #include <QTimer>
 #include <algorithm>
 
@@ -30,7 +32,8 @@ public:
         connect(&m_timer, &QTimer::timeout, this, [this] {
             auto age = m_clock.elapsed() - m_last_activity;
             if (!m_view || !m_view->isVisible() || age > 1400) { hide(); m_timer.stop(); return; }
-            sync_geometry(); update();
+            if (m_kind == "evaluate" && m_clock.elapsed() - m_started < 300) return;
+            sync_geometry(); record_picture(); show(); raise(); update();
         });
         hide();
     }
@@ -56,7 +59,9 @@ public:
             m_point = *point;
         }
         if (!m_view || !m_view->isVisible()) return;
-        sync_geometry(); show(); raise(); m_timer.start(16); update();
+        sync_geometry(); m_timer.start(16);
+        if (kind == "evaluate") { hide(); return; }
+        record_picture(); show(); raise(); update();
     }
 protected:
     bool eventFilter(QObject* object, QEvent* event) override
@@ -68,12 +73,16 @@ protected:
     }
     void paintEvent(QPaintEvent*) override
     {
+        QPainter painter(this); painter.drawPicture(0, 0, m_picture);
+    }
+    void draw_activity(QPainter& p)
+    {
         if (!m_view) return;
         auto now = m_clock.elapsed();
         auto elapsed = now - m_started;
         if (m_kind == "evaluate" && elapsed < 300) return; // Do not flash on internal queries.
         auto fade = std::clamp((1400.0 - (now - m_last_activity)) / 300.0, 0.0, 1.0);
-        QPainter p(this); p.setRenderHint(QPainter::Antialiasing); p.setOpacity(fade);
+        p.setRenderHint(QPainter::Antialiasing); p.setOpacity(fade);
         auto const& colors = Theme::panel();
         auto accent = Theme::accent();
         auto zoom = m_view->zoom_level();
@@ -109,6 +118,13 @@ protected:
         p.setPen(colors.text);p.drawText(badge, Qt::AlignCenter, label);
     }
 private:
+    void record_picture()
+    {
+        m_picture = QPicture {};
+        QPainter painter(&m_picture); draw_activity(painter); painter.end();
+        setProperty("derpbirdOverlayBounds", m_picture.boundingRect().adjusted(-3, -3, 3, 3));
+    }
+    QPicture m_picture;
     void sync_geometry() { if (m_view) setGeometry(QRect(m_view->mapTo(parentWidget(), QPoint()), m_view->size())); }
     QPointer<WebContentView> m_view;
     QElapsedTimer m_clock;

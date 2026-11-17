@@ -8,6 +8,7 @@
 
 #include <Hub/HubClientEndpoint.h>
 #include <LibWebView/ViewImplementation.h>
+#include <LibCore/Timer.h>
 
 namespace Hub {
 
@@ -40,6 +41,7 @@ public:
 
     // Tells the UI where the view has changed, which it must hear of before anything that makes it look.
     void push_state_to_ui();
+    void push_blocking_log_to_ui(bool reset = false);
 
     void did_get_answer(u64 answer_id, bool answer);
     void did_get_permission_answer(u64 answer_id, Web::Permissions::PromptOutcome);
@@ -82,6 +84,9 @@ private:
     virtual void did_commit_synchronized_resize(u64 token) override;
 
     void forward_callbacks_to_ui(bool is_tab);
+    RefPtr<Core::Timer> m_blocking_log_timer;
+    u64 m_last_blocking_log_sequence { 0 };
+    bool m_blocking_log_reset { false };
 
     Core::AnonymousBuffer m_system_theme;
     Optional<ScreenRects> m_screen_rects;

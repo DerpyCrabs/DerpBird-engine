@@ -87,6 +87,12 @@ View::View(InitialState initial_state)
     , m_screen_rects(move(initial_state.screen_rects))
     , m_websites_prefer_dark(initial_state.websites_prefer_dark)
 {
+    m_blocking_log_timer = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(100), [this] { push_blocking_log_to_ui(); });
+    on_blocking_log_change = [this](bool reset) {
+        m_blocking_log_reset |= reset;
+        if (request_logging_enabled() && !m_blocking_log_timer->is_active())
+            m_blocking_log_timer->start();
+    };
     m_device_pixel_ratio = initial_state.device_pixel_ratio;
     m_maximum_frames_per_second = initial_state.maximum_frames_per_second;
     m_display_id = initial_state.display_id;
@@ -250,6 +256,8 @@ void View::forward_callbacks_to_ui(bool is_tab)
         };
     }
 
+    // These acknowledgements carry no ViewState changes. Actual mutations publish
+    // through their own callbacks; serializing here stalls frames under mouse load.
     on_finish_handling_key_event = [this](Web::KeyEvent const& event) {
         // NB: Input that the Hub came up with itself, such as WebDriver's, is nothing the UI knows about.
         if (!event.browser_data)
@@ -257,7 +265,6 @@ void View::forward_callbacks_to_ui(bool is_tab)
         auto input_id = ConnectionFromUI::input_id_of(*event.browser_data);
         if (!input_id.has_value()) return;
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_finish_handling_key_event(view_id(), *input_id, event.clone_without_browser_data());
         }
     };
@@ -268,7 +275,6 @@ void View::forward_callbacks_to_ui(bool is_tab)
         auto input_id = ConnectionFromUI::input_id_of(*event.browser_data);
         if (!input_id.has_value()) return;
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_finish_handling_mouse_event(view_id(), *input_id, event.clone_without_browser_data(), result);
         }
     };
@@ -280,7 +286,6 @@ void View::forward_callbacks_to_ui(bool is_tab)
         auto input_id = ConnectionFromUI::input_id_of(*event.browser_data);
         if (!input_id.has_value()) return;
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_finish_handling_drag_event(view_id(), *input_id, event.clone_without_browser_data());
         }
     };
@@ -315,14 +320,12 @@ void View::forward_callbacks_to_ui(bool is_tab)
 
     on_link_hover = [this](auto const&... arguments) {
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_link_hover(view_id(), arguments...);
         }
     };
 
     on_link_unhover = [this] {
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_link_unhover(view_id());
         }
     };
@@ -364,7 +367,6 @@ void View::forward_callbacks_to_ui(bool is_tab)
 
     on_cursor_change = [this](auto const&... arguments) {
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_cursor_change(view_id(), arguments...);
         }
     };
@@ -378,14 +380,12 @@ void View::forward_callbacks_to_ui(bool is_tab)
 
     on_enter_tooltip_area = [this](auto const&... arguments) {
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_enter_tooltip_area(view_id(), arguments...);
         }
     };
 
     on_leave_tooltip_area = [this] {
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_leave_tooltip_area(view_id());
         }
     };
@@ -462,21 +462,18 @@ void View::forward_callbacks_to_ui(bool is_tab)
 
     on_accessibility_tree_received = [this](auto const&... arguments) {
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_accessibility_tree_received(view_id(), arguments...);
         }
     };
 
     on_accessibility_tree_changed = [this](auto const&... arguments) {
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_accessibility_tree_changed(view_id(), arguments...);
         }
     };
 
     on_accessibility_focus_changed = [this](auto const&... arguments) {
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_accessibility_focus_changed(view_id(), arguments...);
         }
     };
@@ -616,7 +613,6 @@ void View::forward_callbacks_to_ui(bool is_tab)
 
     on_performance_stats = [this](auto const&... arguments) {
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_performance_stats(view_id(), arguments...);
         }
     };
@@ -675,6 +671,36 @@ ViewState View::current_state() const
             state.web_content_pid = web_content_pid();
     }
     return state;
+}
+
+// The bounded journal is independent of tab state. Hidden journals produce no UI
+// traffic; visible journals send only new entries, at most ten times a second.
+void View::push_blocking_log_to_ui(bool reset)
+{
+    m_blocking_log_timer->stop();
+    m_blocking_log_reset |= reset;
+    auto* ui = ConnectionFromUI::the();
+    if (!ui || !request_logging_enabled())
+        return;
+    JsonArray entries;
+    for (auto const& entry : blocking_log()) {
+        if (!m_blocking_log_reset && entry.sequence <= m_last_blocking_log_sequence)
+            continue;
+        JsonObject value;
+        value.set("sequence"sv, entry.sequence);
+        value.set("url"sv, entry.url);
+        value.set("kind"sv, entry.kind);
+        value.set("rule"sv, entry.rule);
+        entries.must_append(move(value));
+    }
+    JsonObject update;
+    update.set("reset"sv, m_blocking_log_reset);
+    update.set("firstSequence"sv, blocking_log().is_empty() ? 0 : blocking_log().first().sequence);
+    update.set("entries"sv, move(entries));
+    if (!blocking_log().is_empty())
+        m_last_blocking_log_sequence = blocking_log().last().sequence;
+    m_blocking_log_reset = false;
+    ui->async_derpbird_ui_event(view_id(), "blocking-log"_string, move(update));
 }
 
 void View::push_state_to_ui()

@@ -38,6 +38,7 @@ public:
     Optional<Web::HTML::CrossProcessId> derpbird_context_document() const;
     bool derpbird_page_open() const;
     JsonArray derpbird_blocking_log() const;
+    Function<void()> on_blocking_log_change;
     JsonArray derpbird_script_commands() const;
     void send_derpbird_shell_message(String name, JsonValue data);
     u64 derpbird_command(String command, JsonValue payload, DerpBirdCompletion completion);
@@ -130,7 +131,13 @@ public:
     void set_window_position(Gfx::IntPoint position) { HubConnection::the().async_view_set_window_position(view_id(), position); }
     void set_window_size(Gfx::IntSize size) { HubConnection::the().async_view_set_window_size(view_id(), size); }
     void set_system_visibility_state(Web::HTML::VisibilityState visibility_state) { HubConnection::the().async_view_set_system_visibility_state(view_id(), move(visibility_state)); }
-    void set_presents_from_cpu_memory(bool presents_from_cpu_memory) { HubConnection::the().async_view_set_presents_from_cpu_memory(view_id(), presents_from_cpu_memory); }
+    void set_presents_from_cpu_memory(bool presents_from_cpu_memory)
+    {
+        if (m_presents_from_cpu_memory == presents_from_cpu_memory)
+            return;
+        m_presents_from_cpu_memory = presents_from_cpu_memory;
+        HubConnection::the().async_view_set_presents_from_cpu_memory(view_id(), presents_from_cpu_memory);
+    }
     void set_hosts_remote_layer(bool hosts_remote_layer) { HubConnection::the().async_view_set_hosts_remote_layer(view_id(), hosts_remote_layer); }
     void set_wants_frame_notifications(bool wants_frame_notifications) { HubConnection::the().async_view_set_wants_frame_notifications(view_id(), wants_frame_notifications); }
     // What the view shows, from the Compositor, scaled down to fit within the size given.
@@ -356,6 +363,9 @@ private:
     bool m_external_url_pending { false };
     bool m_scales_frames_to_fit { false };
     Hub::ViewState m_state;
+    JsonArray m_blocking_log;
+    // Unknown initially: an attached Hub view may already have a presentation mode.
+    Optional<bool> m_presents_from_cpu_memory;
     bool m_derpbird_transparent { false };
     DevTools::DevToolsDelegate::OnNodePickerEvent m_derpbird_node_picker;
     HashMap<u64, NavigationListener> m_navigation_listeners;

@@ -29,6 +29,8 @@
 #include <QCursor>
 #include <QGuiApplication>
 #include <QRegion>
+#include <QPainter>
+#include <QVariant>
 #include <QTimer>
 #include <QVersionNumber>
 #include <QVulkanInstance>
@@ -211,6 +213,9 @@ RefPtr<Gfx::Bitmap const> WebContentView::cpu_bitmap_to_paint(Paintable const& p
 
 RefPtr<Gfx::Bitmap const> WebContentView::cpu_bitmap_of(Paintable const& paintable) const
 {
+    // Remote frame metadata can arrive without an image owned by this process.
+    if (!paintable.shared_image_buffer)
+        return {};
     if (auto bitmap = paintable.shared_image_buffer->bitmap_if_present())
         return bitmap;
 
@@ -891,6 +896,7 @@ struct WebContentView::VulkanWindowRenderer final : public QVulkanWindowRenderer
 
         auto paintable = m_view.current_paintable();
         bool can_render = paintable.has_value()
+            && paintable->shared_image_buffer
             && !paintable->bitmap_size.is_empty()
             && m_renderer.prepare(m_window);
         if (can_render && !m_renderer.can_render(*paintable->shared_image_buffer)) {
@@ -1211,7 +1217,7 @@ void WebContentView::destroy_vulkan_window()
 bool WebContentView::current_paintable_can_use_vulkan_window() const
 {
     auto paintable = current_paintable();
-    if (!paintable.has_value())
+    if (!paintable.has_value() || !paintable->shared_image_buffer)
         return false;
 
     return paintable->shared_image_buffer->linux_dmabuf_handle();
@@ -1287,6 +1293,8 @@ void WebContentView::release_backing_store(u64 page_id, i32 bitmap_id)
 bool WebContentView::create_page_surface()
 {
     m_page_surface = WaylandPageSurface::create();
+    m_last_floating_overlay_image = {};
+    m_floating_surface_overlay_failed = false;
     if (!m_page_surface)
         return false;
 
@@ -1324,6 +1332,8 @@ void WebContentView::hide_page_surface()
     if (m_page_surface->is_showing())
         m_page_surface->set_synchronized(true);
     m_page_surface->hide();
+    m_page_surface->hide_overlay();
+    m_last_floating_overlay_image = {};
     if (!m_page_surface_rect.isEmpty()) {
         m_page_surface_rect = {};
         update();
@@ -1333,7 +1343,7 @@ void WebContentView::hide_page_surface()
 void WebContentView::update_page_surface(PageSurfaceContent content)
 {
     auto paintable = current_paintable();
-    auto const* dmabuf = paintable.has_value() ? paintable->shared_image_buffer->linux_dmabuf_handle() : nullptr;
+    auto const* dmabuf = paintable.has_value() && paintable->shared_image_buffer ? paintable->shared_image_buffer->linux_dmabuf_handle() : nullptr;
     auto* parent = window()->windowHandle();
     if (!page_surface_can_show_frames() || !dmabuf || !parent || paintable->bitmap_size.is_empty() || m_viewport_size.is_empty()) {
         hide_page_surface();
@@ -1401,8 +1411,11 @@ void WebContentView::update_page_surface(PageSurfaceContent content)
     //     shrinking window, which would otherwise show before the window has shrunk.
     // NB: A page surface that comes back covers what Qt painted over the page, such as the address field's suggestions,
     //     which also come off the rest of the browser window with its next commit.
-    if (!m_page_surface->is_showing() || m_page_surface->would_change_placement(frame))
+    if (!m_page_surface->is_showing() || m_page_surface->would_change_placement(frame)) {
         m_page_surface->set_synchronized(true);
+        m_last_floating_overlay_image = {};
+        schedule_floating_surface_update();
+    }
 
     m_page_surface->forget_buffers_except(backing_stores().shared_image_buffers());
     bool was_showing = m_page_surface->is_showing();
@@ -1430,8 +1443,10 @@ void WebContentView::update_page_surface(PageSurfaceContent content)
     m_page_surface_rect = covered_rect;
     if (result == WaylandPageSurface::PresentResult::Presented)
         m_page_surface_position = frame.position;
-    if (was_showing != m_page_surface->is_showing())
+    if (was_showing != m_page_surface->is_showing()) {
+        schedule_floating_surface_update();
         emit native_surface_changed();
+    }
 }
 
 // The part of the view that the widgets it is in do not clip away, in its coordinates.
@@ -1443,22 +1458,83 @@ QRect WebContentView::rect_shown_in_window() const
     return shown;
 }
 
-bool WebContentView::show_image_over_page(QImage const& image, QPoint position)
+bool WebContentView::can_composite_floating_surfaces() const
+{
+    return m_page_surface && !m_page_surface_failed && !m_floating_surface_overlay_failed;
+}
+
+bool WebContentView::update_floating_surface_overlay()
 {
     auto* parent = window()->windowHandle();
-    if (!m_page_surface || !parent || !m_page_surface->show_overlay(*parent, image, mapTo(window(), position)))
-        return false;
-    // NB: The overlay changes on screen when the browser window commits next, so have Qt repaint a pixel of it.
+    if (!can_composite_floating_surfaces()) return false;
+    // The native parent may not exist yet during initial layout. Retry when the
+    // page surface appears instead of disabling overlays for this view forever.
+    if (!parent) return true;
+    if (!isVisible() || is_page_covered_by_overlay() || !m_page_surface->is_showing()) {
+        m_page_surface->hide_overlay();
+        m_last_floating_overlay_image = {};
+        return true;
+    }
+    QRect bounds;
+    if (!m_hover_overlay_image.isNull())
+        bounds = QRect(m_hover_overlay_position, m_hover_overlay_image.deviceIndependentSize().toSize());
+    struct Surface { QPointer<QWidget> widget; QPoint origin; QRect clip; };
+    QVector<Surface> surfaces;
+    for (auto const& widget : m_floating_surfaces) {
+        if (!widget || !widget->isVisible()) continue;
+        auto origin = widget->mapTo(this, QPoint());
+        auto clip = widget->rect();
+        // Animated transparent widgets can expose their painted bounds, avoiding
+        // a full-window allocation/copy for a small pointer or badge.
+        auto painted = widget->property("derpbirdOverlayBounds");
+        if (painted.isValid()) clip &= painted.toRect();
+        clip &= rect_shown_in_window().translated(-origin);
+        if (clip.isEmpty()) continue;
+        surfaces.append({ widget, origin, clip });
+        bounds |= clip.translated(origin);
+    }
+    bounds &= rect_shown_in_window();
+    if (bounds.isEmpty()) {
+        if (!m_last_floating_overlay_image.isNull()) {
+            m_page_surface->hide_overlay();
+            m_last_floating_overlay_image = {};
+            update(0, 0, 1, 1);
+        }
+        return true;
+    }
+    auto ratio = devicePixelRatioF();
+    QImage image(QSize(qCeil(bounds.width() * ratio), qCeil(bounds.height() * ratio)), QImage::Format_ARGB32_Premultiplied);
+    image.setDevicePixelRatio(ratio); image.fill(Qt::transparent);
+    QPainter painter(&image);
+    painter.drawImage(m_hover_overlay_position - bounds.topLeft(), m_hover_overlay_image);
+    m_rendering_floating_surfaces = true;
+    for (auto const& surface : surfaces) {
+        if (surface.widget)
+            surface.widget->render(&painter, surface.origin + surface.clip.topLeft() - bounds.topLeft(), QRegion(surface.clip), QWidget::DrawWindowBackground | QWidget::DrawChildren);
+    }
+    m_rendering_floating_surfaces = false;
+    painter.end();
+    auto position = mapTo(window(), bounds.topLeft());
+    if (image == m_last_floating_overlay_image && position == m_last_floating_overlay_position) return true;
+    if (!m_page_surface->show_overlay(*parent, image, position)) return false;
+    m_last_floating_overlay_image = image;
+    m_last_floating_overlay_position = position;
     update(0, 0, 1, 1);
     return true;
 }
 
+bool WebContentView::show_image_over_page(QImage const& image, QPoint position)
+{
+    if (!can_composite_floating_surfaces()) return false;
+    m_hover_overlay_image = image;
+    m_hover_overlay_position = position;
+    return update_floating_surface_overlay();
+}
+
 void WebContentView::hide_image_over_page()
 {
-    if (!m_page_surface)
-        return;
-    m_page_surface->hide_overlay();
-    update(0, 0, 1, 1);
+    m_hover_overlay_image = {};
+    if (can_composite_floating_surfaces()) schedule_floating_surface_update();
 }
 
 void WebContentView::destroy_page_surface()
@@ -1479,6 +1555,7 @@ void WebContentView::destroy_page_surface()
         return [release = AK::move(release)] { release->compositor_finished_reading(); };
     });
     m_page_surface = nullptr;
+    m_last_floating_overlay_image = {};
     m_page_surface_rect = {};
     // NB: Unheld stores do not need to wait for a Wayland release. Held stores moved their acknowledgements above.
     for (auto& store : exchange(m_backing_stores_waiting_for_release, {}))
@@ -1493,7 +1570,7 @@ void WebContentView::release_retired_backing_stores_no_longer_painted()
     // NB: A backup frame has no page/bitmap IDs in Paintable. Its dma-buf identity still identifies the old page's
     //     store, which the view may read after it has switched pages and while the Vulkan fallback shows the backup.
     auto paintable = current_paintable();
-    auto const* dmabuf = paintable.has_value() ? paintable->shared_image_buffer->linux_dmabuf_handle() : nullptr;
+    auto const* dmabuf = paintable.has_value() && paintable->shared_image_buffer ? paintable->shared_image_buffer->linux_dmabuf_handle() : nullptr;
     struct stat object_stat {};
     bool has_identity = dmabuf && !dmabuf->objects.is_empty() && fstat(dmabuf->objects.first().fd(), &object_stat) == 0;
     if (dmabuf && !has_identity)

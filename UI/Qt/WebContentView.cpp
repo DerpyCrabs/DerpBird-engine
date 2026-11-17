@@ -1249,6 +1249,8 @@ void WebContentView::paintEvent(QPaintEvent*)
 #if !defined(LADYBIRD_QT_USE_VULKAN_WINDOW)
 RefPtr<Gfx::Bitmap const> WebContentView::cpu_bitmap_of(Paintable const& paintable) const
 {
+    if (!paintable.shared_image_buffer)
+        return {};
     return paintable.shared_image_buffer->bitmap_if_present();
 }
 
@@ -1812,7 +1814,7 @@ class FloatingSurfaceWatcher final : public QObject {
 public:
     AK_ALLOC_WITH_KMALLOC;
 
-    FloatingSurfaceWatcher(QWidget& surface, Function<void()> on_shown_or_hidden)
+    FloatingSurfaceWatcher(QWidget& surface, Function<void(bool)> on_shown_or_hidden)
         : QObject(&surface)
         , m_on_shown_or_hidden(AK::move(on_shown_or_hidden))
     {
@@ -1823,11 +1825,13 @@ private:
     virtual bool eventFilter(QObject*, QEvent* event) override
     {
         if (event->type() == QEvent::Show || event->type() == QEvent::Hide)
-            m_on_shown_or_hidden();
+            m_on_shown_or_hidden(true);
+        else if (event->type() == QEvent::Paint || event->type() == QEvent::Move || event->type() == QEvent::Resize || event->type() == QEvent::DynamicPropertyChange)
+            m_on_shown_or_hidden(false);
         return false;
     }
 
-    Function<void()> m_on_shown_or_hidden;
+    Function<void(bool)> m_on_shown_or_hidden;
 };
 
 }
@@ -1835,7 +1839,26 @@ private:
 void WebContentView::add_floating_surface(QWidget& surface)
 {
     m_floating_surfaces.append(&surface);
-    new FloatingSurfaceWatcher(surface, [this] { schedule_repaint(); });
+    new FloatingSurfaceWatcher(surface, [self = QPointer(this)](bool visibility_changed) {
+        if (!self || self->m_rendering_floating_surfaces) return;
+        if (self->can_composite_floating_surfaces()) self->schedule_floating_surface_update();
+        else if (visibility_changed) self->schedule_repaint();
+    });
+}
+
+void WebContentView::schedule_floating_surface_update()
+{
+    if (m_floating_surface_update_queued || m_rendering_floating_surfaces) return;
+    m_floating_surface_update_queued = true;
+    QTimer::singleShot(0, this, [this] {
+        m_floating_surface_update_queued = false;
+        if (!can_composite_floating_surfaces()) return;
+        if (!update_floating_surface_overlay()) {
+            warnln("Unable to composite floating UI above the page; falling back to Qt painting");
+            m_floating_surface_overlay_failed = true;
+            schedule_repaint();
+        }
+    });
 }
 
 void WebContentView::set_suggestions_over_page(bool suggestions_over_page)
@@ -1848,7 +1871,7 @@ void WebContentView::set_suggestions_over_page(bool suggestions_over_page)
 
 bool WebContentView::has_floating_surface_over_page() const
 {
-    return m_suggestions_over_page || any_of(m_floating_surfaces, [](auto const& surface) { return surface && surface->isVisible(); });
+    return m_suggestions_over_page || (!can_composite_floating_surfaces() && any_of(m_floating_surfaces, [](auto const& surface) { return surface && surface->isVisible(); }));
 }
 
 // Overlays are painted by Qt, underneath whatever presents the page on some platforms, which has to step aside for them.
@@ -1991,6 +2014,8 @@ void WebContentView::set_page_dim(qreal)
 #endif
 
 #ifndef LADYBIRD_HAS_WAYLAND_GPU_QUERY
+bool WebContentView::can_composite_floating_surfaces() const { return false; }
+bool WebContentView::update_floating_surface_overlay() { return false; }
 bool WebContentView::show_image_over_page(QImage const&, QPoint)
 {
     return false;

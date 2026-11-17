@@ -2721,7 +2721,7 @@ void ViewImplementation::append_request_log(URL::URL const& url, StringView kind
     if (address.bytes().size() > 2048)
         address = MUST(String::formatted("{}…", address.bytes_as_string_view().substring_view(0, 2048)));
     m_blocking_log.enqueue(BlockingLogEntry { ++m_blocking_log_sequence, move(address), MUST(String::from_utf8(kind)), rule.bytes().size() <= 4096 ? rule : String {} });
-    did_change_state();
+    if (on_blocking_log_change) on_blocking_log_change(false);
 }
 
 void ViewImplementation::did_start_proxy_request(u64 id, URL::URL const& url)

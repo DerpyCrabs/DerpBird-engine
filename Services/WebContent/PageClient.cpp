@@ -2392,6 +2392,11 @@ void PageClient::close_worker_agent(Web::HTML::WorkerAgentId agent_id, Web::HTML
 
 void PageClient::page_did_mutate_dom(Utf16FlyString const& type, Web::DOM::Node const& target, Web::DOM::NodeList& added_nodes, Web::DOM::NodeList& removed_nodes, GC::Ptr<Web::DOM::Node>, GC::Ptr<Web::DOM::Node>, Optional<Utf16FlyString> const& attribute_name)
 {
+    // Building a detached fragment is not a change to the inspected document.
+    // Serializing its growing subtree for every append is quadratic. Once it is
+    // inserted, the connected parent's mutation contains the complete subtree.
+    if (!target.is_connected())
+        return;
     Optional<WebView::Mutation::Type> mutation;
 
     if (type == Web::DOM::MutationType::attributes) {
@@ -2443,7 +2448,8 @@ void PageClient::flush_pending_dom_mutations()
             break;
 
         auto pending_mutation = m_pending_dom_mutations.dequeue();
-        send_dom_mutation(*pending_mutation.target, move(pending_mutation.mutation));
+        if (pending_mutation.target->is_connected())
+            send_dom_mutation(*pending_mutation.target, move(pending_mutation.mutation));
     }
 }
 
