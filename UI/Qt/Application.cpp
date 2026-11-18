@@ -1350,10 +1350,9 @@ Optional<String> Application::system_font_family() const
 
 BrowserWindow& Application::new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& configuration, BrowserWindow::IsPopupWindow is_popup_window, WebView::IsPrivate is_private, Optional<u64> hub_view_id, ShowWindow show_window, Optional<Web::HTML::PreparedNavigationDescriptor> initial_navigation, QString agent_id)
 {
-    auto* window = new BrowserWindow(initial_urls, is_popup_window, is_private, hub_view_id);
+    auto* window = new BrowserWindow(initial_urls, is_popup_window, is_private, hub_view_id, {}, agent_id);
 
     if (!agent_id.isEmpty()) {
-        window->setProperty("derpbirdAgentId", agent_id);
         window->setWindowRole("derpbird-agent");
         window->setAttribute(Qt::WA_ShowWithoutActivating);
         window->setWindowTitle("DerpBird");
@@ -1424,6 +1423,10 @@ SessionLaunchPolicy Application::launch_restore_policy() const
 
 void Application::create_session_store(ByteString const& data_directory, bool persists_sessions)
 {
+    if (persists_sessions && !m_session_store && !qEnvironmentVariableIsEmpty("DERPBIRD_AGENT_WINDOW")) {
+        m_deferred_session_directory = data_directory;
+        persists_sessions = false;
+    }
     auto session_store = [&]() -> ErrorOr<NonnullOwnPtr<SessionStore>> {
         if (!persists_sessions)
             return SessionStore::create();
@@ -1606,6 +1609,8 @@ static WindowConfiguration window_configuration_for(SessionWindowGeometry const&
 
 BrowserWindow* Application::restore_previous_session(WindowConfiguration const& frontmost_window_configuration)
 {
+    if (m_deferred_session_directory.has_value())
+        create_session_store(m_deferred_session_directory.release_value(), true);
     auto plan = session_store(WebView::IsPrivate::No).take_launch_plan();
 
     BrowserWindow* frontmost_window = nullptr;
@@ -1684,11 +1689,11 @@ void Application::open_startup_tabs(BrowserWindow& window, Vector<URL::URL> cons
 
 BrowserWindow* Application::non_private_window_if_any() const
 {
-    if (m_active_window && m_active_window->is_private() == WebView::IsPrivate::No)
+    if (m_active_window && m_active_window->is_private() == WebView::IsPrivate::No && m_active_window->property("derpbirdAgentId").toString().isEmpty())
         return m_active_window;
 
     for (auto* widget : QApplication::topLevelWidgets()) {
-        if (auto* window = as_if<BrowserWindow>(widget); window && window->is_private() == WebView::IsPrivate::No)
+        if (auto* window = as_if<BrowserWindow>(widget); window && window->is_private() == WebView::IsPrivate::No && window->property("derpbirdAgentId").toString().isEmpty())
             return window;
     }
 
@@ -1843,6 +1848,8 @@ void Application::focus_location_editor()
 
 void Application::reopen_recently_closed_tab(BrowserWindow* target_window, Optional<SessionWindowId> unit_id, ReopenClosedWindow reopen_closed_window)
 {
+    if (target_window && !target_window->property("derpbirdAgentId").toString().isEmpty())
+        return;
     auto is_private = target_window ? target_window->is_private() : WebView::IsPrivate::No;
     auto& session = target_window ? target_window->session() : session_store(WebView::IsPrivate::No);
     auto closed_unit = unit_id.has_value() ? session.take_closed_unit(*unit_id) : session.take_most_recently_closed();

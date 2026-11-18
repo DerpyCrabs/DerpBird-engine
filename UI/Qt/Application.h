@@ -370,6 +370,7 @@ private:
 #if defined(AK_OS_MACOS)
     OwnPtr<SoftwareUpdater> m_software_updater;
 #endif
+    Optional<ByteString> m_deferred_session_directory;
     OwnPtr<SessionStore> m_session_store;
     OwnPtr<SessionStore> m_private_session_store;
     OwnPtr<WebView::FaviconStore> m_favicon_store;

@@ -1930,7 +1930,7 @@ QString DerpBirdChrome::workspace_key() const
 void DerpBirdChrome::load_workspaces()
 {
     m_workspaces.append({ "default", "Default", "research", "sage", {} });
-    if (m_window.is_private() == WebView::IsPrivate::Yes) return;
+    if (!m_window.session_window_id().has_value() || m_window.is_private() == WebView::IsPrivate::Yes) return;
     auto rows = QJsonDocument::fromJson(m_shell_preferences->value(workspace_key()).toByteArray()).array();
     for (auto row : rows) {
         auto w = row.toObject();
@@ -1944,7 +1944,7 @@ void DerpBirdChrome::load_workspaces()
 }
 void DerpBirdChrome::save_workspaces()
 {
-    if (m_window.is_private() == WebView::IsPrivate::Yes) return;
+    if (!m_window.session_window_id().has_value() || m_window.is_private() == WebView::IsPrivate::Yes) return;
     QJsonArray rows;
     for (auto const& w : m_workspaces) rows.append(QJsonObject { { "id", w.id }, { "name", w.name }, { "icon", w.icon }, { "color", w.color } });
     m_shell_preferences->setValue(workspace_key(), QJsonDocument(rows).toJson(QJsonDocument::Compact));

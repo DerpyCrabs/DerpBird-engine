@@ -40,6 +40,13 @@ public:
         return *server;
     }
 
+    ~DerpBirdAutomation() override
+    {
+        // QLocalServer destroys its sockets after the request and window maps are gone.
+        for (auto* socket : m_clients.keys())
+            QObject::disconnect(socket, nullptr, this, nullptr);
+    }
+
     void add_window(QString id, Window window) { m_windows.insert(id, std::make_shared<Window>(AK::move(window))); }
     void remove_window(QString const& id) { m_windows.remove(id); }
     bool enabled() const { return m_server.isListening(); }

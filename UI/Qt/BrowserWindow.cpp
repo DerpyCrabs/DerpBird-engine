@@ -346,12 +346,15 @@ static QIcon const& app_icon(WebView::IsPrivate is_private)
     return cached_icon;
 }
 
-BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window, WebView::IsPrivate is_private, Optional<u64> hub_view_id, Optional<SessionWindowId> restored_session_window_id)
+BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window, WebView::IsPrivate is_private, Optional<u64> hub_view_id, Optional<SessionWindowId> restored_session_window_id, QString agent_id)
     : WebView::SettingsObserver(Application::settings())
     , m_is_private(is_private)
     , m_tabs_container(new TabWidget(is_private, this))
     , m_is_popup_window(is_popup_window)
 {
+    if (!agent_id.isEmpty())
+        setProperty("derpbirdAgentId", agent_id);
+
     // NB: The toolbar is made before the rest of the window, so it learns of the session's downloads once it is all here.
     toolbar().update_downloads_button();
 
@@ -1388,6 +1391,8 @@ void BrowserWindow::activate_first_unpinned_tab()
 
 void BrowserWindow::register_window_with_session_store()
 {
+    if (!property("derpbirdAgentId").toString().isEmpty())
+        return;
     if (auto session_window_id = session().window_opened(); session_window_id.is_error())
         dbgln("Unable to register the new window with the session store: {}", session_window_id.error());
     else
@@ -2218,7 +2223,7 @@ void BrowserWindow::closeEvent(QCloseEvent* event)
     auto active_tab_index = m_window_close_active_tab_index.value_or(static_cast<i64>(max(m_tabs_container->current_index(), 0)));
 
     if (m_is_private == WebView::IsPrivate::No) {
-        if (m_is_popup_window == IsPopupWindow::No) {
+        if (m_is_popup_window == IsPopupWindow::No && property("derpbirdAgentId").toString().isEmpty()) {
             Application::settings().set_window_settings({
                 .position = Gfx::IntPoint { pos().x(), pos().y() },
                 .size = Gfx::IntSize { width(), height() },
@@ -2241,6 +2246,24 @@ void BrowserWindow::closeEvent(QCloseEvent* event)
         if (auto result = session().window_closing(AK::move(closing)); result.is_error())
             dbgln("Unable to record the closing window in the session store: {}", result.error());
         Application::the().update_reopen_recently_closed_actions();
+    }
+
+    if (m_window_close_accepted && property("derpbirdAgentId").toString().isEmpty()) {
+        QVector<BrowserWindow*> agent_windows;
+        bool has_user_window = false;
+        for (auto* widget : QApplication::topLevelWidgets()) {
+            auto* other = as_if<BrowserWindow>(widget);
+            if (!other || other == this || other->m_window_close_accepted)
+                continue;
+            if (other->property("derpbirdAgentId").toString().isEmpty())
+                has_user_window = true;
+            else
+                agent_windows.append(other);
+        }
+        if (!has_user_window) {
+            for (auto* agent : agent_windows)
+                QTimer::singleShot(0, agent, [agent] { agent->close(); });
+        }
     }
 
     if (m_window_close_accepted && m_is_private == WebView::IsPrivate::Yes) {

@@ -85,14 +85,19 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
                 window->raise();
                 return;
             }
-            app->new_window({ file_url });
+            app->on_new_tab({ file_url });
         };
 
         // NB: URLs from outside the browser, such as a link clicked in another app, never open in a private window.
         app->on_new_tab = [&](auto const& urls) {
             auto* non_private_window = app->non_private_window_if_any();
             if (!non_private_window) {
-                app->new_window(urls);
+                if (auto* restored = app->restore_previous_session(app->configuration_for_new_window())) {
+                    if (!urls.is_empty() && !(urls.size() == 1 && urls.first() == Ladybird::Application::settings().new_tab_page_url()))
+                        app->open_startup_tabs(*restored, urls);
+                } else {
+                    app->new_window(urls);
+                }
                 return;
             }
 
@@ -106,7 +111,10 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         };
 
         app->on_new_window = [&](auto const& urls) {
-            app->new_window(urls, app->configuration_for_new_window());
+            if (!app->non_private_window_if_any())
+                app->on_new_tab(urls);
+            else
+                app->new_window(urls, app->configuration_for_new_window());
         };
 
         auto configuration = app->configuration_for_new_window();
