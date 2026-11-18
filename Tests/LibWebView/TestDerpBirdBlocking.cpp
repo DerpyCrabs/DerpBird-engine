@@ -324,17 +324,17 @@ TEST_CASE(derpbird_blocking_method_prevents_network_requests)
         (()=>{
             document.body.innerHTML='<iframe id="clickframe" style="width:400px;height:220px;border:0" src="/clickframe"></iframe>';
             let attempts=0;
-            const poll=()=>{const doc=document.getElementById('clickframe').contentDocument;if(doc?.getElementById('derpbird-click-to-load'))console.log('click-placeholder');else if(++attempts<200)setTimeout(poll,20);else console.log('click-placeholder-failed');};poll();
+            const poll=()=>{const doc=document.getElementById('clickframe').contentDocument;if(doc===null)console.log('click-placeholder');else if(++attempts<200)setTimeout(poll,20);else console.log('click-placeholder-failed');};poll();
         })();
     )JS"_string, "click-placeholder"sv);
     EXPECT(!server.requests.contains_slow("GET /clickframe HTTP/1.1"sv));
     check(R"JS(
-        document.getElementById('clickframe').contentDocument.getElementById('derpbird-click-to-load').click();
-        setTimeout(()=>console.log(document.getElementById('clickframe').contentDocument.getElementById('derpbird-click-to-load')?'synthetic-denied':'synthetic-loaded'),50);
+        document.getElementById('clickframe').click();
+        setTimeout(()=>console.log(document.getElementById('clickframe').contentDocument===null?'synthetic-denied':'synthetic-loaded'),50);
     )JS"_string, "synthetic-denied"sv);
     EXPECT(!server.requests.contains_slow("GET /clickframe HTTP/1.1"sv));
     auto click_position_json = check(R"JS(
-        (()=>{const f=document.getElementById('clickframe');const outer=f.getBoundingClientRect();const b=f.contentDocument.getElementById('derpbird-click-to-load').getBoundingClientRect();console.log(JSON.stringify([Math.round(outer.x+b.x+b.width/2),Math.round(outer.y+b.y+b.height/2)]));})();
+        (()=>{const f=document.getElementById('clickframe');const outer=f.getBoundingClientRect();console.log(JSON.stringify([Math.round(outer.x+outer.width/2),Math.round(outer.y+outer.height/2+16)]));})();
     )JS"_string, {});
     auto click_position = MUST(JsonValue::from_string(click_position_json)).as_array();
     Web::DevicePixelPoint click_point { click_position.at(0).as_integer<i32>(), click_position.at(1).as_integer<i32>() };
@@ -351,7 +351,7 @@ TEST_CASE(derpbird_blocking_method_prevents_network_requests)
     )JS"_string, "click-loaded"sv);
     EXPECT(server.requests.contains_slow("GET /clickframe HTTP/1.1"sv));
     check(R"JS(
-        (()=>{document.getElementById('clickframe').contentWindow.location.reload();let attempts=0;const poll=()=>{if(document.getElementById('clickframe').contentDocument?.getElementById('derpbird-click-to-load'))console.log('click-permit-consumed');else if(++attempts<200)setTimeout(poll,20);else console.log('click-permit-reused');};poll();})();
+        (()=>{document.getElementById('clickframe').contentWindow.location.reload();let attempts=0;const poll=()=>{if(document.getElementById('clickframe').contentDocument===null)console.log('click-permit-consumed');else if(++attempts<200)setTimeout(poll,20);else console.log('click-permit-reused');};poll();})();
     )JS"_string, "click-permit-consumed"sv);
     size_t click_requests=0;for(auto const& request:server.requests)if(request=="GET /clickframe HTTP/1.1"sv)++click_requests;
     EXPECT_EQ(click_requests,1u);

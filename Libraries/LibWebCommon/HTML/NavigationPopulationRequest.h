@@ -71,6 +71,7 @@ struct NavigationPopulationResult {
     bool resource_cleared { false };
     Optional<HTTP::Cookie::SameSiteStatus> navigation_same_site_status {};
     // The origin the UI process gives a document created for inline content in place of the response.
+    bool derpbird_click_to_load_placeholder { false };
     Optional<URL::Origin> inline_content_origin {};
     Optional<CrossProcessId> document_id {};
 };

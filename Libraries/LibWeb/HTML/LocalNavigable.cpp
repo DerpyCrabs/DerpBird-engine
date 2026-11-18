@@ -87,6 +87,8 @@
 #include <LibWeb/Layout/NodeArena.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Loader/GeneratedPagesLoader.h>
+#include <LibWeb/Page/DerpBirdClickToLoad.h>
+#include <LibCore/Resource.h>
 #include <LibWeb/Page/EventHandler.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Page/RenderingStats.h>
@@ -1018,6 +1020,7 @@ void LocalNavigable::continue_navigation_at_population(NavigationPopulationReque
     output->classic_history_api_state = move(result.classic_history_api_state);
     output->resource_cleared = result.resource_cleared;
     output->navigation_same_site_status = result.navigation_same_site_status;
+    output->derpbird_click_to_load_placeholder = result.derpbird_click_to_load_placeholder;
     output->inline_content_origin = move(result.inline_content_origin);
     output->document_id = result.document_id;
 
@@ -3234,13 +3237,17 @@ GC::Ref<DocumentToCreate> DocumentToCreate::create(GC::Ref<NavigationParams> nav
     return GC::Heap::the().allocate<DocumentToCreate>(navigation_params, load_steps, move(origin));
 }
 
-static GC::Ref<DOM::Document> create_navigation_error_document(NavigationParams const& navigation_params, URL::URL const& url, Utf16String const& error_message)
+static GC::Ref<DOM::Document> create_navigation_error_document(NavigationParams const& navigation_params, URL::URL const& url, Utf16String const& error_message, bool click_to_load = false)
 {
-    auto error_html = load_error_page(url, error_message.to_utf8()).release_value_but_fixme_should_propagate_errors();
-    auto document = create_document_for_inline_content(navigation_params, [&error_html](auto& document) {
+    auto error_html = click_to_load
+        ? MUST(String::from_utf8(MUST(Core::Resource::load_from_uri("resource://ladybird/templates/derpbird-click-to-load.html"sv))->data()))
+        : load_error_page(url, error_message.to_utf8()).release_value_but_fixme_should_propagate_errors();
+    auto document = create_document_for_inline_content(navigation_params, [&](auto& document) {
         auto scripting_mode = document.is_scripting_enabled() ? HTML::ParserScriptingMode::Normal : HTML::ParserScriptingMode::Disabled;
         auto parser = HTMLParser::create_from_byte_string(document, error_html, scripting_mode, "utf-8"sv);
         document.set_url(URL::about_error());
+        if (click_to_load)
+            install_derpbird_click_to_load(document, url);
         parser->run();
 
         // FIXME: This should go in create_document_for_inline_content() instead.
@@ -3259,11 +3266,11 @@ static GC::Ref<DOM::Document> create_navigation_error_document(NavigationParams 
     return document;
 }
 
-static GC::Ref<DocumentToCreate> navigation_error_document(LocalNavigable& navigable, Optional<Utf16String> const& navigation_id, Bindings::NavigationTimingType navigation_timing_type, UserNavigationInvolvement user_involvement, URL::Origin const& origin, Optional<CrossProcessId> document_id, URL::URL const& url, Utf16String const& error_message)
+static GC::Ref<DocumentToCreate> navigation_error_document(LocalNavigable& navigable, Optional<Utf16String> const& navigation_id, Bindings::NavigationTimingType navigation_timing_type, UserNavigationInvolvement user_involvement, URL::Origin const& origin, Optional<CrossProcessId> document_id, URL::URL const& url, Utf16String const& error_message, bool click_to_load = false)
 {
     auto navigation_params = create_navigation_params_for_inline_content(&navigable, navigation_id, navigation_timing_type, user_involvement, origin, document_id);
-    return DocumentToCreate::create(navigation_params, GC::create_function(GC::Heap::the(), GC::captures(url, error_message), [](auto& url, auto& error_message, NavigationParams const& navigation_params) -> GC::Ref<DOM::Document> {
-        return create_navigation_error_document(navigation_params, url, error_message);
+    return DocumentToCreate::create(navigation_params, GC::create_function(GC::Heap::the(), GC::captures(url, error_message, click_to_load), [](auto& url, auto& error_message, auto& click_to_load, NavigationParams const& navigation_params) -> GC::Ref<DOM::Document> {
+        return create_navigation_error_document(navigation_params, url, error_message, click_to_load);
     }));
 }
 
@@ -3376,7 +3383,7 @@ void LocalNavigable::queue_navigation_and_traversal_task_for_session_history_ent
             // AD-HOC: Name the URL that actually failed to load: The last URL the navigation was redirected to, if
             //         any — rather than the URL it started at.
             auto error_url = output->redirected_url.value_or(url);
-            output->document_to_create = navigation_error_document(self, navigation_id, navigation_timing_type, user_involvement, output->inline_content_origin.value(), output->document_id, error_url, error_message);
+            output->document_to_create = navigation_error_document(self, navigation_id, navigation_timing_type, user_involvement, output->inline_content_origin.value(), output->document_id, error_url, error_message, output->derpbird_click_to_load_placeholder);
 
             // 2. Make document unsalvageable given entry's document state's document and "navigation-failure".
             // AD-HOC: That happens when the document is created.

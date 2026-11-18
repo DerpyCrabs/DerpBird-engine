@@ -847,6 +847,7 @@ public:
     RefPtr<DocumentState> replacement_document_state;
     bool resource_cleared = false;
     Optional<HTTP::Cookie::SameSiteStatus> navigation_same_site_status;
+    bool derpbird_click_to_load_placeholder { false };
     Optional<URL::Origin> inline_content_origin;
     Optional<CrossProcessId> document_id;
 

@@ -69,6 +69,7 @@ list(TRANSFORM ABOUT_SETTINGS_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res
 
 set(WEB_TEMPLATES
     directory.html
+    derpbird-click-to-load.html
     error.html
 )
 list(TRANSFORM WEB_TEMPLATES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/templates/")

@@ -63,7 +63,7 @@ public:
     void set_document(CanonicalDocument const&, CanonicalNavigable const&);
 
     void refuse_made_up_local_file_urls(WebContentClient const& population_worker, Web::HTML::NavigationPopulationResult&) const;
-    void did_finish_navigation_params_creation(Web::HTML::NavigationPopulationResult);
+    void did_finish_navigation_params_creation(Web::HTML::NavigationPopulationResult, CanonicalNavigable const& target);
     void acquire_response_body(WebContentClient const& population_worker, Function<void(bool)> completion_steps);
     void obtain_the_response_policies(CanonicalNavigable const&);
     void check_the_responses_adherence_to_its_embedder_policy(CanonicalNavigable const&);

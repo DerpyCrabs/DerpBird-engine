@@ -1427,7 +1427,7 @@ void CanonicalTraversable::did_finish_history_navigation_params_creation(WebCont
     auto loader = creating->loader;
     changing_navigable->population = ChangingNavigable::AcquiringResponseBody { loader };
     loader->refuse_made_up_local_file_urls(source_page.client(), result);
-    loader->did_finish_navigation_params_creation(move(result));
+    loader->did_finish_navigation_params_creation(move(result), changing_navigable->navigable());
     loader->acquire_response_body(source_page.client(), [this, operation_id, navigable_id](bool succeeded) {
         auto* operation = find_history_operation(operation_id);
         auto* changing_navigable = operation ? operation->pending_changing_job(navigable_id) : nullptr;

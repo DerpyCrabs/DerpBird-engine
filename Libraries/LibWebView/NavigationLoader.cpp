@@ -191,12 +191,26 @@ void NavigationLoader::refuse_made_up_local_file_urls(WebContentClient const& po
     }
 }
 
-void NavigationLoader::did_finish_navigation_params_creation(Web::HTML::NavigationPopulationResult result)
+void NavigationLoader::did_finish_navigation_params_creation(Web::HTML::NavigationPopulationResult result, CanonicalNavigable const& target)
 {
     VERIFY(!m_result.has_value());
     VERIFY(!m_response_body_request);
     VERIFY(!m_completion_steps);
 
+    result.derpbird_click_to_load_placeholder = false;
+    auto* params = result.navigation_params.get_pointer<Web::HTML::NavigationParamsDescriptor>();
+    if (params && params->response.derpbird_click_to_load && !response_body_handle(result)) {
+        // A filter may request a browser-owned inline page. Discard everything the renderer
+        // supplied, including body, headers, origin and proposed changes to the history entry.
+        result = {
+            .navigation_params = Web::HTML::NavigationParamsNullOrError {},
+            .redirected_url = {},
+            .classic_history_api_state = {},
+            .replacement_document_state = {},
+        };
+        result.derpbird_click_to_load_placeholder = !target.is_top_level_traversable()
+            && Web::Fetch::Infrastructure::is_http_or_https_scheme(m_request.history_entry.url.scheme());
+    }
     Web::HTML::apply_navigation_population_result(m_request, result);
     m_result = move(result);
     m_result->inline_content_origin = URL::Origin::create_opaque();

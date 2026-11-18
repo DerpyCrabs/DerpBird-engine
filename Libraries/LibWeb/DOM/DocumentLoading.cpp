@@ -23,7 +23,6 @@
 #include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/DOM/CustomEvent.h>
 #include <LibWeb/DOM/Document.h>
-#include <LibWeb/Page/DerpBirdClickToLoad.h>
 #include <LibWeb/DOM/DocumentLoading.h>
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
@@ -142,7 +141,6 @@ static WebIDL::ExceptionOr<GC::Ref<DOM::Document>> load_html_document(HTML::Navi
 
     // 1. Let document be the result of creating and initializing a Document object given "html", "text/html", and navigationParams.
     auto document = TRY(DOM::Document::create_and_initialize(DOM::Document::Type::HTML, "text/html"_utf16_fly_string, navigation_params));
-    if (navigation_params.response->record()->derpbird_click_to_load()) install_derpbird_click_to_load(*document);
 
     // 2. If document's URL is about:blank, then populate with html/head/body given document.
     // FIXME: The additional check for a non-empty body fixes issues with loading javascript urls in iframes, which
