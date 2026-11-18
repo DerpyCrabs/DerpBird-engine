@@ -33,6 +33,9 @@ unsafe extern "C" {
         arguments: ak::Span<'_, Value>,
     ) -> RawNativeFunctionResult;
 
+    /// WebIDL::invoke_callback() of the WebIDL::CallbackType with the arguments and the "report" exception behavior.
+    fn web_bindings_invoke_callback_function_and_report(callback: *mut c_void, arguments: ak::Span<'_, Value>);
+
     /// WebIDL::invoke_promise_callback() of the WebIDL::CallbackType, whose return type is a promise type, with the this
     /// value, if `has_this_value`, and the arguments.
     fn web_bindings_invoke_promise_callback_function(
@@ -135,6 +138,12 @@ impl CallbackFunction {
             )
         }
         .into_completion()
+    }
+
+    /// Invokes the callback function with the arguments and "report", https://webidl.spec.whatwg.org/#invoke-a-callback-function
+    pub(crate) fn invoke_and_report(&self, arguments: &[Value]) {
+        // SAFETY: The slot keeps the callback alive, and the values are live for the call.
+        unsafe { web_bindings_invoke_callback_function_and_report(self.0.0.as_ptr(), ak::Span::new(arguments)) };
     }
 }
 

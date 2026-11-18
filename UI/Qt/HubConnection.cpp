@@ -391,9 +391,9 @@ void HubConnection::app_quit_for_signal()
     Application::the().quit_for_signal();
 }
 
-void HubConnection::app_did_enable_devtools()
+void HubConnection::app_did_enable_devtools(u16 port)
 {
-    Application::the().did_enable_devtools();
+    Application::the().did_enable_devtools(port);
 }
 
 void HubConnection::app_did_disable_devtools()
@@ -419,6 +419,11 @@ void HubConnection::app_open_view_in_new_tab(u64 view_id, Optional<u64> source_v
 void HubConnection::app_display_error_dialog(String message)
 {
     Application::the().display_error_dialog(message);
+}
+
+void HubConnection::app_display_update_check_result(WebView::UpdateCheckResult::Kind kind, Optional<String> version, WebView::InstallMethod install_method, WebView::UpdateCheckTrigger trigger)
+{
+    Application::the().display_update_check_result(kind, version, install_method, trigger);
 }
 
 void HubConnection::app_display_download_confirmation_dialog(String download_name, ByteString path)
@@ -474,6 +479,12 @@ void HubConnection::pip_set_video_size(u64 view_id, Gfx::IntSize video_size)
 void HubConnection::pip_close(u64 view_id)
 {
     Application::the().close_picture_in_picture_window(view_id);
+}
+
+void HubConnection::media_session_update(Optional<Web::MediaSession::MediaSessionState> state)
+{
+    if (auto* backend = Application::the().media_session_platform_backend())
+        backend->update(state);
 }
 
 void HubConnection::notification_show(u64 id, u64 page_id, Optional<u64> replaces, Web::NotificationsAPI::NotificationData data, String attribution, Optional<Gfx::ShareableBitmap> icon)

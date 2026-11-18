@@ -23,7 +23,6 @@ mod owner;
 pub(crate) use owner::{process_style, release_unused_memory_of_style_layout_threads};
 mod wait;
 
-pub use clock::FfiPlannedScrollTimeline;
 pub use clock::hover::FfiHoverPlanInputs;
 pub(crate) use clock::hover::HoverPlan;
 pub(crate) use clock::{ClockPlan, CommittedContent, CommittedFrame, LaneDelivery, SampledFrame};
@@ -289,7 +288,10 @@ impl RenderState {
         if !shell_style_changes.is_empty() {
             self.owed.push(shell_style_changes);
         }
-        let rows = self.arena.arena_mut().publish_row_snapshot(false);
+        let rows = self
+            .arena
+            .arena_mut()
+            .publish_row_snapshot(crate::layout::row_reads::MeasuredOverflow::None);
         Some((round, rows))
     }
 }

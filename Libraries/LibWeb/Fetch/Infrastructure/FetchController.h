@@ -59,10 +59,10 @@ public:
     void report_timing(JS::Object&) const;
     void process_next_manual_redirect() const;
 
-    // Runs the steps once the network has delivered all of the body whose bytes arrive through the channel, unless the
-    // fetch is aborted, terminated or stopped first. A later call replaces them.
-    void when_network_completes_body(Engine::FetchByteChannel const&, GC::Ref<GC::Function<void()>> steps);
-    void did_complete_network_body(Engine::FetchByteChannel const&);
+    // Once the network has delivered all of the delivery's body, records its sizes in the response, if still alive, then
+    // runs the steps given its end time. An abort, termination or stop of the fetch, or a later call, drops this first.
+    void when_body_ends(Engine::DeliveryId, Response&, GC::Ptr<GC::Function<void(HighResolutionTime::DOMHighResTimeStamp)>> steps);
+    void did_end_body(Engine::Event::EndOfBody const&);
     [[nodiscard]] NonnullRefPtr<FetchTimingInfo> extract_full_timing_info() const;
     void abort(JS::Realm&, Optional<JS::Value>);
     Optional<HTML::IPCSerializationRecord> const& serialized_abort_reason() const { return m_serialized_abort_reason; }
@@ -100,8 +100,6 @@ public:
 
     bool requires_network() const { return m_control_block->requires_network(); }
     bool has_started_request() const { return m_control_block->has_started_request(); }
-    void set_inner_fetch_controller(GC::Ref<FetchController>);
-
     // The fetch this controller's fetch params started last, and the executor its start was posted to. The controller's
     // stops are posted there, for that fetch.
     void set_started_fetch(Engine::FetchId, Engine::FetchExecutor&);
@@ -137,11 +135,12 @@ private:
     //    Null or an algorithm accepting a global object.
     GC::Ptr<GC::Function<void(JS::Object&)>> m_report_timing_steps;
 
-    struct AwaitedNetworkCompletion {
-        NonnullRefPtr<Engine::FetchByteChannel const> body;
-        GC::Ref<GC::Function<void()>> steps;
+    struct AwaitedEndOfBody {
+        Engine::DeliveryId delivery_id;
+        WeakPtr<Response> response;
+        GC::Ptr<GC::Function<void(HighResolutionTime::DOMHighResTimeStamp)>> steps;
     };
-    Optional<AwaitedNetworkCompletion> m_awaited_network_completion;
+    Optional<AwaitedEndOfBody> m_awaited_end_of_body;
 
     // https://fetch.spec.whatwg.org/#fetch-controller-report-timing-steps
     // serialized abort reason (default null)

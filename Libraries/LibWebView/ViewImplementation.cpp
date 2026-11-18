@@ -130,6 +130,7 @@ ViewImplementation::ViewImplementation(IsPrivate is_private)
 
 ViewImplementation::~ViewImplementation()
 {
+    Application::the().media_session_coordinator().remove_view(view_id());
     // The frontend may be torn down already, so clearing the ongoing navigation must not report a URL change to it, nor
     // cancelling the view's location requests or closing the view's page (which revokes its audio playback and capture)
     // a change in what the tab shows.
@@ -413,6 +414,7 @@ void ViewImplementation::set_title(Utf16String title)
         return;
 
     m_title = move(title);
+    Application::the().media_session_coordinator().set_fallback_title(view_id(), m_title.to_utf8());
 
     if (on_title_change)
         on_title_change(m_title);
@@ -1473,10 +1475,10 @@ void ViewImplementation::consume_user_activation_of_input_handled_by(Badge<WebCo
         m_pending_input_events[*index].user_activation_time.clear();
 }
 
-bool ViewImplementation::take_input_to_open_link_in_new_tab(Badge<WebContentPage>)
+bool ViewImplementation::take_input_to_open_link_in_new_tab(Badge<WebContentPage>, WebContentPage const& page)
 {
     // NB: Automation lets a renderer synthesize the input that opens a link.
-    if (WebContentClient::renderers_may_synthesize_input())
+    if (WebContentClient::renderers_may_synthesize_input_for_testing() || is_running_webdriver_input_command_in(page))
         return true;
     // NB: Each press opens at most one link, the earliest press first, and only while a page could still be handling it.
     auto now = MonotonicTime::now();
@@ -3180,7 +3182,9 @@ void ViewImplementation::did_allocate_backing_stores(Badge<WebContentPage>, Vect
 
 void ViewImplementation::did_add_backing_stores(Badge<WebContentPage>, Vector<i32> bitmap_ids, Vector<Gfx::SharedImage> backing_stores)
 {
-    m_backing_stores->add(move(bitmap_ids), move(backing_stores));
+    // The compositor's presentations from backing stores that were refused are handed straight back.
+    if (auto result = m_backing_stores->add(move(bitmap_ids), move(backing_stores)); result.is_error())
+        warnln("Could not add backing stores for page {}: {}", page().id(), result.error());
 }
 
 void ViewImplementation::did_retire_backing_stores(Badge<WebContentPage>, ReadonlySpan<i32> bitmap_ids)
@@ -3192,7 +3196,13 @@ void ViewImplementation::install_backing_stores(Vector<i32> bitmap_ids, Vector<G
 {
     dbgln_if(COMPOSITOR_DEBUG, "[Compositor] UI installing {} backing stores for page {} had_usable_bitmap={}",
         backing_stores.size(), page().id(), m_backing_stores->has_usable_front_bitmap());
-    m_backing_stores->install(move(bitmap_ids), move(backing_stores));
+    // A publication that can't be imported is refused, and its front backing store goes straight back, since nothing
+    // here will ever present from it.
+    auto front_bitmap_id = bitmap_ids.first();
+    if (auto result = m_backing_stores->install(move(bitmap_ids), move(backing_stores)); result.is_error()) {
+        warnln("Could not install backing stores for page {}: {}", page().id(), result.error());
+        page().release_presented_bitmap(front_bitmap_id);
+    }
 }
 
 void ViewImplementation::update_zoom()
@@ -3580,6 +3590,31 @@ void ViewImplementation::complete_webdriver_input_command(u64 command_id, Web::W
     Application::the().complete_webdriver_content_command(command_id, move(response));
 }
 
+static bool is_webdriver_cookie_command(StringView name)
+{
+    return name.is_one_of("get_all_cookies"sv, "get_named_cookie"sv, "add_cookie"sv, "delete_cookie"sv, "delete_all_cookies"sv);
+}
+
+// https://w3c.github.io/webdriver/#dfn-element-send-keys
+// NB: The renderer splits the text on newlines into the paths of the files to select, if the element is a file input.
+static Vector<ByteString> files_named_by_element_send_keys(StringView name, JsonValue const& envelope)
+{
+    if (name != "element_send_keys"sv || !envelope.is_object())
+        return {};
+    auto payload = envelope.as_object().get_object("__webdriver_input_payload"sv);
+    if (!payload.has_value())
+        return {};
+    auto text = payload->get_string("text"sv);
+    if (!text.has_value())
+        return {};
+
+    Vector<ByteString> files;
+    text->bytes_as_string_view().for_each_split_view('\n', SplitBehavior::KeepEmpty, [&](StringView path) {
+        files.append(path);
+    });
+    return files;
+}
+
 void ViewImplementation::dispatch_webdriver_content_command(u64 command_id, Optional<Web::HTML::CrossProcessId> navigable_id, String const& name, JsonValue payload, Vector<String> arguments, WebDriverProtocol protocol)
 {
     if (m_crash_state.has_value() && !m_crash_state->recovery_started) {
@@ -3621,8 +3656,13 @@ void ViewImplementation::dispatch_webdriver_content_command(u64 command_id, Opti
 
     if (name == "crash_current_page"sv)
         m_pending_webdriver_crash_commands.set(command_id, { *target, name, navigable_id });
-    else
-        m_pending_webdriver_commands.set(command_id, { *target, name, navigable_id });
+    else {
+        // NB: A cookie command is for the cookies of the active document of its browsing context when it starts.
+        Optional<URL::URL> cookie_document_url;
+        if (is_webdriver_cookie_command(name))
+            cookie_document_url = navigable->active_document_url();
+        m_pending_webdriver_commands.set(command_id, { *target, name, navigable_id, protocol, false, files_named_by_element_send_keys(name, payload), false, move(cookie_document_url) });
+    }
     target->async_run_webdriver_command(command_id, navigable_id, name, move(payload), move(arguments));
 }
 
@@ -3631,6 +3671,44 @@ void ViewImplementation::run_webdriver_commands_waiting_for_a_document(Badge<Can
     auto commands = move(m_webdriver_commands_waiting_for_a_document);
     for (auto& [command_id, command] : commands)
         dispatch_webdriver_content_command(command_id, command.navigable_id, command.name, move(command.payload), move(command.arguments), command.protocol);
+}
+
+bool ViewImplementation::is_running_webdriver_command_to_select_file(WebContentPage const& page, StringView path) const
+{
+    for (auto const& [command_id, command] : m_pending_webdriver_commands) {
+        if (command.page.ptr() == &page && command.files_to_select.contains_slow(path))
+            return true;
+    }
+    return false;
+}
+
+// NB: An input command dispatches its input in the page it runs in, until any navigation it started takes that page
+//     away.
+bool ViewImplementation::is_running_webdriver_input_command_in(WebContentPage const& page) const
+{
+    if (!m_webdriver_input_command_running || m_webdriver_input_commands.is_empty())
+        return false;
+    auto command = m_pending_webdriver_commands.get(m_webdriver_input_commands.first().command_id);
+    return command.has_value() && command->page.ptr() == &page && !command->only_waits_for_navigation;
+}
+
+Optional<URL::URL> ViewImplementation::url_of_webdriver_cookie_command_running_in(WebContentClient const& client) const
+{
+    for (auto const& [command_id, command] : m_pending_webdriver_commands) {
+        if (&command.page->client() == &client && command.cookie_document_url.has_value())
+            return command.cookie_document_url;
+    }
+    return {};
+}
+
+bool ViewImplementation::is_running_webdriver_window_command_in(WebContentPage const& page) const
+{
+    for (auto const& [command_id, command] : m_pending_webdriver_commands) {
+        if (command.page.ptr() == &page && command.protocol == WebDriverProtocol::Classic
+            && command.name.is_one_of("set_window_rect"sv, "maximize_window"sv, "minimize_window"sv, "fullscreen_window"sv))
+            return true;
+    }
+    return false;
 }
 
 void ViewImplementation::prepare_page_for_navigable(WebContentPage& page)
@@ -3831,6 +3909,7 @@ void ViewImplementation::move_pending_webdriver_commands_to_new_host(Badge<Canon
             continue;
 
         command.page = new_host;
+        command.only_waits_for_navigation = true;
         new_host.async_run_webdriver_command(command_id, navigable_id, "wait_for_navigation"_string, JsonValue {}, {});
     }
 }

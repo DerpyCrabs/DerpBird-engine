@@ -51,6 +51,7 @@
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/MediaCapture/MediaDevices.h>
+#include <LibWeb/MediaSession/ActiveMediaSessionTracker.h>
 #include <LibWeb/NotificationsAPI/Notification.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/Page/RenderingStats.h>
@@ -79,6 +80,7 @@ Page::Page(GC::Ref<PageClient> client)
     : m_client(client)
     , m_history_executor(GC::Heap::the().allocate<HTML::HistoryExecutor>(*this))
     , m_picture_in_picture_controller(GC::Heap::the().allocate<PictureInPicture::PictureInPictureController>(*this))
+    , m_active_media_session_tracker(make<MediaSession::ActiveMediaSessionTracker>(*this))
 {
 }
 
@@ -155,6 +157,7 @@ void Page::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_history_executor);
     visitor.visit(m_picture_in_picture_controller);
     visitor.visit(m_client);
+    m_active_media_session_tracker->visit_edges(visitor);
     visitor.visit(m_window_rect_observer);
     visitor.visit(m_on_pending_dialog_closed);
     visitor.visit(m_pending_clipboard_requests);
@@ -494,17 +497,6 @@ DevicePixelRect Page::enclosing_device_rect(CSSPixelRect rect) const
         floor(rect.y().to_double() * scale),
         ceil(rect.width().to_double() * scale),
         ceil(rect.height().to_double() * scale));
-}
-
-DevicePixelRect Page::rounded_device_rect(CSSPixelRect rect) const
-{
-    auto scale = client().device_pixels_per_css_pixel();
-    return {
-        roundf(rect.x().to_double() * scale),
-        roundf(rect.y().to_double() * scale),
-        roundf(rect.width().to_double() * scale),
-        roundf(rect.height().to_double() * scale)
-    };
 }
 
 ChromeMetrics Page::chrome_metrics() const
@@ -1719,7 +1711,7 @@ void Page::set_emulated_position_data(Geolocation::EmulatedPositionData data)
 
 void Page::set_emulated_position_data(Geolocation::CoordinatesData coordinates_data)
 {
-    set_emulated_position_data(heap().allocate<Geolocation::GeolocationCoordinates>(move(coordinates_data)));
+    set_emulated_position_data(Geolocation::GeolocationCoordinates::create(coordinates_data));
 }
 
 u64 Page::register_emulated_position_data_observer(GC::Ref<GC::Function<void()>> observer)
@@ -1859,8 +1851,8 @@ void Page::receive_geolocation_position(u64 request_id, GeolocationPositionResul
 
     if (request->type == GeolocationRequestType::Watch) {
         auto callback = request->callback;
-        if (result.has<Geolocation::GeolocationPositionError::ErrorCode>()
-            && result.get<Geolocation::GeolocationPositionError::ErrorCode>() == Geolocation::GeolocationPositionError::ErrorCode::PermissionDenied)
+        if (result.has<Geolocation::GeolocationPositionErrorCode>()
+            && result.get<Geolocation::GeolocationPositionErrorCode>() == Geolocation::GeolocationPositionErrorCode::PermissionDenied)
             m_pending_geolocation_requests.remove(request_id);
         callback->function()(result);
         return;
@@ -1874,8 +1866,8 @@ void Page::receive_geolocation_position(u64 request_id, GeolocationPositionResul
     // A position, or a failure to get one, is the same answer for every document on the page, so the queued requests
     // complete with it too. A denial is the answer for the requesting document alone, so the others stay queued, and
     // the next of them is sent.
-    auto denied = result.has<Geolocation::GeolocationPositionError::ErrorCode>()
-        && result.get<Geolocation::GeolocationPositionError::ErrorCode>() == Geolocation::GeolocationPositionError::ErrorCode::PermissionDenied;
+    auto denied = result.has<Geolocation::GeolocationPositionErrorCode>()
+        && result.get<Geolocation::GeolocationPositionErrorCode>() == Geolocation::GeolocationPositionErrorCode::PermissionDenied;
 
     GC::RootVector<GeolocationPositionCallback> callbacks;
     Vector<u64> completed_request_ids;
@@ -1898,6 +1890,17 @@ void Page::receive_geolocation_position(u64 request_id, GeolocationPositionResul
         callback->function()(result);
 }
 
+// https://w3c.github.io/mediasession/#handle-media-session-action
+void Page::handle_media_session_action(Bindings::MediaSessionAction action, Optional<double> seek_offset, Optional<double> seek_time, Optional<bool> fast_seek)
+{
+    auto document = m_active_media_session_tracker->active_document();
+    if (!document)
+        return;
+    HTML::queue_global_task(HTML::Task::Source::UserInteraction, HTML::relevant_global_object(*document), GC::create_function(heap(), GC::captures(*this, action, seek_offset, seek_time, fast_seek), [](auto& page, auto action, auto seek_offset, auto seek_time, auto fast_seek) {
+        page.active_media_session_tracker().handle_action(action, seek_offset, seek_time, fast_seek);
+    }));
+}
+
 void Page::register_media_element(Badge<HTML::HTMLMediaElement>, UniqueNodeID media_id)
 {
     m_media_elements.append(media_id);
@@ -1908,10 +1911,10 @@ void Page::unregister_media_element(Badge<HTML::HTMLMediaElement>, UniqueNodeID 
     m_media_elements.remove_all_matching([&](auto candidate_id) {
         return candidate_id == media_id;
     });
+    m_active_media_session_tracker->media_element_unregistered(media_id);
 }
 
-template<typename Callback>
-void Page::for_each_media_element(Callback&& callback)
+void Page::for_each_media_element(Function<void(HTML::HTMLMediaElement&)> const& callback)
 {
     for (auto media_id : m_media_elements) {
         if (auto* node = DOM::Node::from_unique_id(media_id))
@@ -2711,6 +2714,11 @@ void Page::container_unfullscreen_complete(HTML::CrossProcessId hosted_root_id)
         return;
     exit->container_chain = ContainerChain::Complete;
     process_pending_fullscreen_operations();
+}
+
+Optional<MediaSession::MediaSessionState> PageClient::page_did_request_now_playing_state_for_testing()
+{
+    return {};
 }
 
 void PageClient::request_navigation_start(HTML::LocalNavigable&, NavigationTarget, URL::URL const&, Utf16String, Optional<HTML::NavigationStartRequest>)

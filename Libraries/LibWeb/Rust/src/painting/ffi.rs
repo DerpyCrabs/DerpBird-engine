@@ -5,7 +5,7 @@
  */
 
 use crate::css::css_pixels::{CssPixelRect, CssPixels};
-use crate::css::ffi_support::{FfiUtf16View, OwnedBox};
+use crate::css::ffi_support::FfiUtf16View;
 use crate::layout::LayoutNodeArena;
 use crate::layout::node_data::{DomPaintFact, NodeSlotId};
 use crate::layout::query::inline_cursor::{CaretPosition, InlineCursor, InlineLine, LineEdge};
@@ -215,7 +215,7 @@ pub extern "C" fn render_state_paintable_scrollable_overflow(
 ) {
     // The host reads the overflow from the rows it holds, where they were measured and still read as the arena.
     let known = host.read_known_rows(|rows, source| {
-        rows.overflow_is_settled()
+        (rows.measured_overflow() >= crate::layout::row_reads::MeasuredOverflow::Scrollable)
             .then(|| FfiOptionalOverflowData::of(source, slot))
     });
     if let Some(Some(overflow)) = known {
@@ -1337,33 +1337,33 @@ pub unsafe extern "C" fn render_state_background_color_animation_keyframe_colors
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn compositor_animation_effect_state_create() -> *mut CompositorAnimationEffectState {
-    Box::into_raw(Box::new(CompositorAnimationEffectState::default()))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn compositor_animation_effect_state_destroy(state: OwnedBox<CompositorAnimationEffectState>) {
-    drop(state);
-}
-
 /// Builds the animation of the request's target kind for the effect and keeps it pending with the
-/// effect. The target's nodes come from the arena's main tree.
+/// effect, which runs with the timing of the effect record `effect` and of the record of its associated animation
+/// `animation`. The target's nodes come from the arena's main tree.
 ///
 /// # Safety
 ///
 /// `document_host` must be a live document host on its document's thread, and the request and host, with every range
-/// they address, live for the call. The host's callbacks run synchronously and may not touch the arena.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn compositor_animation_effect_build(
+/// they address, live for the call. The host's callbacks run synchronously and may not touch the arena or the records.
+pub(crate) unsafe fn build_compositor_animation_effect(
     state: &mut CompositorAnimationEffectState,
     document_host: &DocumentHost,
-    request: *const crate::painting::host::FfiCompositorAnimationRequest,
+    mut ffi_request: crate::painting::host::FfiCompositorAnimationRequest,
+    effect: &crate::animations::effect::AnimationEffectCell,
+    animation: &crate::animations::animation::AnimationCell,
     host: &crate::painting::host::FfiCompositorAnimationHost,
 ) -> crate::painting::host::FfiCompositorAnimationBuildOutcome {
     use crate::painting::visual_animation_builder::{Host, Request};
+    // NB: The easing descriptor borrows the control points of the effect's timing function, which the build leaves as
+    //     they are.
+    ffi_request.timing.playback_rate = animation.borrow().playback().playback_rate;
+    {
+        let effect = effect.borrow();
+        ffi_request.timing.effect = effect.timing();
+        ffi_request.timing.easing = effect.timing_function().descriptor();
+    }
     // SAFETY: Guaranteed by the caller.
-    let mut request = unsafe { Request::new(&*request) };
+    let mut request = unsafe { Request::new(&ffi_request) };
     let host = Host::new(host);
     let layout_node = request.layout_node();
     if request.target_kind() == crate::painting::host::FfiVisualAnimationTargetKind::Transform {
@@ -1385,65 +1385,6 @@ pub unsafe extern "C" fn compositor_animation_effect_build(
             },
         )
     })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn compositor_animation_effect_discard_pending(
-    state: &mut CompositorAnimationEffectState,
-    kind: crate::painting::host::FfiVisualAnimationTargetKind,
-) {
-    state.discard_pending(kind);
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn compositor_animation_effect_has_pending(state: &CompositorAnimationEffectState) -> bool {
-    state.has_pending()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn compositor_animation_effect_clear_pending(state: &mut CompositorAnimationEffectState) {
-    state.clear_pending();
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn compositor_animation_effect_has_retained(state: &CompositorAnimationEffectState) -> bool {
-    state.has_retained()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn compositor_animation_effect_clear_retained(state: &mut CompositorAnimationEffectState) {
-    state.clear_retained();
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn compositor_animation_effect_reset(state: &mut CompositorAnimationEffectState) {
-    state.reset();
-}
-
-/// # Safety
-///
-/// The request and host, with every range they address, must be live for the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn compositor_animation_effect_only_translates_horizontally(
-    request: *const crate::painting::host::FfiCompositorAnimationRequest,
-    host: &crate::painting::host::FfiCompositorAnimationHost,
-) -> bool {
-    use crate::painting::visual_animation_builder::{Host, Request, effect_only_translates_horizontally};
-    let request = unsafe { Request::new(&*request) };
-    effect_only_translates_horizontally(&request, &Host::new(host))
-}
-
-/// # Safety
-///
-/// The request and host, with every range they address, must be live for the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn compositor_animation_effect_transform_preserves_axes(
-    request: *const crate::painting::host::FfiCompositorAnimationRequest,
-    host: &crate::painting::host::FfiCompositorAnimationHost,
-) -> bool {
-    use crate::painting::visual_animation_builder::{Host, Request, effect_transform_preserves_axes};
-    let request = unsafe { Request::new(&*request) };
-    effect_transform_preserves_axes(&request, &Host::new(host))
 }
 
 /// Starts an update pass: the effects publish into an empty document list.
@@ -1504,8 +1445,22 @@ pub unsafe extern "C" fn layout_arena_paint_push_svg_filter_primitive(
     sink: *mut c_void,
     primitive: *const FfiSvgFilterPrimitive,
 ) {
-    let primitives = unsafe { &mut *sink.cast::<Vec<SvgFilterPrimitive>>() };
-    primitives.push(unsafe { svg_filter_primitive_from_ffi(&*primitive) });
+    let filter = unsafe { &mut *sink.cast::<crate::painting::svg_paint_resources::PublishedSvgFilter>() };
+    filter
+        .primitives
+        .push(unsafe { svg_filter_primitive_from_ffi(&*primitive) });
+}
+
+/// # Safety
+///
+/// `sink` must be the pointer handed to the callback, used synchronously, and `region` must be readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn layout_arena_paint_set_svg_filter_region(
+    sink: *mut c_void,
+    region: *const crate::painting::host::visual_context::FfiSvgFilterRegion,
+) {
+    let filter = unsafe { &mut *sink.cast::<crate::painting::svg_paint_resources::PublishedSvgFilter>() };
+    filter.region = unsafe { *region };
 }
 
 /// Notes that the SVG paint resources the document's rows enrolled may have changed, and answers whether any row

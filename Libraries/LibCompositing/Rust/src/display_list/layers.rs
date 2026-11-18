@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-use crate::display_list::builder::{HEADER_SIZE, for_each_command, read_command, read_header};
+use crate::display_list::builder::{
+    HEADER_SIZE, bounding_rect_computed_from_payload, for_each_command, read_command, read_header,
+};
 use crate::display_list::commands::{
     ClipMode, ClipNodeIndex, DeclareMaskContent, DisplayListCommandRun, DisplayListCommandType, EffectNodeIndex,
 };
@@ -45,6 +47,7 @@ fn media_name(content: LiveContent) -> &'static str {
         LiveContent::Canvas(_) => "canvas",
         LiveContent::VideoFrame(_) => "video",
         LiveContent::ImageFrame(_) => "image",
+        LiveContent::CompositedContext(_) => "composited context",
     }
 }
 
@@ -123,7 +126,7 @@ pub struct Layer {
     pub kind: LayerKind,
     pub rect: IntRect,
     pub record_spans: Vec<RecordSpan>,
-    /// For a media layer, where the window server can show its content by itself, or why it cannot.
+    /// For a canvas or video layer, where the window server can show its content by itself, or why it cannot.
     pub window_server_placement: Option<Result<WindowServerPlacement, WindowServerRejection>>,
 }
 
@@ -159,8 +162,14 @@ impl LayerPlan {
                 .all(|(layer, other_layer)| layer.kind == other_layer.kind)
     }
 
-    /// One line per layer, bottom to top: `[L<index>] <kind> rect=[<x>,<y> <width>x<height>]` after `indent`.
-    pub fn write_layer_lines(&self, output: &mut impl std::fmt::Write, indent: &str) -> std::fmt::Result {
+    /// One line per layer, bottom to top: `[L<index>] <kind> rect=[<x>,<y> <width>x<height>]` after `indent`, with the
+    /// records the layer draws where `describe_records` describes them.
+    pub fn write_layer_lines(
+        &self,
+        output: &mut impl std::fmt::Write,
+        indent: &str,
+        describe_records: impl Fn(&[RecordSpan]) -> Option<String>,
+    ) -> std::fmt::Result {
         for (index, layer) in self.layers.iter().enumerate() {
             let rect = layer.rect;
             write!(
@@ -168,6 +177,9 @@ impl LayerPlan {
                 "{indent}[L{index}] {} rect=[{},{} {}x{}]",
                 layer.kind, rect.x, rect.y, rect.width, rect.height
             )?;
+            if let Some(records) = describe_records(&layer.record_spans) {
+                write!(output, " records={records}")?;
+            }
             match &layer.window_server_placement {
                 Some(Ok(placement)) => writeln!(output, " shown by the window server: {placement}")?,
                 Some(Err(rejection)) => writeln!(output, " replayed: {rejection}")?,
@@ -183,6 +195,14 @@ impl LayerPlan {
             .partition_point(|range| range.begin_offset <= record_offset)
             .saturating_sub(1);
         self.record_ranges_in_tape_order[range_index].layer as usize
+    }
+
+    pub fn layers_drawing_records_of(&self, run: &DisplayListCommandRun) -> impl Iterator<Item = usize> + '_ {
+        self.layers_of_records_in(run).map(|(_, layer)| usize::from(layer))
+    }
+
+    pub fn places_records_like(&self, other: &LayerPlan) -> bool {
+        self.record_ranges_in_tape_order == other.record_ranges_in_tape_order
     }
 
     /// Whether the records of `run` go into the same layers as those of `other_run`, an identical run of the list
@@ -503,13 +523,13 @@ impl LayersBeingPlanned {
         content: LiveContent,
         span: RecordSpan,
         bounds: IntRect,
-        window_server_placement: Result<WindowServerPlacement, WindowServerRejection>,
+        window_server_placement: Option<Result<WindowServerPlacement, WindowServerRejection>>,
     ) {
         self.layers.push(Layer {
             kind: LayerKind::Media { content },
             rect: bounds,
             record_spans: Vec::new(),
-            window_server_placement: Some(window_server_placement),
+            window_server_placement,
         });
         self.media_layers_each_layer_exists_for.push(1 << media_index);
         self.append_records_to_layer(self.layers.len() - 1, span);
@@ -580,7 +600,9 @@ fn media_layer_rejection(
     let header = read_header(&inputs.tape[record_offset as usize..]);
     if !matches!(
         header.command_type,
-        DisplayListCommandType::DrawCanvas | DisplayListCommandType::DrawVideoFrame
+        DisplayListCommandType::DrawCanvas
+            | DisplayListCommandType::DrawVideoFrame
+            | DisplayListCommandType::DrawCompositedContext
     ) {
         return Some(MediaLayerRejection::DrawnInsideAnotherCommand);
     }
@@ -591,7 +613,10 @@ fn media_layer_rejection(
     if !bounds.world.draw_matrix(run.context.spatial).is_2d_affine() {
         return Some(MediaLayerRejection::UnderTransformThatIsNot2DAffine);
     }
-    if bounds.ink_device_rect(run, header.bounding_rect).is_empty() {
+    let payload_start = record_offset as usize + HEADER_SIZE;
+    let payload = &inputs.tape[payload_start..payload_start + header.payload_size as usize];
+    let bounding_rect = bounding_rect_computed_from_payload(&header, payload).unwrap_or_default();
+    if bounds.ink_device_rect(run, bounding_rect).is_empty() {
         return Some(MediaLayerRejection::DrawsNothingVisible);
     }
     if !run_is_a_chunk_of_its_own(run_index) {
@@ -647,6 +672,15 @@ fn media_candidates(
         return Err(first_rejection.unwrap_or(UnlayeredReason::ActiveMediaNotDrawn));
     }
     Ok(candidates)
+}
+
+fn keep_canvases_and_videos_ahead_of_nested_contexts_within_layer_limit(media: &mut Vec<MediaCandidate>) {
+    if media.len() <= MAXIMUM_MEDIA_LAYER_COUNT {
+        return;
+    }
+    media.sort_by_key(|candidate| matches!(candidate.content, LiveContent::CompositedContext(_)));
+    media.truncate(MAXIMUM_MEDIA_LAYER_COUNT);
+    media.sort_by_key(|candidate| candidate.record_offset);
 }
 
 fn run_ranges_holding_whole_grouping_effects(
@@ -740,15 +774,19 @@ fn place_records_in_layers(
             if let Some((media_index, candidate)) =
                 media_iter.next_if(|(_, candidate)| candidate.record_offset == begin_offset)
             {
-                let media_bounds = bounds.ink_device_rect(run, header.bounding_rect);
-                let placement =
-                    window_server_placement(inputs.tree, &bounds.world, inputs.viewport_rect, run, header, payload);
+                let bounding_rect = bounding_rect_computed_from_payload(header, payload).unwrap_or_default();
+                let media_bounds = bounds.ink_device_rect(run, bounding_rect);
+                let window_server_shows_content = !matches!(candidate.content, LiveContent::CompositedContext(_));
+                let placement = window_server_shows_content.then(|| {
+                    window_server_placement(inputs.tree, &bounds.world, inputs.viewport_rect, run, header, payload)
+                });
                 planned.add_media_layer(media_index, candidate.content, span, media_bounds, placement);
                 layer_of_previous_painted_record = LayersBeingPlanned::BASE_LAYER_INDEX;
-            } else if !header.has_bounding_rect {
+            } else if header.command_type.is_compositor_metadata() {
                 planned.append_records_to_layer(layer_of_previous_painted_record, span);
             } else {
-                let record_bounds = bounds.ink_device_rect(run, header.bounding_rect);
+                let bounding_rect = bounding_rect_computed_from_payload(header, payload).unwrap_or_default();
+                let record_bounds = bounds.ink_device_rect(run, bounding_rect);
                 layer_of_previous_painted_record = planned.place_painted_records(span, record_bounds);
             }
         });
@@ -869,7 +907,7 @@ pub fn build_layer_plan(inputs: &LayerPlanInputs<'_>) -> Result<LayerPlan, Unlay
             run_is_a_chunk_of_its_own,
             &record_offsets_of_media_under_backdrop_filters,
         )?;
-        media.truncate(MAXIMUM_MEDIA_LAYER_COUNT);
+        keep_canvases_and_videos_ahead_of_nested_contexts_within_layer_limit(&mut media);
         match place_records_in_layers(inputs, &bounds, &chunks, &grouping_of_run, &media) {
             Ok(planned) => break planned,
             Err(MediaLayersUnderBackdropFilter(media_layers)) => {
@@ -909,9 +947,10 @@ pub fn build_layer_plan(inputs: &LayerPlanInputs<'_>) -> Result<LayerPlan, Unlay
 mod tests {
     use super::*;
     use crate::display_list::builder::{DisplayListBuilder, PendingInlineClip};
+    use crate::display_list::chunks::TapeChunks;
     use crate::display_list::commands::{
-        CanvasId, CompositorBlockingWheelEventRegion, ContextRef, DisplayListCommand, DrawCanvas, FillRect,
-        SpatialNodeIndex, VISUAL_VIEWPORT_NODE_INDEX,
+        CanvasId, CompositorBlockingWheelEventRegion, CompositorContextId, ContextRef, DisplayListCommand, DrawCanvas,
+        DrawCompositedContext, FillRect, SpatialNodeIndex, VISUAL_VIEWPORT_NODE_INDEX,
     };
     use crate::display_list::damage::{
         DisplayListDamage, DisplayListFrame, LayerPlans, LiveContentChanges, compute_display_list_damage,
@@ -925,6 +964,7 @@ mod tests {
 
     const VIEWPORT: IntRect = IntRect::new(0, 0, 800, 600);
     const CANVAS: LiveContent = LiveContent::Canvas(CanvasId(1));
+    const NESTED_CONTEXT: LiveContent = LiveContent::CompositedContext(CompositorContextId(7));
 
     fn identity_tree() -> VisualContextTree {
         VisualContextTree::create(TransformData {
@@ -979,6 +1019,20 @@ mod tests {
         }
     }
 
+    fn nested_context(rect: IntRect) -> DrawCompositedContext {
+        nested_context_with_id(rect, CompositorContextId(7))
+    }
+
+    fn nested_context_with_id(rect: IntRect, child_context_id: CompositorContextId) -> DrawCompositedContext {
+        DrawCompositedContext {
+            dst_rect: rect.to_float(),
+            child_context_id,
+            scaling_mode: ScalingMode::NearestNeighbor,
+            spatial_node_index: VISUAL_VIEWPORT_NODE_INDEX,
+            snap_origin_if_untransformed: true,
+        }
+    }
+
     fn canvas(rect: IntRect) -> DrawCanvas {
         DrawCanvas {
             dst_rect: rect,
@@ -1015,6 +1069,15 @@ mod tests {
         }
 
         fn plan(&self, tree: &VisualContextTree, scroll_offsets: &[FloatPoint]) -> Result<LayerPlan, UnlayeredReason> {
+            self.plan_with_active_media(tree, scroll_offsets, &[CANVAS])
+        }
+
+        fn plan_with_active_media(
+            &self,
+            tree: &VisualContextTree,
+            scroll_offsets: &[FloatPoint],
+            active_media: &[LiveContent],
+        ) -> Result<LayerPlan, UnlayeredReason> {
             let (tape, runs) = (self.builder.bytes(), self.builder.command_runs());
             let summary = summarize(tape, runs);
             let effect_clips = EffectClipPlan::new(tree, runs).unwrap();
@@ -1026,7 +1089,7 @@ mod tests {
                 tree,
                 scroll_offsets,
                 viewport_rect: VIEWPORT,
-                active_media: &[CANVAS],
+                active_media,
             })
         }
     }
@@ -1036,19 +1099,28 @@ mod tests {
         (old_list, old_plan, old_scroll_offsets): (&TestList, &LayerPlan, &[FloatPoint]),
         (new_list, new_plan, new_scroll_offsets): (&TestList, &LayerPlan, &[FloatPoint]),
     ) -> DisplayListDamage {
-        let old_summary = summarize(old_list.builder.bytes(), old_list.builder.command_runs());
-        let new_summary = summarize(new_list.builder.bytes(), new_list.builder.command_runs());
+        let (old_tape, old_runs) = (old_list.builder.bytes(), old_list.builder.command_runs());
+        let (new_tape, new_runs) = (new_list.builder.bytes(), new_list.builder.command_runs());
+        let (old_summary, new_summary) = (summarize(old_tape, old_runs), summarize(new_tape, new_runs));
+        let old_chunks = TapeChunks::with_a_chunk_per_run(old_tape, old_runs);
+        let new_chunks = TapeChunks::with_a_chunk_per_run(new_tape, new_runs);
+        let old_effect_clips = EffectClipPlan::new(tree, old_runs).unwrap();
+        let new_effect_clips = EffectClipPlan::new(tree, new_runs).unwrap();
         compute_display_list_damage(
             DisplayListFrame {
-                command_bytes: old_list.builder.bytes(),
-                command_runs: old_list.builder.command_runs(),
+                command_bytes: old_tape,
+                command_runs: old_runs,
+                chunks: &old_chunks,
+                effect_clip_plan: &old_effect_clips,
                 summary: &old_summary,
                 visual_context_tree: tree,
                 scroll_offsets: old_scroll_offsets,
             },
             DisplayListFrame {
-                command_bytes: new_list.builder.bytes(),
-                command_runs: new_list.builder.command_runs(),
+                command_bytes: new_tape,
+                command_runs: new_runs,
+                chunks: &new_chunks,
+                effect_clip_plan: &new_effect_clips,
                 summary: &new_summary,
                 visual_context_tree: tree,
                 scroll_offsets: new_scroll_offsets,
@@ -1227,6 +1299,76 @@ mod tests {
             list.plan(&tree, &[]),
             Err(UnlayeredReason::NoMediaCanBeLayer {
                 first_rejected_media: CANVAS,
+                rejection: MediaLayerRejection::InsideGroupEffect,
+            })
+        );
+    }
+
+    #[test]
+    fn a_nested_context_is_a_layer_that_the_window_server_does_not_show() {
+        let mut tree = tree_with_root_isolation_effect();
+        let root = ContextRef {
+            effect: tree.root_isolation_effect.unwrap(),
+            ..ContextRef::default()
+        };
+        let elsewhere = separate_clip(&mut tree, root);
+        let list = TestList::new()
+            .with(fill(IntRect::new(0, 0, 800, 600)), root)
+            .with(nested_context(IntRect::new(100, 100, 200, 100)), root)
+            .with(fill(IntRect::new(150, 150, 20, 20)), root)
+            .with(fill(IntRect::new(500, 400, 20, 20)), elsewhere);
+        let plan = list.plan_with_active_media(&tree, &[], &[NESTED_CONTEXT]).unwrap();
+        assert_eq!(kinds(&plan), ["base", "media", "painted"]);
+        assert_eq!(
+            plan.layers[1].kind,
+            LayerKind::Media {
+                content: NESTED_CONTEXT
+            }
+        );
+        assert_eq!(plan.layers[1].rect, IntRect::new(97, 97, 206, 106));
+        assert_eq!(plan.layers[1].window_server_placement, None);
+        assert_eq!(plan.layers[2].rect, IntRect::new(147, 147, 26, 26));
+    }
+
+    #[test]
+    fn a_canvas_keeps_its_layer_when_more_nested_contexts_than_layers_are_drawn_before_it() {
+        let tree = identity_tree();
+        let mut list = TestList::new();
+        let mut active_media = Vec::new();
+        for index in 0..=MAXIMUM_MEDIA_LAYER_COUNT {
+            let child_context_id = CompositorContextId(10 + index as u64);
+            let rect = IntRect::new(index as i32 * 60, 0, 50, 50);
+            list = list.with(nested_context_with_id(rect, child_context_id), ContextRef::default());
+            active_media.push(LiveContent::CompositedContext(child_context_id));
+        }
+        list = list.with(canvas(IntRect::new(0, 300, 200, 100)), ContextRef::default());
+        active_media.push(CANVAS);
+        let plan = list.plan_with_active_media(&tree, &[], &active_media).unwrap();
+        let media_of_layers: Vec<LiveContent> = plan
+            .layers
+            .iter()
+            .filter_map(|layer| match layer.kind {
+                LayerKind::Media { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(media_of_layers.len(), MAXIMUM_MEDIA_LAYER_COUNT);
+        assert_eq!(media_of_layers.last(), Some(&CANVAS));
+    }
+
+    #[test]
+    fn a_nested_context_under_a_group_effect_is_not_a_layer() {
+        let mut tree = tree_with_root_isolation_effect();
+        let root = ContextRef {
+            effect: tree.root_isolation_effect.unwrap(),
+            ..ContextRef::default()
+        };
+        let group = tree.append_effect_node_under(root, effects(0.5, CompositingAndBlendingOperator::Normal));
+        let list = TestList::new().with(nested_context(IntRect::new(100, 100, 200, 100)), group);
+        assert_eq!(
+            list.plan_with_active_media(&tree, &[], &[NESTED_CONTEXT]),
+            Err(UnlayeredReason::NoMediaCanBeLayer {
+                first_rejected_media: NESTED_CONTEXT,
                 rejection: MediaLayerRejection::InsideGroupEffect,
             })
         );

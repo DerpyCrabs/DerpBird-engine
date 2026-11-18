@@ -1838,12 +1838,30 @@ private:
 
 void WebContentView::add_floating_surface(QWidget& surface)
 {
-    m_floating_surfaces.append(&surface);
-    new FloatingSurfaceWatcher(surface, [self = QPointer(this)](bool visibility_changed) {
+    if (any_of(m_floating_surfaces, [&](auto const& floating) { return floating.surface == &surface; }))
+        return;
+    auto* watcher = new FloatingSurfaceWatcher(surface, [self = QPointer(this)](bool visibility_changed) {
         if (!self || self->m_rendering_floating_surfaces) return;
         if (self->can_composite_floating_surfaces()) self->schedule_floating_surface_update();
         else if (visibility_changed) self->schedule_repaint();
     });
+    m_floating_surfaces.append({ .surface = &surface, .watcher = watcher });
+
+    // A surface that already shows gets no event of being shown over this view.
+    if (surface.isVisible())
+        can_composite_floating_surfaces() ? schedule_floating_surface_update() : schedule_repaint();
+}
+
+void WebContentView::remove_floating_surface(QWidget& surface)
+{
+    auto removed = m_floating_surfaces.remove_all_matching([&](auto const& floating) {
+        if (floating.surface != &surface)
+            return false;
+        delete floating.watcher.data();
+        return true;
+    });
+    if (removed)
+        can_composite_floating_surfaces() ? schedule_floating_surface_update() : schedule_repaint();
 }
 
 void WebContentView::schedule_floating_surface_update()
@@ -1871,7 +1889,7 @@ void WebContentView::set_suggestions_over_page(bool suggestions_over_page)
 
 bool WebContentView::has_floating_surface_over_page() const
 {
-    return m_suggestions_over_page || (!can_composite_floating_surfaces() && any_of(m_floating_surfaces, [](auto const& surface) { return surface && surface->isVisible(); }));
+    return m_suggestions_over_page || (!can_composite_floating_surfaces() && any_of(m_floating_surfaces, [](auto const& floating) { return floating.surface && floating.surface->isVisible(); }));
 }
 
 // Overlays are painted by Qt, underneath whatever presents the page on some platforms, which has to step aside for them.
@@ -2153,12 +2171,8 @@ static Core::AnonymousBuffer make_system_theme_from_qt_palette(QWidget& widget, 
         palette.set_color(gfx_color_role, new_color);
     };
 
-    translate(Gfx::ColorRole::ThreedHighlight, QPalette::ColorRole::Light);
     translate(Gfx::ColorRole::ThreedShadow1, QPalette::ColorRole::Mid);
-    translate(Gfx::ColorRole::ThreedShadow2, QPalette::ColorRole::Dark);
-    translate(Gfx::ColorRole::HoverHighlight, QPalette::ColorRole::Light);
     translate(Gfx::ColorRole::Link, QPalette::ColorRole::Link);
-    translate(Gfx::ColorRole::VisitedLink, QPalette::ColorRole::LinkVisited);
     translate(Gfx::ColorRole::Button, QPalette::ColorRole::Button);
     translate(Gfx::ColorRole::ButtonText, QPalette::ColorRole::ButtonText);
     // NB: Content whose color scheme is not the palette's own takes the selection color for its scheme.

@@ -3048,7 +3048,7 @@ impl StyleGroupMasks {
 
     const fn compute() -> Self {
         use crate::css::property_metadata::property_id::{
-            CONTENT_VISIBILITY, DIRECTION, POSITION_ANCHOR, WRITING_MODE,
+            APPEARANCE, CONTENT_VISIBILITY, DIRECTION, POSITION_ANCHOR, WRITING_MODE,
         };
         use crate::css::property_metadata::{
             FIRST_INHERITED_PROPERTY_ID, FIRST_LONGHAND_PROPERTY_ID, LAST_INHERITED_PROPERTY_ID,
@@ -3105,6 +3105,8 @@ impl StyleGroupMasks {
         }
         masks[index(DIRECTION)] |= logical_mapping_mask;
         masks[index(WRITING_MODE)] |= logical_mapping_mask;
+        // Appearance controls the line-height adjustment of select elements.
+        masks[index(APPEARANCE)] |= 1 << crate::css::table_group_builder::group_index::FONT;
         // NB: The box group holds the used containment flags implied by hidden content visibility.
         masks[index(CONTENT_VISIBILITY)] |= 1 << crate::css::table_group_builder::group_index::BOX;
         // NB: The surround group holds whether the element names a default anchor, which layout reads beside the
@@ -3298,6 +3300,10 @@ style_bit_fields! {
         INHERITED_BITS_TEXT_WRAP_MODE_SHIFT, INHERITED_BITS_TEXT_WRAP_MODE_WIDTH;
     Inherited WordBreak: WORD_BREAK, word_break::NORMAL, keyword_to_word_break,
         INHERITED_BITS_WORD_BREAK_SHIFT, INHERITED_BITS_WORD_BREAK_WIDTH;
+    Inherited TextAlignLast: TEXT_ALIGN_LAST, text_align_last::AUTO, keyword_to_text_align_last,
+        INHERITED_BITS_TEXT_ALIGN_LAST_SHIFT, INHERITED_BITS_TEXT_ALIGN_LAST_WIDTH;
+    Inherited Hyphens: HYPHENS, hyphens::MANUAL, keyword_to_hyphens,
+        INHERITED_BITS_HYPHENS_SHIFT, INHERITED_BITS_HYPHENS_WIDTH;
     Reset Position: POSITION, positioning::STATIC, keyword_to_positioning,
         RESET_BITS_POSITION_SHIFT, RESET_BITS_POSITION_WIDTH;
     Reset Float: FLOAT, float::NONE, keyword_to_float,
@@ -6409,7 +6415,6 @@ impl ContentValues {
     }
 
     fn generated_content_facts(&self) -> u8 {
-        use crate::css::css_enums::keyword;
         use crate::layout::counters::LIST_ITEM_COUNTER_NAME;
 
         let mut facts = 0;
@@ -6418,11 +6423,8 @@ impl ContentValues {
                 continue;
             };
             let CounterDefinitionsPayload { counter_definitions } = &**counter_definitions_payload;
-            let definitions = counter_definitions.as_slice();
-            if !definitions.is_empty() {
-                facts |= GENERATED_CONTENT_DEFINES_COUNTERS;
-            }
-            if definitions
+            if counter_definitions
+                .as_slice()
                 .iter()
                 .any(|definition| definition.name().units() == LIST_ITEM_COUNTER_NAME)
             {
@@ -6441,16 +6443,6 @@ impl ContentValues {
                 _ => &[],
             }
         }
-        for item in items(content) {
-            if let StyleValueData::Keyword { keyword } = item.data()
-                && matches!(
-                    *keyword,
-                    keyword::OPEN_QUOTE | keyword::CLOSE_QUOTE | keyword::NO_OPEN_QUOTE | keyword::NO_CLOSE_QUOTE
-                )
-            {
-                facts |= GENERATED_CONTENT_HAS_QUOTES;
-            }
-        }
         if items(content).iter().chain(items(alt_text)).any(|item| {
             matches!(item.data(), StyleValueData::Counter(counter) if counter.counter_name.units() == LIST_ITEM_COUNTER_NAME)
         }) {
@@ -6461,13 +6453,10 @@ impl ContentValues {
 }
 
 /// What a content group's generated content involves, which the DOM asks to know which changes
-/// can renumber or requote it: counter-increment, counter-reset or counter-set define a counter,
-/// one of them defines list-item, the content or its alternative text shows list-item, and the
-/// content has a quote.
-pub const GENERATED_CONTENT_DEFINES_COUNTERS: u8 = 1 << 0;
-pub const GENERATED_CONTENT_DEFINES_LIST_ITEM_COUNTER: u8 = 1 << 1;
-pub const GENERATED_CONTENT_SHOWS_LIST_ITEM_COUNTER: u8 = 1 << 2;
-pub const GENERATED_CONTENT_HAS_QUOTES: u8 = 1 << 3;
+/// can renumber it: counter-increment, counter-reset or counter-set defines list-item, and the
+/// content or its alternative text shows list-item.
+pub const GENERATED_CONTENT_DEFINES_LIST_ITEM_COUNTER: u8 = 1 << 0;
+pub const GENERATED_CONTENT_SHOWS_LIST_ITEM_COUNTER: u8 = 1 << 1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_content_group_generated_content_facts(content: &ContentValues) -> u8 {

@@ -38,10 +38,6 @@ public:
     void rebuild();
     void update_chrome_style();
 
-    String const& selected_bookmark_menu_item_id() const { return m_selected_bookmark_menu_item_id; }
-    Optional<String> const& selected_bookmark_menu_target_folder_id() const { return m_selected_bookmark_menu_target_folder_id; }
-    Optional<String> const& selected_bookmark_menu_parent_folder_id() const { return m_selected_bookmark_menu_parent_folder_id; }
-
     void show_context_menu(QPoint, Optional<BookmarkItem const&>, Optional<String const&> target_folder_id, Optional<String const&> parent_folder_id);
 
     bool is_dragging_bookmark() const { return !m_dragged_item_id.isEmpty(); }
@@ -145,6 +141,7 @@ public:
 
     void bind(Tab*);
     void set_sidebar(QWidget&);
+    void set_suppressed(bool);
     bool shows_over_page() const;
     void update_geometry();
 
@@ -169,6 +166,8 @@ private:
     QVariantAnimation* m_hover_expand_animation { nullptr };
     bool m_hover_expanded { false };
     qreal m_hover_expand_progress { 0.0 };
+
+    bool m_suppressed { false };
 };
 
 }

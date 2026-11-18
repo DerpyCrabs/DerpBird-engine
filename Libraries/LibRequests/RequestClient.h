@@ -66,6 +66,9 @@ public:
     void resolve_host(ByteString const& host, Function<void(Vector<ByteString>)> on_resolved);
     int request_server_client_id() const { return m_request_server_client_id; }
 
+    // No other client this process creates has the same epoch, so a request is known by its id and this epoch.
+    u64 transport_epoch() const { return m_transport_epoch; }
+
     RefPtr<WebSocket> websocket_connect(URL::URL const&, Optional<HTTP::NetworkIsolationKey> const&, ByteString const& origin, Vector<ByteString> const& protocols, Vector<ByteString> const& extensions, HTTP::HeaderList const& request_headers, HTTP::Cookie::SameSiteContext same_site_context, u8 query_canonical_policy = 0);
 
     // Stores the data in the HTTP cache, and returns it mapped read-only from the cache's file, or nothing when it wasn't stored.
@@ -86,7 +89,7 @@ private:
     virtual void query_response_header_policy(u64, u64, bool, Vector<HTTP::Header>, String) override;
     virtual void retain_response_header_policy(u64, u64) override;
     virtual void release_response_header_policy(u64) override;
-    virtual void headers_became_available(u64 request_id, Vector<HTTP::Header>, Optional<u32>, Optional<String>, CacheState, ByteString http_version, String canonical_host_names, String ip_addresses) override;
+    virtual void headers_became_available(u64 request_id, URL::URL, Vector<HTTP::Header>, Optional<u32>, Optional<String>, CacheState, ByteString http_version, String canonical_host_names, String ip_addresses) override;
     virtual void request_transferred(u64 request_id) override;
     virtual void host_resolved(u64 lookup_id, Vector<ByteString> addresses) override;
 
@@ -103,6 +106,7 @@ private:
     HashMap<u64, RefPtr<Request::ResponseHeaderPolicy>> m_background_response_policies;
     u64 m_next_request_id { 0 };
     int m_request_server_client_id { -1 };
+    u64 m_transport_epoch { 0 };
 
     HashMap<u64, NonnullRefPtr<WebSocket>> m_websockets;
     u64 m_next_websocket_id { 0 };

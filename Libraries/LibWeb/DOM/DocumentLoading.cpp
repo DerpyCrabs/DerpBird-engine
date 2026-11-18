@@ -86,6 +86,12 @@ static void convert_to_xml_error_document(DOM::Document& document, Utf16String e
     if (document.ready_for_post_load_tasks())
         return;
 
+    // NB: The XML parser stops parsing at an error the way it does at the end of its input, so the end steps it started
+    //     may still be running. They completely finish loading the document, and doing it here too would fire a second
+    //     load event at the document's container.
+    if (document.has_html_parser_end_state())
+        return;
+
     if (!document.is_completely_loaded())
         document.completely_finish_loading();
 
@@ -123,7 +129,7 @@ bool build_xml_document(DOM::Document& document, ByteBuffer const& data, Optiona
         return false;
     }
     auto source = source_or_error.release_value();
-    XML::Parser parser(source, { .resolve_named_html_entity = resolve_named_html_entity });
+    XML::Parser parser(source, { .preserve_comments = true, .resolve_named_html_entity = resolve_named_html_entity });
     XMLDocumentBuilder builder { document, scripting_support };
     auto result = parser.parse_with_listener(builder);
     return !result.is_error() && !builder.has_error();

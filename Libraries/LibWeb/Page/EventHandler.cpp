@@ -11,7 +11,7 @@
 #include <AK/Base64.h>
 #include <AK/Debug.h>
 #include <AK/Math.h>
-#include <LibCompositing/DisplayList/DisplayListResourceStorage.h>
+#include <LibCompositing/DisplayList/DisplayListResources.h>
 #include <LibGC/Heap.h>
 #include <LibGC/RootHashTable.h>
 #include <LibGC/RootVector.h>
@@ -74,7 +74,6 @@
 #include <LibWeb/Painting/BoxViews.h>
 #include <LibWeb/Painting/ChromeWidget.h>
 #include <LibWeb/Painting/DocumentPaintState.h>
-#include <LibWeb/Painting/HitTestDisplayList.h>
 #include <LibWeb/Painting/ScrollSnap.h>
 #include <LibWeb/Selection/Selection.h>
 #include <LibWeb/UIEvents/EventNames.h>
@@ -1533,7 +1532,7 @@ bool EventHandler::update_hover_where_the_pointer_rests(HTML::HoverUpdatePoint h
         if (document->layout_is_known_stale())
             return true;
     }
-    if (hover_update_point == HTML::HoverUpdatePoint::BetweenTasks && !document->hit_test_display_list_is_current(read)) {
+    if (hover_update_point == HTML::HoverUpdatePoint::BetweenTasks && !document->hit_test_items_on_screen_are_current(read)) {
         return true;
     }
     m_hover_may_be_stale = false;
@@ -3417,7 +3416,7 @@ bool EventHandler::fire_click_events(GC::Ref<DOM::Node> node, MouseEventCoordina
 
     if (button == UIEvents::MouseButton::Primary) {
         // https://w3c.github.io/pointerevents/#click
-        run_activation_behavior = node->dispatch_event(UIEvents::MouseEvent::create_from_platform_event(HTML::relevant_global_object(*node), m_navigable->active_window_proxy(), UIEvents::EventNames::click, screen_position, coordinates.page_offset, coordinates.viewport_position, coordinates.offset, {}, button, buttons, modifiers, click_count).release_value_but_fixme_should_propagate_errors());
+        run_activation_behavior = node->dispatch_event(UIEvents::PointerEvent::create_from_platform_event(HTML::relevant_global_object(*node), m_navigable->active_window_proxy(), UIEvents::EventNames::click, screen_position, coordinates.page_offset, coordinates.viewport_position, coordinates.offset, {}, button, buttons, modifiers, click_count).release_value_but_fixme_should_propagate_errors());
 
         // https://w3c.github.io/uievents/#event-type-dblclick
         // This event type MUST be dispatched after the event type click if a click and
@@ -3426,7 +3425,7 @@ bool EventHandler::fire_click_events(GC::Ref<DOM::Node> node, MouseEventCoordina
             node->dispatch_event(UIEvents::MouseEvent::create_from_platform_event(HTML::relevant_global_object(*node), m_navigable->active_window_proxy(), UIEvents::EventNames::dblclick, screen_position, coordinates.page_offset, coordinates.viewport_position, coordinates.offset, {}, button, buttons, modifiers, click_count).release_value_but_fixme_should_propagate_errors());
     } else {
         // https://w3c.github.io/pointerevents/#auxclick
-        run_activation_behavior = node->dispatch_event(UIEvents::MouseEvent::create_from_platform_event(HTML::relevant_global_object(*node), m_navigable->active_window_proxy(), UIEvents::EventNames::auxclick, screen_position, coordinates.page_offset, coordinates.viewport_position, coordinates.offset, {}, button, buttons, modifiers, click_count).release_value_but_fixme_should_propagate_errors());
+        run_activation_behavior = node->dispatch_event(UIEvents::PointerEvent::create_from_platform_event(HTML::relevant_global_object(*node), m_navigable->active_window_proxy(), UIEvents::EventNames::auxclick, screen_position, coordinates.page_offset, coordinates.viewport_position, coordinates.offset, {}, button, buttons, modifiers, click_count).release_value_but_fixme_should_propagate_errors());
     }
 
     return run_activation_behavior;
@@ -4033,7 +4032,7 @@ void EventHandler::maybe_show_context_menu(GC::Ref<DOM::Node> node, MouseEventCo
     if ((modifiers & UIEvents::Mod_Shift) == 0) {
         // 1. Let menuevent = create a PointerEvent with "contextmenu", target
         // 2. If native is valid, then set MouseEvent attributes from native.
-        auto menuevent = UIEvents::MouseEvent::create_from_platform_event(HTML::relevant_global_object(*node), m_navigable->active_window_proxy(), UIEvents::EventNames::contextmenu, screen_position, coordinates.page_offset, coordinates.viewport_position, coordinates.offset, {}, UIEvents::MouseButton::Secondary, buttons, modifiers).release_value_but_fixme_should_propagate_errors();
+        auto menuevent = UIEvents::PointerEvent::create_from_platform_event(HTML::relevant_global_object(*node), m_navigable->active_window_proxy(), UIEvents::EventNames::contextmenu, screen_position, coordinates.page_offset, coordinates.viewport_position, coordinates.offset, {}, UIEvents::MouseButton::Secondary, buttons, modifiers).release_value_but_fixme_should_propagate_errors();
 
         // 3. Let result = dispatch menuevent at target.
         bool result = node->dispatch_event(menuevent);
@@ -6074,15 +6073,17 @@ void EventHandler::release_held_scroll_key()
     m_scroll_key_gesture_hold = nullptr;
 }
 
-void EventHandler::clear_per_test_input_state(Badge<Internals::Internals>)
+void EventHandler::clear_per_test_input_state()
 {
     clear_mousedown_tracking();
     stop_updating_selection();
     release_held_scroll_key();
     stop_middle_button_scroll();
 
-    m_mouse_pointer.prevent_mouse_event = false;
+    m_mouse_pointer = {};
     m_additional_pointers.clear();
+    m_last_mousedown_target = nullptr;
+    m_nested_navigable_under_pointer = nullptr;
     m_captured_chrome_widget = nullptr;
     m_effective_legacy_mouse_pointer_position = nullptr;
     m_effective_legacy_mouse_pointer_type = PointerType::Mouse;
@@ -6091,14 +6092,25 @@ void EventHandler::clear_per_test_input_state(Badge<Internals::Internals>)
     m_mousemove_previous_screen_position.clear();
     m_visual_animation_sample_time_nanoseconds.clear();
     m_last_known_mouse_visual_viewport_position.clear();
-    m_hover_may_be_stale = false;
-    // The lanes carry the pointer over to the next document, which the host then hovers where it rests.
+    m_last_known_mouse_screen_position = {};
+    m_last_known_mouse_buttons = 0;
+    m_last_known_mouse_modifiers = 0;
     if (auto document = m_navigable->active_document()) {
         if (auto* arena = document->layout_node_arena_if_created())
             Layout::RustFFI::document_host_forget_pointer_for_testing(arena->host());
     }
+    m_hover_may_be_stale = false;
     m_wheel_event_target_latch.clear();
     m_navigable->page().clear_context_menu_request();
+}
+
+void EventHandler::clear_hover_for_next_test()
+{
+    // A test's screenshot can still show its hover after the test is done, so only the reset before the next test
+    // clears it. That reset isn't pointer motion, so it dispatches no boundary events.
+    if (auto document = m_navigable->active_document())
+        document->dispatch_boundary_events(nullptr, nullptr, {}, DOM::Document::BoundaryEventTypes::All);
+    report_hovered_node_to_client(nullptr);
 }
 
 }

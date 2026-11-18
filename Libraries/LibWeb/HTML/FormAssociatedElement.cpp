@@ -44,7 +44,6 @@
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Page/EventHandler.h>
 #include <LibWeb/Painting/BoxViews.h>
-#include <LibWeb/Painting/HitTestDisplayList.h>
 #include <LibWeb/Selection/CaretNavigation.h>
 #include <LibWeb/UIEvents/InputTypes.h>
 #include <LibWebCommon/Infra/Strings.h>
@@ -202,7 +201,7 @@ GC::Ref<ValidityState const> FormAssociatedElement::validity() const
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#dom-cva-setcustomvalidity
-void FormAssociatedElement::set_custom_validity(Utf16String& error)
+void FormAssociatedElement::set_custom_validity(Utf16String error)
 {
     // The setCustomValidity(error) method steps are:
 

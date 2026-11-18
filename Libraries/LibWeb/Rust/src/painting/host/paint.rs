@@ -22,6 +22,9 @@ pub struct FfiRecordingInputs {
     pub force_dark_foreground_threshold: i32,
     pub force_dark_background_threshold: i32,
     pub should_paint_overlay: bool,
+    pub records_in_finest_runs: bool,
+    pub records_whole_document: bool,
+    pub notes_record_origins: bool,
     pub has_blocking_wheel_event_region_covering_viewport: bool,
     pub has_navigable_container_with_composited_context: bool,
     pub wheel_event_listener_state_generation: u64,
@@ -46,6 +49,7 @@ pub struct FfiRecordingInputs {
     pub palette_is_dark: bool,
     pub document_supports_light_or_dark: bool,
     pub image_fallback_color_scheme: u8,
+    pub records_without_visual_contexts: bool,
     pub accessibility_focus_target: crate::layout::node_data::NodeSlotId,
     pub has_inspector_highlight: bool,
     pub inspector_highlight_paintable: crate::layout::node_data::NodeSlotId,
@@ -176,6 +180,9 @@ impl FfiRecordingInputs {
                 background_brightness_threshold: self.force_dark_background_threshold,
             },
             should_paint_overlay: self.should_paint_overlay,
+            records_in_finest_runs: self.records_in_finest_runs,
+            records_whole_document: self.records_whole_document,
+            notes_record_origins: self.notes_record_origins,
             canvas_fill_rect: self.canvas_fill_rect.has_value.then_some(self.canvas_fill_rect.value),
             opaque_canvas: self.opaque_canvas,
             bitmap_rect: self.bitmap_rect,
@@ -195,6 +202,7 @@ impl FfiRecordingInputs {
             palette_is_dark: self.palette_is_dark,
             document_supports_light_or_dark: self.document_supports_light_or_dark,
             image_fallback_color_scheme: self.image_fallback_color_scheme,
+            records_without_visual_contexts: self.records_without_visual_contexts,
             accessibility_focus_target: (!self.accessibility_focus_target.is_invalid())
                 .then_some(self.accessibility_focus_target),
             inspector_highlight: self.has_inspector_highlight.then(|| {
@@ -421,7 +429,6 @@ pub struct FfiVideoPaintFacts {
     pub has_video_frame: bool,
     pub video_src_width: i32,
     pub video_src_height: i32,
-    pub video_sink_resource_id: u64,
     pub video_sink_handle: u64,
     pub poster_frame: *const c_void,
 }

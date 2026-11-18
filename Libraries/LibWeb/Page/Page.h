@@ -12,7 +12,9 @@
 #include <LibWeb/Page/DerpBirdStyleRule.h>
 #include <AK/Assertions.h>
 #include <AK/ByteBuffer.h>
+#include <AK/Function.h>
 #include <AK/JsonValue.h>
+#include <AK/NonnullOwnPtr.h>
 #include <AK/Queue.h>
 #include <AK/Utf16String.h>
 #include <AK/Variant.h>
@@ -49,7 +51,6 @@
 #include <LibWeb/Forward.h>
 #include <LibWeb/Geolocation/Geolocation.h>
 #include <LibWeb/Geolocation/GeolocationCoordinates.h>
-#include <LibWeb/Geolocation/GeolocationPositionError.h>
 #include <LibWeb/HTML/DedicatedWorkerThreadLink.h>
 #include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/NavigationSourceSnapshot.h>
@@ -115,10 +116,24 @@
 namespace Web {
 
 class PageClient;
+
+namespace Bindings {
+
+enum class MediaSessionAction : u8;
+
+}
+
 namespace Compositor {
 
 class CompositorContextHandle;
 class CompositorHost;
+
+}
+
+namespace MediaSession {
+
+class ActiveMediaSessionTracker;
+struct MediaSessionState;
 
 }
 
@@ -204,7 +219,6 @@ public:
     CSSPixelRect device_to_css_rect(DevicePixelRect) const;
     CSSPixelSize device_to_css_size(DevicePixelSize) const;
     DevicePixelRect enclosing_device_rect(CSSPixelRect) const;
-    DevicePixelRect rounded_device_rect(CSSPixelRect) const;
     ChromeMetrics chrome_metrics() const;
 
     EventResult handle_mouseup(HTML::LocalNavigable& root, DevicePixelPoint, DevicePixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Optional<RemoteInputEventTarget>* remote_target);
@@ -375,7 +389,7 @@ public:
     // For tests: Calls the callback when the next writing suggestion request goes to the UI process.
     void when_writing_suggestion_requested(GC::Ref<GC::Function<void()>>);
 
-    using GeolocationPositionResult = Variant<Geolocation::CoordinatesData, Geolocation::GeolocationPositionError::ErrorCode>;
+    using GeolocationPositionResult = Variant<Geolocation::CoordinatesData, Geolocation::GeolocationPositionErrorCode>;
     using GeolocationPositionCallback = GC::Ref<GC::Function<void(GeolocationPositionResult)>>;
     enum class GeolocationRequestType : u8 {
         OneShot,
@@ -422,6 +436,9 @@ public:
 
     void register_media_element(Badge<HTML::HTMLMediaElement>, UniqueNodeID media_id);
     void unregister_media_element(Badge<HTML::HTMLMediaElement>, UniqueNodeID media_id);
+    void for_each_media_element(Function<void(HTML::HTMLMediaElement&)> const&);
+    MediaSession::ActiveMediaSessionTracker& active_media_session_tracker() { return *m_active_media_session_tracker; }
+    void handle_media_session_action(Bindings::MediaSessionAction, Optional<double> seek_offset = {}, Optional<double> seek_time = {}, Optional<bool> fast_seek = {});
     bool has_media_element_playing_audio(DOM::Document const&) const;
     Vector<GC::Root<HTML::HTMLVideoElement>> video_elements_of(DOM::Document const&);
 
@@ -524,7 +541,6 @@ public:
     void container_fullscreen_complete(HTML::CrossProcessId hosted_root_id);
     void container_unfullscreen_complete(HTML::CrossProcessId hosted_root_id);
 
-    ViewportIsFullscreen viewport_is_fullscreen() const { return m_viewport_is_fullscreen; }
     void set_viewport_is_fullscreen(ViewportIsFullscreen);
     void did_deny_fullscreen_window();
 
@@ -536,9 +552,6 @@ private:
     void update_focused_navigable(GC::Ptr<HTML::Navigable>);
 
     GC::Ptr<HTML::HTMLMediaElement> media_context_menu_element();
-
-    template<typename Callback>
-    void for_each_media_element(Callback&& callback);
 
     template<typename Callback>
     void for_each_canvas_element(Callback&& callback);
@@ -667,11 +680,12 @@ private:
 
     // AD-HOC: Denied until the UI process sends the browser-wide setting, so a request cannot observe the test
     //         position in the short window before that arrives.
-    Geolocation::EmulatedPositionData m_emulated_position_data { Geolocation::GeolocationPositionError::ErrorCode::PermissionDenied };
+    Geolocation::EmulatedPositionData m_emulated_position_data { Geolocation::GeolocationPositionErrorCode::PermissionDenied };
     HashMap<u64, GC::Ref<GC::Function<void()>>> m_emulated_position_data_observers;
     u64 m_next_emulated_position_data_observer_id { 0 };
 
     Vector<UniqueNodeID> m_media_elements;
+    NonnullOwnPtr<MediaSession::ActiveMediaSessionTracker> m_active_media_session_tracker;
     Vector<UniqueNodeID> m_canvas_elements;
     Vector<GC::Ref<HTML::OffscreenCanvas>> m_offscreen_canvases_pending_placeholder_commit;
     Optional<UniqueNodeID> m_media_context_menu_element_id;
@@ -882,6 +896,7 @@ public:
     virtual void page_did_enter_tooltip_area(ByteString const&) { }
     virtual void page_did_leave_tooltip_area() { }
     virtual void page_did_change_favicon(Gfx::Bitmap const&) { }
+    virtual void page_did_change_media_session_state(Optional<MediaSession::MediaSessionState> const&) { }
     virtual void page_did_request_alert(Utf16String const&) { }
     virtual void page_did_request_before_unload(String const&) { }
     virtual void page_did_request_confirm(Utf16String const&) { }
@@ -939,6 +954,8 @@ public:
     virtual void page_did_request_set_system_visibility_state([[maybe_unused]] HTML::VisibilityState visibility_state) { }
     virtual String page_did_request_ui_process_session_history_for_testing() { return "{}"_string; }
     virtual bool page_did_request_has_populated_document_for_testing([[maybe_unused]] HTML::CrossProcessId navigable_id) { return false; }
+    virtual Optional<Web::MediaSession::MediaSessionState> page_did_request_now_playing_state_for_testing();
+    virtual void page_did_trigger_now_playing_action_for_testing(Web::Bindings::MediaSessionAction, Optional<double>, Optional<double>, Optional<bool>) { }
     virtual bool page_did_request_tab_is_playing_audio_for_testing() { return false; }
     virtual bool page_did_request_tab_is_heard_playing_audio_for_testing() { return false; }
     virtual bool page_did_request_tab_is_using_microphone_for_testing() { return false; }
@@ -992,6 +1009,8 @@ public:
     virtual void page_did_request_click_notification_for_testing([[maybe_unused]] u64 notification_id) { }
     virtual void page_did_request_click_notification_by_id_for_testing([[maybe_unused]] u64 browser_notification_id) { }
     virtual void page_did_request_dismiss_notification_for_testing([[maybe_unused]] u64 notification_id) { }
+    virtual void page_did_request_hold_next_notification_show_for_testing() { }
+    virtual void page_did_request_fail_held_notification_show_for_testing() { }
 
     virtual void page_did_finish_test([[maybe_unused]] Utf16String const& text) { }
     virtual void page_did_set_test_timeout([[maybe_unused]] double milliseconds) { }

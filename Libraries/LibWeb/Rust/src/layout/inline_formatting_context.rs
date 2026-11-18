@@ -178,26 +178,52 @@ fn apply_block_ellipsis(
     let has_text_overflow_ellipsis = line
         .visible_fragments()
         .any(|fragment| fragment.has_text_overflow_ellipsis);
-    let opportunity = line.fragments.iter().enumerate().rev().find_map(|(index, fragment)| {
-        let trailing = fragment.trailing_whitespace;
-        let inline_size = fragment.inline_length - trailing.inline_size;
-        let inline_offset = fragment.inline_offset + inline_size;
-        (fragment.has_soft_wrap_opportunity_after && inline_offset <= available_for_content).then_some((
-            index + 1,
-            inline_offset,
-            fragment.length_in_code_units - trailing.length_in_code_units,
-            inline_size,
-        ))
-    });
-    let (first_displaced_fragment, retained_inline_size) = if line.inline_length <= available_for_content
-        && !has_text_overflow_ellipsis
-    {
+    let content_fits = line.inline_length <= available_for_content && !has_text_overflow_ellipsis;
+    let opportunity = if content_fits {
+        None
+    } else {
+        line.fragments.iter().enumerate().rev().find_map(|(index, fragment)| {
+            let trailing = fragment.trailing_whitespace;
+            let inline_size = fragment.inline_length - trailing.inline_size;
+            let inline_offset = fragment.inline_offset + inline_size;
+            if fragment.has_soft_wrap_opportunity_after && inline_offset <= available_for_content {
+                return Some((
+                    index + 1,
+                    inline_offset,
+                    fragment.length_in_code_units - trailing.length_in_code_units,
+                    inline_size,
+                    None,
+                ));
+            }
+            let offsets = &fragment.block_ellipsis_text.as_ref()?.soft_wrap_offsets;
+            let style = context.style(fragment.style_source);
+            let text_content = context.pass.text_content(fragment.layout_node);
+            offsets.iter().rev().find_map(|offset| {
+                if *offset <= fragment.start || *offset >= fragment.start + fragment.length_in_code_units {
+                    return None;
+                }
+                let length = *offset - fragment.start;
+                let (inline_size, glyphs) = fragment.reshape_prefix_for_block_ellipsis(
+                    &text_content.text,
+                    *offset,
+                    style.letter_spacing().to_double() as f32,
+                    style.word_spacing().to_double() as f32,
+                );
+                let inline_offset = fragment.inline_offset + inline_size;
+                (inline_offset <= available_for_content)
+                    .then(|| (index + 1, inline_offset, length, inline_size, Some(glyphs)))
+            })
+        })
+    };
+    let (first_displaced_fragment, retained_inline_size) = if content_fits {
         (line.fragments.len(), line.inline_length)
-    } else if let Some((fragment_count, inline_offset, length, inline_size)) = opportunity {
+    } else if let Some((fragment_count, inline_offset, length, inline_size, reshaped_glyphs)) = opportunity {
         let last_retained_fragment = &mut line.fragments[fragment_count - 1];
         if last_retained_fragment.length_in_code_units > length || last_retained_fragment.has_text_overflow_ellipsis {
             let mut retained_code_units = 0usize;
-            if let Some(glyphs) = &mut last_retained_fragment.glyphs {
+            if let Some(glyphs) = reshaped_glyphs {
+                last_retained_fragment.glyphs = Some(glyphs);
+            } else if let Some(glyphs) = &mut last_retained_fragment.glyphs {
                 let retained_glyph_count = glyphs
                     .glyphs
                     .iter()
@@ -298,7 +324,7 @@ fn apply_block_ellipsis(
         ellipsis_inline_offset,
         CssPixels::default(),
         ellipsis_inline_size,
-        line_builder::normal_line_height(style),
+        line_builder::content_area_block_size(style),
         CssPixels::default(),
         line.direction,
         line.writing_mode,
@@ -332,9 +358,8 @@ pub(crate) fn apply_to_fragments(
     text_justify: u8,
     atomic_items_are_right_to_left: bool,
     line: &mut line_box::LineBoxData,
-    is_last_line: bool,
 ) {
-    if text_justify == text_justify::NONE || is_last_line || line.has_forced_break {
+    if text_justify == text_justify::NONE {
         return;
     }
     assert!(matches!(
@@ -343,6 +368,12 @@ pub(crate) fn apply_to_fragments(
     ));
 
     let excess_inline_space = line.original_available_inline_size.to_px_or_zero() - line.inline_length;
+    // https://drafts.csswg.org/css-text-3/#text-align-property
+    // If (after justification, if any) the inline contents of a line box are too long to fit within it, then the
+    // contents are start-aligned: any content that doesn't fit overflows the line box's end edge.
+    if excess_inline_space < CssPixels::default() {
+        return;
+    }
     let mut excess_inline_space_including_whitespace = excess_inline_space;
     let mut whitespace_count = 0usize;
     for fragment in &line.fragments {
@@ -381,6 +412,11 @@ pub(crate) fn apply_to_fragments(
                     marker.inline_offset += diff;
                 }
             }
+            for strut in &mut line.inline_box_struts {
+                if strut.inline_offset > fragment.inline_offset {
+                    strut.inline_offset += diff;
+                }
+            }
             fragment.inline_length = justified_space_inline_size;
         }
     }
@@ -413,6 +449,8 @@ struct PerLine {
     interrupting_block: Option<((CssPixels, CssPixels), CandidateLineCorners)>,
     first_fragment_index: Option<u32>,
     fragment_count: u32,
+    /// Whether the inline box is on the line by its strut alone, with no fragment of its content there.
+    is_strut: bool,
 }
 
 impl PerLine {
@@ -425,6 +463,7 @@ impl PerLine {
             interrupting_block: None,
             first_fragment_index: None,
             fragment_count: 0,
+            is_strut: false,
         }
     }
 }
@@ -544,21 +583,21 @@ pub(crate) fn compute(
                     .expect("a line interrupted for a block-level box keeps the box")
                     .cells;
                 let collapsed = block.uses_collapsing_borders_model;
-                let (border_box_inline_low, border_box_block_low, border_box_inline_size, border_box_block_size) = (
-                    block.border_box_left(collapsed),
-                    block.border_box_top(collapsed),
-                    block.border_box_inline_size(collapsed),
-                    block.border_box_block_size(collapsed),
-                );
-                let extent_inline_start = inline_start - border_box_inline_low;
-                let extent_block_start = block_start - border_box_block_low;
+                let extent_block_start = block_start - block.border_box_top(collapsed);
+                // NB: A block-level box inside an inline box adds nothing to the inline extent of that inline box, so
+                //     on the block's line, the inline box takes no more room than an empty piece at the line's start.
+                let line_start = if context.facts(context.containing_block).inline_axis_is_reverse() {
+                    context.inline_size_of_block_container_holding_lines()
+                } else {
+                    CssPixels::default()
+                };
                 Some((
                     position,
                     CandidateLineCorners {
-                        inline_start: extent_inline_start,
-                        inline_end: extent_inline_start + border_box_inline_size,
+                        inline_start: line_start,
+                        inline_end: line_start,
                         block_start: extent_block_start,
-                        block_end: extent_block_start + border_box_block_size,
+                        block_end: extent_block_start + block.border_box_block_size(collapsed),
                     },
                 ))
             } else {
@@ -609,6 +648,32 @@ pub(crate) fn compute(
                 direct = false;
                 ancestor = context.nearest_fragmented_inline_ancestor(ancestor);
             }
+        }
+        if !line.takes_inline_box_struts() {
+            continue;
+        }
+        // An inline box that's on the line by its strut alone gets a piece there too, as wide as nothing.
+        for strut in &line.inline_box_struts {
+            let node_index = *node_to_index.entry(strut.box_).or_insert_with(|| {
+                per_nodes.push(PerNode {
+                    node: strut.box_,
+                    parent_index: None,
+                    depth: nesting_depth(context, strut.box_),
+                    lines: Vec::new(),
+                    first_line_with_content: None,
+                    last_line_with_content: None,
+                });
+                per_nodes.len() - 1
+            });
+            let per_node = &mut per_nodes[node_index];
+            let per_line = ensure_line(per_node, line_index);
+            if per_line.first_fragment_index.is_some() {
+                continue;
+            }
+            per_line.is_strut = true;
+            note_contribution(per_line, strut.inline_offset, strut.inline_offset);
+            per_node.first_line_with_content.get_or_insert(line_index);
+            per_node.last_line_with_content = Some(line_index);
         }
     }
 
@@ -683,6 +748,9 @@ pub(crate) fn compute(
                 .fragments
                 .is_some_and(|fragments| fragments.any_pending_abspos_names_inline_containing_block(node));
         let mut corners = FirstAndLastContentLineCorners::default();
+        // NB: Lines that hold only a block-level box inside the inline box don't count as its first or last line. They
+        //     stand in for it only where it has no other lines.
+        let mut corners_from_block_lines = FirstAndLastContentLineCorners::default();
 
         for line in lines {
             let inline_box_anchor = || {
@@ -696,8 +764,8 @@ pub(crate) fn compute(
             let Some((contributions_inline_start, contributions_inline_end)) = line.contributions_inline_range else {
                 if let Some((position, extent)) = line.interrupting_block {
                     if node_is_inline_containing_block {
-                        corners.first.get_or_insert(extent);
-                        corners.last = Some(extent);
+                        corners_from_block_lines.first.get_or_insert(extent);
+                        corners_from_block_lines.last = Some(extent);
                     }
                     let (inline_box_baseline, inline_box_vertical_shift) = inline_box_anchor();
                     staged.push(StagedPiece {
@@ -737,7 +805,7 @@ pub(crate) fn compute(
                     (block_start, line.max_direct_fragment_block_length)
                 } else {
                     let style = context.style(node);
-                    let height = line_builder::normal_line_height(style);
+                    let height = line_builder::content_area_block_size(style);
                     let baseline = line_builder::LineBuilder::baseline_for_style(style, height);
                     (inline_box_baseline - baseline, height)
                 };
@@ -755,11 +823,21 @@ pub(crate) fn compute(
                 };
             let border_block_start = content_block_start - border_padding_block_low;
             let border_block_length = content_block_length + border_padding_block_low + border_padding_block_high;
-            let rect = FfiCssPixelRect {
-                x: border_inline_start,
-                y: border_block_start,
-                width: border_inline_end - border_inline_start,
-                height: border_block_length,
+            // NB: A placeholder piece holds the content box of its inline box.
+            let rect = if line.is_strut {
+                FfiCssPixelRect {
+                    x: contributions_inline_start,
+                    y: content_block_start,
+                    width: CssPixels::default(),
+                    height: content_block_length,
+                }
+            } else {
+                FfiCssPixelRect {
+                    x: border_inline_start,
+                    y: border_block_start,
+                    width: border_inline_end - border_inline_start,
+                    height: border_block_length,
+                }
             };
             staged.push(StagedPiece {
                 piece: InlineBoxPieceData {
@@ -772,7 +850,7 @@ pub(crate) fn compute(
                     baseline: inline_box_baseline,
                     accumulated_vertical_shift: inline_box_vertical_shift,
                     present_edges: edge_bits(has_low_edge, has_high_edge),
-                    is_geometry_only_placeholder: false,
+                    is_geometry_only_placeholder: line.is_strut,
                 },
                 depth,
                 discovery_index: node_index,
@@ -809,6 +887,9 @@ pub(crate) fn compute(
             }
         }
 
+        if corners.first.is_none() {
+            corners = corners_from_block_lines;
+        }
         if node_is_inline_containing_block
             && let Some(rect) = padding_box_rect_spanning_first_and_last_content_lines(
                 &corners,
@@ -846,7 +927,7 @@ pub(crate) fn compute(
                 placeholder_rect.y = block_offset;
                 placeholder_rect.height = CssPixels::default();
             } else {
-                placeholder_rect.height = line_builder::normal_line_height(style);
+                placeholder_rect.height = line_builder::content_area_block_size(style);
                 placeholder_rect.y = line.block_start + line.baseline
                     - line_builder::LineBuilder::baseline_for_style(style, placeholder_rect.height);
             }
@@ -1610,8 +1691,10 @@ impl<'context> InlineFormattingContext<'context> {
                     .collect(),
                 static_position_markers: Vec::new(),
                 inline_box_baselines: Vec::new(),
+                inline_box_struts: Vec::new(),
                 text_overflow_elision: None,
                 block_level_box: None,
+                uses_last_line_alignment: None,
             };
             fragment_start = fragment_end;
             let line_item_start = item_index;
@@ -1708,8 +1791,10 @@ impl<'context> InlineFormattingContext<'context> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn text_item_wrap_opportunity(
         &self,
+        prepared: &prepared_inline_content::PreparedInlineContent,
         item: &inline_level_iterator::Item,
         style: StyleValues<'_>,
         is_whitespace: bool,
@@ -1731,10 +1816,11 @@ impl<'context> InlineFormattingContext<'context> {
                     TextItemWrapOpportunity::None
                 };
             }
-            return inline_level_iterator::whitespace_and_sequence_inline_size(self, item, remaining_items).map_or(
-                TextItemWrapOpportunity::None,
-                TextItemWrapOpportunity::BeforeWhitespaceSequence,
-            );
+            return inline_level_iterator::whitespace_and_sequence_inline_size(self, prepared, item, remaining_items)
+                .map_or(
+                    TextItemWrapOpportunity::None,
+                    TextItemWrapOpportunity::BeforeWhitespaceSequence,
+                );
         }
         if item.can_break_before || line_ends_in_whitespace {
             TextItemWrapOpportunity::BeforeText
@@ -1769,20 +1855,182 @@ impl<'context> InlineFormattingContext<'context> {
         });
     }
 
-    fn break_overflowing_text_item<'builder>(
+    /// Splits off the longest prefix of `item` that fits `available` for an overflow break. A prefix that still ends at
+    /// the item's soft hyphen ends the line in a hyphen as well, so it has to leave room for `hyphen` too.
+    #[allow(clippy::too_many_arguments)]
+    fn split_for_overflow_break_before_hyphen(
+        &self,
+        item: &mut inline_level_iterator::Item,
+        prepared: &prepared_inline_content::PreparedInlineContent,
+        text: &[u16],
+        letter_spacing: f32,
+        word_spacing: f32,
+        available: CssPixels,
+        hyphen: CssPixels,
+        line_is_empty: bool,
+    ) -> Option<inline_level_iterator::Item> {
+        let split = |item: &mut inline_level_iterator::Item, available| {
+            self.pass.with_grapheme_segmenter(item.node, |segmenter| {
+                item.split_for_overflow_break(
+                    prepared,
+                    text,
+                    segmenter,
+                    letter_spacing,
+                    word_spacing,
+                    available,
+                    line_is_empty,
+                )
+            })
+        };
+        if hyphen > CssPixels::default() {
+            let end = item.offset_in_node + item.length_in_node;
+            let mut remainder = item.clone();
+            if let Some(prefix) = split(&mut remainder, available)
+                && prefix.offset_in_node + prefix.length_in_node < end
+            {
+                *item = remainder;
+                return Some(prefix);
+            }
+            return split(item, available - hyphen);
+        }
+        split(item, available)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn break_soft_wrapped_text_item<'builder>(
         &'builder self,
         line_builder: &mut line_builder::LineBuilder<'builder, 'context>,
-        prepared: &prepared_inline_content::PreparedInlineContent,
+        iterator: &inline_level_iterator::InlineLevelIterator,
         item: &mut inline_level_iterator::Item,
         item_index: usize,
+        can_break_before: bool,
         mut line_limit: Option<&mut FragmentainerLineLimit>,
         state_at_clamp_point: &mut Option<LineBuildingState<'builder, 'context>>,
     ) -> bool {
+        let prepared = iterator.prepared_content();
+        let mut following_inline_size = iterator.inline_size_following_text(self, item);
+        // NB: Where nothing glued follows an item that ends in a soft hyphen, the line ends in that hyphen if the next
+        //     run doesn't fit after the item.
+        if following_inline_size == CssPixels::default()
+            && let Some(remaining) = line_builder.remaining_inline_size_for_soft_wrap()
+            && inline_level_iterator::inline_extent([&*item]) + iterator.next_line_content_inline_size(self) > remaining
+        {
+            following_inline_size = inline_level_iterator::hyphen_inline_size_after(self, prepared, item);
+        }
         if line_builder
-            .remaining_inline_size_for_overflow_break()
-            .is_none_or(|remaining_inline_size| item.border_box_inline_size() <= remaining_inline_size)
+            .remaining_inline_size_for_soft_wrap()
+            .is_none_or(|remaining| inline_level_iterator::inline_extent([&*item]) + following_inline_size <= remaining)
         {
             return false;
+        }
+        let style = self.style(self.parent_node(item.node));
+        let text_content = self.pass.text_content(item.node);
+        let letter_spacing = style.letter_spacing().to_double() as f32;
+        let word_spacing = style.word_spacing().to_double() as f32;
+        let overflow_break_allowed = self.overflow_break_applies_to_style(style);
+        let end = item.offset_in_node + item.length_in_node;
+        let mut offset = item.offset_in_node;
+        loop {
+            if self.stops_at_line_clamp_point(line_builder, state_at_clamp_point) {
+                return false;
+            }
+            if line_limit.as_deref_mut().is_some_and(|limit| limit.is_reached(self)) {
+                return true;
+            }
+            let remaining = line_builder
+                .remaining_inline_size_for_soft_wrap()
+                .expect("splitting text requires a definite line width");
+            let line_is_empty = line_builder.current_line_is_empty();
+            self.set_current_line_start_offset(item_index, offset);
+            if line_is_empty && line_builder.current_line_has_no_space_left_by_floats() {
+                line_builder.break_line(line_builder::ForcedBreak::No, None, None);
+                continue;
+            }
+            // Keep the remainder as an offset into the item. Each line needs only its candidate prefixes shaped.
+            let mut prefix = item.fragment_at_soft_wrap(
+                prepared,
+                &text_content.text,
+                offset,
+                letter_spacing,
+                word_spacing,
+                remaining,
+                following_inline_size,
+                inline_level_iterator::soft_hyphen_hyphenates(style),
+            );
+            let hyphen = if prefix.offset_in_node + prefix.length_in_node == end {
+                CssPixels::default()
+            } else {
+                inline_level_iterator::hyphen_inline_size_after(self, prepared, &prefix)
+            };
+            if inline_level_iterator::inline_extent([&prefix]) + hyphen > remaining {
+                if overflow_break_allowed {
+                    let physical_remaining = line_builder
+                        .remaining_inline_size_for_overflow_break()
+                        .expect("splitting text requires a definite line width");
+                    if prefix.border_box_inline_size() + hyphen > physical_remaining {
+                        let split = self.split_for_overflow_break_before_hyphen(
+                            &mut prefix,
+                            prepared,
+                            &text_content.text,
+                            letter_spacing,
+                            word_spacing,
+                            physical_remaining,
+                            hyphen,
+                            line_is_empty,
+                        );
+                        if let Some(split) = split {
+                            prefix = split;
+                        } else if !line_is_empty {
+                            line_builder.break_line(
+                                line_builder::ForcedBreak::No,
+                                None,
+                                Some(prefix.border_box_inline_size()),
+                            );
+                            continue;
+                        }
+                    }
+                } else if !line_is_empty && can_break_before {
+                    line_builder.break_line(
+                        line_builder::ForcedBreak::No,
+                        None,
+                        Some(prefix.border_box_inline_size()),
+                    );
+                    continue;
+                }
+            }
+            offset = prefix.offset_in_node + prefix.length_in_node;
+            if offset == end {
+                *item = prefix;
+                return false;
+            }
+            line_builder.append_text_item(&mut prefix, prepared, style);
+            self.set_current_line_start_offset(item_index, offset);
+            line_builder.break_line(line_builder::ForcedBreak::No, None, None);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn break_overflowing_text_item<'builder>(
+        &'builder self,
+        line_builder: &mut line_builder::LineBuilder<'builder, 'context>,
+        iterator: &inline_level_iterator::InlineLevelIterator,
+        item: &mut inline_level_iterator::Item,
+        item_index: usize,
+        can_break_before: bool,
+        mut line_limit: Option<&mut FragmentainerLineLimit>,
+        state_at_clamp_point: &mut Option<LineBuildingState<'builder, 'context>>,
+    ) -> bool {
+        let prepared = iterator.prepared_content();
+        if item.has_soft_wraps(prepared) {
+            return self.break_soft_wrapped_text_item(
+                line_builder,
+                iterator,
+                item,
+                item_index,
+                can_break_before,
+                line_limit,
+                state_at_clamp_point,
+            );
         }
         let style = self.style(self.parent_node(item.node));
         let text_content = self.pass.text_content(item.node);
@@ -1800,7 +2048,21 @@ impl<'context> InlineFormattingContext<'context> {
             let Some(remaining_inline_size) = line_builder.remaining_inline_size_for_overflow_break() else {
                 return false;
             };
-            if item.border_box_inline_size() <= remaining_inline_size {
+            // NB: An item that ends in a soft hyphen ends the line in a hyphen if the run after it doesn't fit there too.
+            let hyphen = match inline_level_iterator::hyphen_inline_size_after(self, prepared, item) {
+                hyphen
+                    if hyphen > CssPixels::default()
+                        && item.border_box_inline_size() + iterator.next_line_content_inline_size(self)
+                            > remaining_inline_size =>
+                {
+                    hyphen
+                }
+                _ => CssPixels::default(),
+            };
+            if item.border_box_inline_size() + hyphen <= remaining_inline_size {
+                return false;
+            }
+            if !self.overflow_break_applies_to_style(style) {
                 return false;
             }
             let line_is_empty = self.line_data().line_boxes.last().is_some_and(|line| line.is_empty());
@@ -1809,17 +2071,16 @@ impl<'context> InlineFormattingContext<'context> {
                 line_builder.break_line(line_builder::ForcedBreak::No, None, None);
                 continue;
             }
-            let split_item = self.pass.with_grapheme_segmenter(item.node, |grapheme_segmenter| {
-                item.split_for_overflow_break(
-                    prepared,
-                    &text_content.text,
-                    grapheme_segmenter,
-                    letter_spacing,
-                    word_spacing,
-                    remaining_inline_size,
-                    line_is_empty,
-                )
-            });
+            let split_item = self.split_for_overflow_break_before_hyphen(
+                item,
+                prepared,
+                &text_content.text,
+                letter_spacing,
+                word_spacing,
+                remaining_inline_size,
+                hyphen,
+                line_is_empty,
+            );
             let Some(mut prefix) = split_item else {
                 if line_is_empty {
                     return false;
@@ -2159,6 +2420,8 @@ impl<'context> InlineFormattingContext<'context> {
         let mut items_after_clamp_point = Vec::new();
         let mut stopped_at_line_limit = false;
         let mut needs_float_fitting = !float_fit_trial;
+        // https://quirks.spec.whatwg.org/#the-line-height-calculation-quirk
+        let takes_struts_of_inline_boxes_without_text = !self.facts(self.containing_block).document_in_quirks_mode();
         loop {
             if float_fit_trial && line_builder.float_refit().is_some() {
                 break;
@@ -2180,6 +2443,36 @@ impl<'context> InlineFormattingContext<'context> {
             let item_index = item_count - iterator.items().len() - 1;
             if let Some(consumed_item_nodes) = consumed_item_nodes.as_mut() {
                 consumed_item_nodes.push((item_index, item.node));
+            }
+            // An inline box that holds no in-flow item is on the line that's current when the items reach it. And
+            // whitespace never starts a line, so an empty inline box right after it is on this line too — even if
+            // the line goes on to break at that whitespace.
+            // NB: The start edges that collapsed whitespace left for the next item come before that item too.
+            let pending_leading_edges =
+                item_state.leading_margin + item_state.leading_border + item_state.leading_padding;
+            if iterator.has_empty_inline_boxes() {
+                for empty_box in iterator.empty_inline_boxes_before_last_item() {
+                    line_builder
+                        .add_strut_of_empty_inline_box(empty_box.node, pending_leading_edges + empty_box.leading_edges);
+                }
+                if item.is_collapsible_whitespace
+                    || (item.type_ == inline_level_iterator::ItemType::Text && item.is_ascii_whitespace(self))
+                {
+                    for empty_box in iterator.empty_inline_boxes_after_last_item() {
+                        line_builder.add_strut_of_empty_inline_box(
+                            empty_box.node,
+                            pending_leading_edges + empty_box.leading_edges,
+                        );
+                    }
+                }
+            }
+            // NB: The inline boxes around whitespace are on this line whether the whitespace stays there, collapses,
+            //     or ends up hanging off the end of the line.
+            if item.is_collapsible_whitespace && takes_struts_of_inline_boxes_without_text {
+                line_builder.add_struts_of_inline_boxes_around(
+                    item.node,
+                    pending_leading_edges + item.margin_start + item.border_start + item.padding_start,
+                );
             }
             if let Some(offset_in_node) = pending_resume_offset.take()
                 && item.type_ == inline_level_iterator::ItemType::Text
@@ -2277,6 +2570,7 @@ impl<'context> InlineFormattingContext<'context> {
                     });
                     let continuation = iterator.next_unbreakable_run_inline_size(self);
                     let position = iterator.forced_break_position(&item);
+                    line_builder.add_struts_of_inline_boxes_around(position.node, CssPixels::default());
                     line_builder.break_line(line_builder::ForcedBreak::Yes, Some(position), continuation);
                     if !item.node.is_invalid() && self.clear_floating_boxes(item.node) {
                         line_builder.did_introduce_clearance(self.block_axis_float_clearance.get());
@@ -2315,6 +2609,12 @@ impl<'context> InlineFormattingContext<'context> {
                     item_state.leading_border += item.border_start;
                     item_state.leading_padding += item.padding_start;
                     item_state.leading_right_to_left_end_margin += item.entered_right_to_left_end_margin;
+                    // https://drafts.csswg.org/css2/#anonymous-block-level
+                    // NB: The inline boxes around the block-level box are broken around it, so they're on the line
+                    //     before it and on the line after it.
+                    if takes_struts_of_inline_boxes_without_text {
+                        line_builder.add_struts_of_inline_boxes_around(item.node, CssPixels::default());
+                    }
                     line_builder.finish_current_line_before_block_level_box();
                     if float_fit_trial {
                         break;
@@ -2344,6 +2644,9 @@ impl<'context> InlineFormattingContext<'context> {
                     self.margins_collapse_through_interrupting_blocks
                         .borrow_mut()
                         .insert(item.node, collapses_through);
+                    if takes_struts_of_inline_boxes_without_text {
+                        line_builder.add_struts_of_inline_boxes_around(item.node, CssPixels::default());
+                    }
                 }
                 inline_level_iterator::ItemType::AbsolutelyPositionedElement => {
                     if !self.facts(item.node).is_box() {
@@ -2390,6 +2693,7 @@ impl<'context> InlineFormattingContext<'context> {
                             .last()
                             .is_some_and(|line| self.line_is_empty_or_ends_in_whitespace_that_wraps(line));
                         let opportunity = self.text_item_wrap_opportunity(
+                            iterator.prepared_content(),
                             &item,
                             style,
                             is_whitespace,
@@ -2424,7 +2728,9 @@ impl<'context> InlineFormattingContext<'context> {
                                 let measure_rest_of_run = !is_whitespace
                                     && !run_fits_after_previous_whitespace
                                     && line_builder.can_break_before_next_item();
-                                let unbreakable_run_inline_size = if measure_rest_of_run {
+                                let unbreakable_run_inline_size = if measure_rest_of_run
+                                    || item.has_soft_wraps(iterator.prepared_content())
+                                {
                                     let stop_at_overflow_breakable_text = opportunity
                                         == TextItemWrapOpportunity::AfterOverflowBreakableText
                                         || line_builder.current_line_is_empty();
@@ -2442,19 +2748,20 @@ impl<'context> InlineFormattingContext<'context> {
                             }
                             TextItemWrapOpportunity::None => {}
                         }
-                        if overflow_break_allowed {
+                        if overflow_break_allowed || item.has_soft_wraps(iterator.prepared_content()) {
                             if self.break_overflowing_text_item(
                                 line_builder,
-                                iterator.prepared_content(),
+                                iterator,
                                 &mut item,
                                 item_index,
+                                opportunity != TextItemWrapOpportunity::None,
                                 line_limit.as_mut(),
                                 &mut state_at_clamp_point,
                             ) {
                                 stopped_at_line_limit = true;
                                 break;
                             }
-                            item_state.previous_text_item_allows_overflow_break_after = true;
+                            item_state.previous_text_item_allows_overflow_break_after = overflow_break_allowed;
                         }
                     } else if item.can_break_before
                         || can_break_after_previous_overflow_item
@@ -2476,6 +2783,15 @@ impl<'context> InlineFormattingContext<'context> {
             }
         }
         if iterator.items().is_empty() {
+            for empty_box in iterator.empty_inline_boxes_after_last_item() {
+                line_builder.add_strut_of_empty_inline_box(
+                    empty_box.node,
+                    item_state.leading_margin
+                        + item_state.leading_border
+                        + item_state.leading_padding
+                        + empty_box.leading_edges,
+                );
+            }
             line_builder.append_start_edges_of_collapsed_whitespace(
                 item_state.collapsed_whitespace_node,
                 item_state.leading_margin,
@@ -2825,24 +3141,31 @@ impl<'context> InlineFormattingContext<'context> {
                 }
             }
         }
+        if !self.parent.has_line_clamp() {
+            line_builder.update_last_line(false);
+        }
         let containing_style = self.style(self.containing_block);
-        if containing_style.text_align() == text_align::JUSTIFY {
+        if line_builder::may_justify_lines(containing_style) {
             let line_count = self.line_data().line_boxes.len();
             for index in 0..line_count {
-                let is_last_line = index + 1 == line_count
-                    && self.line_data().line_boxes[index]
-                        .inline_length_before_block_ellipsis
-                        .is_none();
+                let uses_last_line_alignment = {
+                    let line_data = self.line_data();
+                    let line = &line_data.line_boxes[index];
+                    line.uses_last_line_alignment.unwrap_or_else(|| {
+                        let is_last_line =
+                            index + 1 == line_count && line.inline_length_before_block_ellipsis.is_none();
+                        is_last_line || line.has_forced_break
+                    })
+                };
+                if line_builder::line_text_align(containing_style, uses_last_line_alignment) != text_align::JUSTIFY {
+                    continue;
+                }
                 apply_to_fragments(
                     containing_style.text_justify(),
                     self.atomic_items_are_right_to_left,
                     &mut self.line_data_mut().line_boxes[index],
-                    is_last_line,
                 );
             }
-        }
-        if !self.parent.has_line_clamp() {
-            line_builder.update_last_line(false);
         }
 
         if self.parent.keeps_column_box_layouts()
@@ -3072,14 +3395,26 @@ impl<'context> InlineFormattingContext<'context> {
             .last()
             .map(line_box::LineBoxData::retained_metrics);
         let baselines = formatting_context::derive_baselines_from_lines(&self.line_data.get_mut().line_boxes);
+        // https://drafts.csswg.org/css2/#adjoining-margins
+        // - no line boxes, no clearance, no padding and no border separate them (Note that certain zero-height line boxes
+        //   (see 9.4.2) are ignored for this purpose.)
+        // NB: A line box that holds text, or ends with a forced break (not one that holds an interrupting block),
+        //     separates them even where it's zero-height, e.g. with a zero font size.
+        let has_line_with_text = self.line_data.get_mut().line_boxes.iter().any(|line| {
+            (line.has_forced_break && line.block_level_box.is_none())
+                || line
+                    .fragments
+                    .iter()
+                    .any(|fragment| fragment.box_cells.is_none() && fragment.text_length_in_code_units > 0)
+        });
         block_formatting_context::ChildrenSummary {
             baselines,
             lines: Some(std::mem::take(self.line_data.get_mut())),
             fragmentainer_stop_token: self.fragmentainer_stop_token.take(),
             lines_are_unbreakable: self.lines_are_unbreakable.get(),
             last_line,
-            has_child_whose_margins_do_not_collapse_through: !self
-                .children_let_margins_collapse_through(self.containing_block),
+            has_child_whose_margins_do_not_collapse_through: has_line_with_text
+                || !self.children_let_margins_collapse_through(self.containing_block),
             ..Default::default()
         }
     }
@@ -3089,8 +3424,31 @@ impl<'context> InlineFormattingContext<'context> {
     fn children_let_margins_collapse_through(&self, node: Node) -> bool {
         self.pass.children(node).all(|child| {
             let facts = self.facts(child);
-            if !facts.is_box() || facts.is_absolutely_positioned() || facts.is_floating() {
+            if facts.is_absolutely_positioned() || facts.is_floating() {
                 return true;
+            }
+            // https://drafts.csswg.org/css2/#inline-formatting
+            // Line boxes that contain no text, no preserved white space, no inline elements with non-zero margins,
+            // padding, or borders or other in-flow content (such as images, inline blocks or inline tables), and do not
+            // end with a preserved newline must be treated as zero-height line boxes for the purposes of determining
+            // the positions of any elements inside of them, and must be treated as not existing for any other purpose.
+            // NB: Only the inline-axis margins, padding, and borders of an inline box count here.
+            if !facts.is_box() {
+                let Some(sides) = self.entered_inline_box(child) else {
+                    return true;
+                };
+                // NB: The sides of an inline box are relative to the layout frame, whose left and right are the inline
+                //     axis in every writing mode.
+                let inline_edges = [
+                    sides.margin_left,
+                    sides.margin_right,
+                    sides.border_left,
+                    sides.border_right,
+                    sides.padding_left,
+                    sides.padding_right,
+                ];
+                return inline_edges.iter().all(|edge| *edge == CssPixels::default())
+                    && self.children_let_margins_collapse_through(child);
             }
             let interrupting_block_collapses_through = self
                 .margins_collapse_through_interrupting_blocks
@@ -3702,6 +4060,7 @@ impl ContentSizingLines {
             if self.lines.breaks_before_next_fragment()
                 && matches!(
                     context.text_item_wrap_opportunity(
+                        prepared,
                         item,
                         context.style(context.parent_node(item.node)),
                         true,
@@ -3780,10 +4139,27 @@ impl ContentSizingLines {
                     && style.white_space_collapse() == white_space_collapse::PRESERVE
                     && style.text_wrap_mode() == text_wrap_mode::WRAP)
                 {
-                    item.trailing_whitespace.inline_size
+                    // NB: An ideographic space at the end hangs, but it still counts toward the intrinsic sizes.
+                    item.trailing_whitespace.ascii_inline_size
                 } else {
                     CssPixels::default()
                 };
+                // NB: Min-content breaks at every soft wrap opportunity, so content that ends in a soft hyphen ends
+                //     its line in a hyphen wherever the content after it can start a line. And min-content breaks
+                //     before every atomic inline in a container that wraps, as append_atomic_inline() does.
+                let next_content = remaining_items.iter().find(|next| {
+                    !matches!(
+                        next.type_,
+                        inline_level_iterator::ItemType::InlineEdge
+                            | inline_level_iterator::ItemType::AbsolutelyPositionedElement
+                            | inline_level_iterator::ItemType::FloatingElement
+                    )
+                });
+                let breaks_after_item = next_content.is_some_and(|next| match next.type_ {
+                    inline_level_iterator::ItemType::Text => next.can_break_before,
+                    inline_level_iterator::ItemType::Element => self.container_wraps,
+                    _ => false,
+                });
                 if style.text_wrap_mode() == text_wrap_mode::WRAP {
                     let is_whitespace = item.is_collapsible_whitespace || item.is_ascii_whitespace(context);
                     let breaks_between_graphemes = !is_whitespace && breaks_between_graphemes(style);
@@ -3791,6 +4167,7 @@ impl ContentSizingLines {
                         let can_break_after_previous_grapheme_broken_item =
                             previous_text_item_breaks_between_graphemes && !breaks_between_graphemes;
                         context.text_item_wrap_opportunity(
+                            prepared,
                             item,
                             style,
                             is_whitespace,
@@ -3830,13 +4207,48 @@ impl ContentSizingLines {
                     if opportunity == TextItemWrapOpportunity::BeforeText {
                         self.lines.finish();
                     }
+                    if self.measures_min_content() && item.has_soft_wraps(prepared) {
+                        let text = context.pass.text_content(item.node);
+                        let sizes = item.soft_wrap_segment_inline_sizes(
+                            prepared,
+                            &text.text,
+                            style.letter_spacing().to_double() as f32,
+                            style.word_spacing().to_double() as f32,
+                            inline_level_iterator::soft_hyphen_hyphenates(style),
+                            breaks_after_item,
+                        );
+                        let last_index = sizes.len() - 1;
+                        for (index, size) in sizes.into_iter().enumerate() {
+                            let leading = if index == 0 {
+                                margin_start + border_start + padding_start
+                            } else {
+                                CssPixels::default()
+                            };
+                            let trailing = if index == last_index {
+                                item.padding_end + item.border_end + item.margin_end
+                            } else {
+                                CssPixels::default()
+                            };
+                            self.lines
+                                .append(leading + size + trailing, false, CssPixels::default());
+                            if index != last_index {
+                                self.lines.finish();
+                            }
+                        }
+                        return;
+                    }
                 } else if self.lines.breaks_before_next_fragment()
                     && (item.can_break_before || previous_text_item_breaks_between_graphemes)
                 {
                     self.lines.finish();
                 }
+                let hyphen = if self.measures_min_content() && breaks_after_item {
+                    inline_level_iterator::hyphen_inline_size_after(context, prepared, item)
+                } else {
+                    CssPixels::default()
+                };
                 self.lines.append(
-                    border_box_inline_size,
+                    border_box_inline_size + hyphen,
                     item.ends_in_ascii_space(context),
                     trailing_whitespace_inline_size,
                 );

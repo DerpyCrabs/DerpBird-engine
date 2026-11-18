@@ -13,27 +13,30 @@
 #include <AK/Utf16String.h>
 #include <AK/Utf16StringBuilder.h>
 #include <LibAudio/ClientConnection.h>
-#include <LibCompositing/DisplayList/DisplayListResourceStorage.h>
+#include <LibCompositing/DisplayList/DisplayListResources.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/System.h>
+#include <LibCore/ThreadEventQueue.h>
 #include <LibCore/TimeZone.h>
 #include <LibGC/Heap.h>
 #include <LibGC/RootVector.h>
 #include <LibGfx/Cursor.h>
 #include <LibHTTP/Cache/Utilities.h>
 #include <LibHTTP/HSTS/ParsedHSTSPolicy.h>
+#include <LibJS/HostClassBuilder.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibJS/Runtime/Environment.h>
 #include <LibJS/Runtime/Error.h>
+#include <LibJS/Runtime/Intrinsics.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibMediaClient/Client.h>
 #include <LibURL/Parser.h>
 #include <LibWeb/ARIA/AriaData.h>
 #include <LibWeb/ARIA/StateAndProperties.h>
-#include <LibWeb/Animations/DocumentTimeline.h>
+#include <LibWeb/Animations/RecordHandles.h>
 #include <LibWeb/Bindings/Internals.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
@@ -108,6 +111,8 @@
 #include <LibWeb/Loader/ContentBlocker.h>
 #include <LibWeb/Loader/LoaderConfig.h>
 #include <LibWeb/Loader/ResourceLoader.h>
+#include <LibWeb/MediaSession/ActiveMediaSessionTracker.h>
+#include <LibWeb/MediaSession/MediaSession.h>
 #include <LibWeb/NotificationsAPI/Notification.h>
 #include <LibWeb/Page/EventHandler.h>
 #include <LibWeb/Page/Page.h>
@@ -369,7 +374,7 @@ WebIDL::ExceptionOr<void> Internals::load_reference_test_metadata()
 
     // Collect all <meta name="fuzzy" content=".."> values.
     JsonArray fuzzy_configurations;
-    auto fuzzy_nodes = TRY(document->query_selector_all("meta[name=fuzzy]"sv));
+    auto fuzzy_nodes = TRY(document->query_selector_all("meta[name=fuzzy]"_utf16));
     for (size_t i = 0; i < fuzzy_nodes->length(); ++i) {
         auto const* fuzzy_node = fuzzy_nodes->item(i);
         auto content = as<DOM::Element>(fuzzy_node)->get_attribute_value(HTML::AttributeNames::content);
@@ -400,14 +405,28 @@ u32 Internals::worker_agent_count() const
     return Bindings::worker_agent_count();
 }
 
+static void collect_garbage_from_the_outermost_event_loop_turn(GC::Root<WebIDL::Promise>);
+
 void Internals::gc_async(GC::Ref<WebIDL::Promise> promise)
 {
-    // Queue a LibCore event to run the collection, so that it runs outside the JS execution context with as small a
-    // stack as possible.
-    Core::deferred_invoke([promise = GC::make_root(promise)] {
+    collect_garbage_from_the_outermost_event_loop_turn(GC::make_root(promise));
+}
+
+static void collect_garbage_from_the_outermost_event_loop_turn(GC::Root<WebIDL::Promise> promise)
+{
+    // Queue a LibCore event to run the collection, so that it runs outside the JS execution context. Nothing on the stack
+    // of the outermost event loop turn refers to a cell that is not rooted some other way, so the collection leaves the
+    // stack out. A word there that only looks like a cell pointer would otherwise keep that cell alive, and one in a
+    // frame of the event loop itself would keep it alive for every later collection too.
+    Core::deferred_invoke([promise = move(promise)]() mutable {
+        // A nested event loop has script waiting further up the stack, so wait for it to finish.
+        if (Core::ThreadEventQueue::current().is_processing_nested()) {
+            collect_garbage_from_the_outermost_event_loop_turn(move(promise));
+            return;
+        }
         auto& realm = WebIDL::promise_realm(*promise);
         HTML::TemporaryExecutionContext execution_context { realm };
-        realm.vm().heap().collect_garbage();
+        realm.vm().heap().collect_garbage_without_scanning_the_stack();
         WebIDL::resolve_promise(*promise);
     });
 }
@@ -442,6 +461,11 @@ WebIDL::ExceptionOr<void> Internals::mark_as_garbage(Utf16String const& variable
     TRY(environment->set_mutable_binding(vm, variable_name_fly, JS::js_undefined(), false));
     (void)TRY(environment->delete_binding(vm, variable_name_fly));
     vm.heap().uproot_cell(&value.as_cell());
+    // A wrapper's wrappable is a cell of its own, so a stale stack word that points at it could still keep it alive.
+    if (value.is_object()) {
+        if (auto* platform_object = Bindings::as_platform_object(value.as_object()); platform_object && platform_object->wrappable())
+            vm.heap().uproot_cell(platform_object->wrappable().ptr());
+    }
     return {};
 }
 
@@ -1340,9 +1364,13 @@ void Internals::load_url(Utf16String const& url_string)
     });
 }
 
+// Defined in Bindings/Rust/src/internals/internal_animation_timeline.rs.
+extern "C" void* web_internal_animation_timeline_create(JSVM*, DOM::Document*);
+
 GC::Ref<InternalAnimationTimeline> Internals::create_internal_animation_timeline()
 {
-    return InternalAnimationTimeline::create(window().associated_document());
+    auto* cell = web_internal_animation_timeline_create(JS::HostABI::vm_to_abi(JS::VM::the()), &window().associated_document());
+    return static_cast<InternalAnimationTimeline&>(*static_cast<Bindings::RustInterfaceCell*>(cell));
 }
 
 WebIDL::ExceptionOr<void> Internals::simulate_drag_start(double x, double y, Utf16String const& name, Utf16String const& contents)
@@ -1736,7 +1764,7 @@ bool Internals::recorded_display_list_blocks_wheel_event_at(double x, double y)
     return Layout::RustFFI::render_state_recorded_blocks_wheel_event_at(document.layout_node_arena().host(), position);
 }
 
-void Internals::record_display_list_for_testing(bool paint_overlay, bool cold)
+void Internals::record_display_list_for_testing(bool paint_overlay, bool cold, bool finest_runs)
 {
     auto& document = window().associated_document();
     Layout::ForcedReadScope read { document };
@@ -1746,7 +1774,7 @@ void Internals::record_display_list_for_testing(bool paint_overlay, bool cold)
     // A recording against a visual context tree built fresh copies nothing from the published one.
     if (cold)
         document.schedule_full_accumulated_visual_context_rebuild(Layout::RustFFI::VisualContextUpdateScope::FreshTree);
-    (void)document.record_display_list(read, HTML::PaintConfig { .paint_overlay = paint_overlay }, Painting::PaintCommandCacheMode::ReadWrite);
+    (void)document.record_display_list(read, HTML::PaintConfig { .paint_overlay = paint_overlay, .records_in_finest_runs = finest_runs }, Painting::PaintCommandCacheMode::ReadWrite);
 }
 
 void Internals::set_autoplay_policy(Utf16String const& policy)
@@ -1909,9 +1937,29 @@ static Utf16String dump_string_to_utf16(String const& string)
     return Utf16String::from_utf8_without_validation(string.bytes_as_string_view());
 }
 
-Utf16String Internals::dump_display_list()
+Utf16String Internals::dump_display_list(Bindings::DisplayListDumpOptions const& options)
 {
-    return window().associated_document().dump_display_list();
+    return window().associated_document().dump_display_list({
+        .owners = options.owners,
+        .text = options.text,
+        .fonts = options.fonts,
+        .record_ids = options.record_ids,
+        .chunks = options.chunks,
+        .raw_node_indices = options.raw_node_indices,
+        .jsonl = options.format == Bindings::DisplayListDumpFormat::Jsonl,
+    });
+}
+
+Utf16String Internals::dump_display_list_changes(Bindings::DisplayListDumpOptions const& options)
+{
+    auto& document = window().associated_document();
+    auto jsonl = document.dump_display_list({ .raw_node_indices = options.raw_node_indices, .jsonl = true }).to_utf8();
+    Optional<StringView> previous_jsonl;
+    if (m_display_list_dump_for_changes.has_value() && m_display_list_dump_for_changes->document_id == document.unique_id())
+        previous_jsonl = m_display_list_dump_for_changes->jsonl;
+    auto changes = Painting::display_list_dump_changes(previous_jsonl, jsonl);
+    m_display_list_dump_for_changes = DisplayListDumpForChanges { document.unique_id(), move(jsonl) };
+    return changes;
 }
 
 Utf16String Internals::dump_accessibility_tree()
@@ -2499,7 +2547,7 @@ void Internals::perform_per_test_cleanup()
 
     // Clear any input state
     if (auto local_root = local_root_of(window())) {
-        local_root->event_handler().clear_per_test_input_state({});
+        local_root->event_handler().clear_per_test_input_state();
         WebDriver::reset_input_state(*local_root->top_level_traversable());
     }
     if (auto* compositor_context = compositor_context_routing_input_for(window()))
@@ -2543,15 +2591,19 @@ void Internals::set_geolocation_emulated_position(double latitude, double longit
 // Every position request then fails with POSITION_UNAVAILABLE, as it does when no position can be found.
 void Internals::set_geolocation_emulated_position_unavailable()
 {
-    page().set_emulated_position_data(Geolocation::GeolocationPositionError::ErrorCode::PositionUnavailable);
+    page().set_emulated_position_data(Geolocation::GeolocationPositionErrorCode::PositionUnavailable);
 }
 
-GC::Ref<WebIDL::Promise> Internals::request_permission(Utf16String const& name)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> Internals::request_permission(Utf16String const& name)
 {
+    auto permission_name = PermissionsAPI::permission_name_from(name);
+    if (!permission_name.has_value())
+        return WebIDL::SimpleException { .type = WebIDL::SimpleExceptionType::TypeError, .message = Utf16String::formatted("Unknown permission: '{}'", name) };
+
     auto& realm = window().principal_realm();
     auto promise = WebIDL::create_promise_for(window());
     auto& settings = window().associated_document().relevant_settings_object();
-    PermissionsAPI::request_permission_with_user_prompt({ name }, settings, GC::create_function(realm.heap(), GC::captures(realm, promise), [](auto& realm, auto& promise, PermissionsAPI::PermissionState state) {
+    PermissionsAPI::request_permission_with_user_prompt(*permission_name, settings, GC::create_function(realm.heap(), GC::captures(realm, promise), [](auto& realm, auto& promise, PermissionsAPI::PermissionState state) {
         HTML::TemporaryExecutionContext execution_context { realm };
         WebIDL::resolve_promise(realm, promise, JS::PrimitiveString::create(realm.vm(), Bindings::idl_enum_to_string(state)));
     }));
@@ -2640,6 +2692,16 @@ void Internals::dismiss_notification_for_testing(NotificationsAPI::Notification&
     page().client().page_did_request_dismiss_notification_for_testing(notification.id_for_testing());
 }
 
+void Internals::hold_next_notification_show_for_testing()
+{
+    page().client().page_did_request_hold_next_notification_show_for_testing();
+}
+
+void Internals::fail_held_notification_show_for_testing()
+{
+    page().client().page_did_request_fail_held_notification_show_for_testing();
+}
+
 bool Internals::html_parser_body_is_exhausted(DOM::Document& document)
 {
     auto parser = document.parser();
@@ -2654,6 +2716,90 @@ bool Internals::media_element_is_fetching(HTML::HTMLMediaElement& element)
 bool Internals::media_element_is_playing_audio(HTML::HTMLMediaElement& element)
 {
     return element.is_playing_audio();
+}
+
+GC::Ref<WebIDL::Promise> Internals::wait_for_media_session_artwork()
+{
+    auto promise = WebIDL::create_promise_for(window());
+    window().page().active_media_session_tracker().when_artwork_settled(promise);
+    return promise;
+}
+
+static WebIDL::ExceptionOr<Bindings::MediaSessionActionDetails> media_session_action_details(HTML::Window& window, Bindings::MediaSessionAction action, GC::Ptr<JS::Object> details)
+{
+    auto& realm = HTML::relevant_realm(window);
+    auto& vm = window.vm();
+    auto dictionary = JS::Object::create(realm, nullptr);
+    dictionary->define_direct_property("action"_utf16_fly_string, JS::PrimitiveString::create(vm, Bindings::idl_enum_to_string(action)), JS::default_attributes);
+    if (details) {
+        for (auto const& name : { "seekOffset"_utf16_fly_string, "seekTime"_utf16_fly_string, "fastSeek"_utf16_fly_string })
+            dictionary->define_direct_property(name, TRY(details->get(name)), JS::default_attributes);
+    }
+    return TRY(Bindings::convert_to_idl_value_for_media_session_action_details(vm, dictionary));
+}
+
+WebIDL::ExceptionOr<void> Internals::trigger_media_session_action(Bindings::MediaSessionAction action, GC::Ptr<JS::Object> details)
+{
+    auto converted = TRY(media_session_action_details(window(), action, details));
+    window().page().handle_media_session_action(action, converted.seek_offset, converted.seek_time, converted.fast_seek);
+    return {};
+}
+
+WebIDL::ExceptionOr<void> Internals::trigger_now_playing_action_for_testing(Bindings::MediaSessionAction action, GC::Ptr<JS::Object> details)
+{
+    auto converted = TRY(media_session_action_details(window(), action, details));
+    window().page().client().page_did_trigger_now_playing_action_for_testing(action, converted.seek_offset, converted.seek_time, converted.fast_seek);
+    return {};
+}
+
+static JS::Value media_session_state_to_js_value(HTML::Window& window, Optional<Web::MediaSession::MediaSessionState> const& state)
+{
+    auto& vm = window.vm();
+    if (!state.has_value())
+        return JS::js_null();
+
+    auto& realm = HTML::relevant_realm(window);
+    auto object = JS::Object::create(realm, realm.intrinsics().object_prototype());
+    object->define_direct_property("activationCounter"_utf16_fly_string, JS::Value(state->activation_counter), JS::default_attributes);
+    object->define_direct_property("title"_utf16_fly_string, JS::PrimitiveString::create(vm, Utf16String::from_utf8(state->title)), JS::default_attributes);
+    object->define_direct_property("artist"_utf16_fly_string, JS::PrimitiveString::create(vm, Utf16String::from_utf8(state->artist)), JS::default_attributes);
+    object->define_direct_property("album"_utf16_fly_string, JS::PrimitiveString::create(vm, Utf16String::from_utf8(state->album)), JS::default_attributes);
+    object->define_direct_property("playbackState"_utf16_fly_string, JS::PrimitiveString::create(vm, Bindings::idl_enum_to_string(state->playback_state)), JS::default_attributes);
+
+    JS::Value artwork = JS::js_null();
+    if (state->artwork) {
+        auto artwork_object = JS::Object::create(realm, realm.intrinsics().object_prototype());
+        artwork_object->define_direct_property("width"_utf16_fly_string, JS::Value(state->artwork->width()), JS::default_attributes);
+        artwork_object->define_direct_property("height"_utf16_fly_string, JS::Value(state->artwork->height()), JS::default_attributes);
+        artwork = artwork_object;
+    }
+    object->define_direct_property("artwork"_utf16_fly_string, artwork, JS::default_attributes);
+
+    JS::Value position = JS::js_null();
+    if (state->position.has_value()) {
+        auto position_object = JS::Object::create(realm, realm.intrinsics().object_prototype());
+        position_object->define_direct_property("duration"_utf16_fly_string, JS::Value(state->position->duration), JS::default_attributes);
+        position_object->define_direct_property("playbackRate"_utf16_fly_string, JS::Value(state->position->playback_rate), JS::default_attributes);
+        position_object->define_direct_property("position"_utf16_fly_string, JS::Value(state->position->position), JS::default_attributes);
+        position = position_object;
+    }
+    object->define_direct_property("position"_utf16_fly_string, position, JS::default_attributes);
+
+    auto actions = MUST(JS::Array::create(realm, 0));
+    for (size_t i = 0; i < state->supported_actions.size(); ++i)
+        MUST(actions->create_data_property_or_throw(i, JS::PrimitiveString::create(vm, Bindings::idl_enum_to_string(state->supported_actions[i]))));
+    object->define_direct_property("supportedActions"_utf16_fly_string, actions, JS::default_attributes);
+    return object;
+}
+
+JS::Value Internals::active_media_session_state()
+{
+    return media_session_state_to_js_value(window(), window().page().active_media_session_tracker().compute_state());
+}
+
+JS::Value Internals::now_playing_state_for_testing()
+{
+    return media_session_state_to_js_value(window(), window().page().client().page_did_request_now_playing_state_for_testing());
 }
 
 bool Internals::document_is_playing_audio(DOM::Document& document)
@@ -3104,6 +3250,39 @@ void Internals::force_parallel_layout()
     Layout::RustFFI::render_state_force_parallel_layout(window().associated_document().layout_node_arena().host());
 }
 
+// The bytes of the objects script sees of an animation and of its associated effect, beside their records. Defined in
+// Bindings/Rust/src/animations/animation.rs.
+extern "C" size_t web_animation_object_memory_size(Animations::RustFFI::AnimationCell const*);
+
+// NB: The Animation objects of the animations associated with the document's elements, which a CSS animation or
+//     transition only has once script asks for it.
+static u64 animation_object_bytes(DOM::Document& document)
+{
+    u64 bytes = 0;
+    document.for_each_in_inclusive_subtree_of_type<DOM::Element>([&](DOM::Element& element) {
+        for (auto const& animation : element.associated_animations_unordered())
+            bytes += web_animation_object_memory_size(&animation.record());
+        return TraversalDecision::Continue;
+    });
+    return bytes;
+}
+
+// NB: The records animations and their effects keep their state in, the keyframe sets they run, each counted once
+//     however many effects share it, and each element's lists of its animations and transitions.
+static u64 animation_record_bytes(DOM::Document& document)
+{
+    u64 bytes = 0;
+    HashTable<Animations::RustFFI::KeyframeSet const*> counted_keyframe_sets;
+    document.for_each_in_inclusive_subtree_of_type<DOM::Element>([&](DOM::Element& element) {
+        bytes += element.animation_record_memory_size([](void* context, Animations::RustFFI::KeyframeSet const* keyframe_set) {
+            return static_cast<HashTable<Animations::RustFFI::KeyframeSet const*>*>(context)->set(keyframe_set) == HashSetResult::InsertedNewEntry;
+        },
+            &counted_keyframe_sets);
+        return TraversalDecision::Continue;
+    });
+    return bytes;
+}
+
 GC::Ref<JS::Object> Internals::style_memory_report()
 {
     auto& document = window().associated_document();
@@ -3142,6 +3321,8 @@ GC::Ref<JS::Object> Internals::style_memory_report()
     });
     define(*owners, "cppInstalledStyles"sv, installed_style_bytes);
     define(*owners, "cppHintProperties"sv, hint_bytes);
+    define(*owners, "animationObjects"sv, animation_object_bytes(document));
+    define(*owners, "animationRecords"sv, animation_record_bytes(document));
 
     auto object = JS::Object::create(realm, nullptr);
     object->define_direct_property("owners"_utf16_fly_string, owners, JS::default_attributes);

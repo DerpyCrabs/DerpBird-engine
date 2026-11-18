@@ -12,7 +12,7 @@
 #include <LibGfx/GradientInterpolation.h>
 #include <LibGfx/Matrix4x4.h>
 #include <LibGfx/TextLayout.h>
-#include <LibWeb/Animations/DocumentTimeline.h>
+#include <LibWeb/Animations/RecordHandles.h>
 #include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
 #include <LibWeb/CSS/VisualViewport.h>
@@ -244,7 +244,7 @@ static void push_debug_description(DOM::Document const& document, Compositing::R
     Layout::RustFFI::layout_arena_paint_push_bytes(description_sink, bytes.data(), bytes.size());
 }
 
-Utf16String serialize_painting_dump(Layout::BegunRead const& read, DOM::Document const& document)
+Utf16String serialize_painting_dump(Layout::BegunRead const& read, DOM::Document const& document, DisplayListDumpOptions const& options)
 {
     struct DumpContext {
         GC::Ref<DOM::Document const> document;
@@ -255,10 +255,37 @@ Utf16String serialize_painting_dump(Layout::BegunRead const& read, DOM::Document
         .context = &context,
         .debug_description = [](void* context_pointer, Compositing::RustFFI::NodeSlotId slot, void* description_sink) { push_debug_description(*static_cast<DumpContext*>(context_pointer)->document, slot, description_sink); },
         .append_text = [](void* context_pointer, u8 const* bytes, size_t byte_count) { static_cast<DumpContext*>(context_pointer)->dump = Utf16String::from_utf8_without_validation(StringView { bytes, byte_count }); },
+        .describe_font = [](void*, void const* font_pointer, void* description_sink) {
+            auto const& font = *static_cast<Gfx::Font const*>(font_pointer);
+            auto description = ByteString::formatted("{} {}px {}", font.family(), font.pixel_size(), font.weight());
+            Layout::RustFFI::layout_arena_paint_push_bytes(description_sink, reinterpret_cast<u8 const*>(description.characters()), description.length()); },
     };
     Gfx::IntRect device_viewport_rect { {}, document.page().css_to_device_rect(document.viewport_rect()).size().to_type<int>() };
-    Layout::RustFFI::painting_dump(document_host(document), &read, viewport_row_slot(read, document), device_viewport_rect, callbacks);
+    Layout::RustFFI::FfiDisplayListDumpOptions ffi_options {
+        .owners = options.owners,
+        .text = options.text,
+        .fonts = options.fonts,
+        .record_ids = options.record_ids,
+        .chunks = options.chunks,
+        .raw_node_indices = options.raw_node_indices,
+        .jsonl = options.jsonl,
+    };
+    Layout::RustFFI::painting_dump(document_host(document), &read, viewport_row_slot(read, document), device_viewport_rect, ffi_options, callbacks);
     return move(context.dump);
+}
+
+Utf16String display_list_dump_changes(Optional<StringView> previous_jsonl, StringView jsonl)
+{
+    Utf16String changes;
+    Layout::RustFFI::painting_dump_changes(
+        previous_jsonl.has_value() ? reinterpret_cast<u8 const*>(previous_jsonl->characters_without_null_termination()) : nullptr,
+        previous_jsonl.has_value() ? previous_jsonl->length() : 0,
+        previous_jsonl.has_value(),
+        reinterpret_cast<u8 const*>(jsonl.characters_without_null_termination()),
+        jsonl.length(),
+        &changes,
+        [](void* context, u8 const* bytes, size_t byte_count) { *static_cast<Utf16String*>(context) = Utf16String::from_utf8_without_validation(StringView { bytes, byte_count }); });
+    return changes;
 }
 
 static void append_bytes_to_string_builder(void* context, u8 const* bytes, size_t byte_count)
@@ -427,7 +454,7 @@ void take_recording_trace_if_pending(Layout::BegunRead const& read, DOM::Documen
 // update's never show them before it.
 static double rendering_update_timestamp(DOM::Document& document)
 {
-    if (auto time = document.timeline()->current_time(); time.has_value() && time->type == Animations::TimeValue::Type::Milliseconds)
+    if (auto time = document.timeline().current_time(); time.has_value() && time->type == Animations::RustFFI::TimeValueType::Milliseconds)
         return time->value;
     return -AK::Infinity<double>;
 }
@@ -538,6 +565,9 @@ Optional<DisplayListRecording> start_rust_display_list_recording(Layout::BegunRe
     inputs.force_dark_foreground_threshold = config.force_dark_foreground_threshold;
     inputs.force_dark_background_threshold = config.force_dark_background_threshold;
     inputs.should_paint_overlay = config.paint_overlay;
+    inputs.records_in_finest_runs = config.records_in_finest_runs;
+    inputs.records_whole_document = config.records_whole_document;
+    inputs.notes_record_origins = config.notes_record_origins;
     inputs.has_blocking_wheel_event_region_covering_viewport = wheel_event_region_state.has_blocking_wheel_event_region_covering_viewport;
     inputs.wheel_event_listener_state_generation = document.page().wheel_event_listener_state_generation();
     inputs.chrome_metrics = document.page().chrome_metrics();
@@ -565,6 +595,7 @@ Optional<DisplayListRecording> start_rust_display_list_recording(Layout::BegunRe
         if (auto schemes = document.supported_color_schemes(); schemes.has_value())
             inputs.document_supports_light_or_dark = schemes->contains_slow("light"_utf16) || schemes->contains_slow("dark"_utf16);
         inputs.image_fallback_color_scheme = to_underlying(document.svg_image_color_scheme().value_or(document.page().preferred_color_scheme()));
+        inputs.records_without_visual_contexts = document.is_decoded_svg() && !document.decoded_svg_holds_foreign_content();
         // The AT focus ring paints as an outline on one paintable, whether or not that element has a CSS outline of
         // its own. So the recorder learns which paintable that is here, up front — its paint-phase mask would
         // otherwise skip that paintable's outline phase as empty.

@@ -23,6 +23,7 @@ MemoryCache::MemoryCache(NonnullRefPtr<MemoryCacheUsage> usage)
 MemoryCache::~MemoryCache()
 {
     for (auto const& it : m_complete_entries) {
+        m_usage->bytes_in_memory -= it.key.url.byte_count() + it.key.method.byte_count();
         for (auto const& entry : it.value)
             remove_from_usage(entry);
     }
@@ -215,7 +216,11 @@ void MemoryCache::finalize_entry(URL::URL const& url, StringView method, HeaderL
 
     remove_complete_entries(cache_key, [&](auto const& entry) { return entry.vary_key == cache_entry->vary_key; });
     add_to_usage(*cache_entry);
-    m_complete_entries.ensure(cache_key).append(cache_entry.release_value());
+    auto& entries = m_complete_entries.ensure(cache_key, [&] {
+        m_usage->bytes_in_memory += cache_key.url.byte_count() + cache_key.method.byte_count();
+        return Vector<Entry> {};
+    });
+    entries.append(cache_entry.release_value());
 }
 
 void MemoryCache::abandon_entry(URL::URL const& url, StringView method, HeaderList const& request_headers, HeaderList const& received_response_headers, StoredResponse stored_response)
@@ -237,7 +242,7 @@ void MemoryCache::abandon_entry(URL::URL const& url, StringView method, HeaderLi
         remove_complete_entries(cache_key, [&](auto const& entry) { return entry_matches_request(request_headers, entry); });
 }
 
-Optional<MemoryCache::Entry> MemoryCache::take_pending_entry(u64 cache_key, Optional<u64> vary_key)
+Optional<MemoryCache::Entry> MemoryCache::take_pending_entry(CacheKey const& cache_key, Optional<CacheDigest> const& vary_key)
 {
     auto cache_entries = m_pending_entries.get(cache_key);
     if (!cache_entries.has_value())
@@ -272,7 +277,7 @@ void MemoryCache::invalidate(URL::URL const& url)
     }
 }
 
-void MemoryCache::remove_complete_entries(u64 cache_key, Function<bool(Entry const&)> const& predicate)
+void MemoryCache::remove_complete_entries(CacheKey const& cache_key, Function<bool(Entry const&)> const& predicate)
 {
     auto cache_entries = m_complete_entries.get(cache_key);
     if (!cache_entries.has_value())
@@ -284,8 +289,10 @@ void MemoryCache::remove_complete_entries(u64 cache_key, Function<bool(Entry con
         remove_from_usage(entry);
         return true;
     });
-    if (cache_entries->is_empty())
+    if (cache_entries->is_empty()) {
+        m_usage->bytes_in_memory -= cache_key.url.byte_count() + cache_key.method.byte_count();
         m_complete_entries.remove(cache_key);
+    }
 }
 
 Vector<MemoryCache::EntryUse> MemoryCache::complete_entry_uses() const
@@ -298,9 +305,9 @@ Vector<MemoryCache::EntryUse> MemoryCache::complete_entry_uses() const
     return uses;
 }
 
-void MemoryCache::evict_complete_entry(u64 cache_key, u64 vary_key)
+void MemoryCache::evict_complete_entry(CacheKey const& cache_key, CacheDigest const& vary_key)
 {
-    dbgln_if(HTTP_MEMORY_CACHE_DEBUG, "\033[37m[memory]\033[0m \033[33;1mEvicted cache entry\033[0m {}", cache_key);
+    dbgln_if(HTTP_MEMORY_CACHE_DEBUG, "\033[37m[memory]\033[0m \033[33;1mEvicted cache entry\033[0m {}", cache_key.url);
     remove_complete_entries(cache_key, [&](auto const& entry) { return entry.vary_key == vary_key; });
 }
 

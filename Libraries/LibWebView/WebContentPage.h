@@ -301,12 +301,15 @@ private:
     virtual void did_request_click_notification_for_testing(u64 notification_id) override;
     virtual void did_request_click_notification_by_id_for_testing(u64 browser_notification_id) override;
     virtual void did_request_dismiss_notification_for_testing(u64 notification_id) override;
+    virtual void did_request_hold_next_notification_show_for_testing() override;
+    virtual void did_request_fail_held_notification_show_for_testing() override;
     virtual void did_request_file_picker(Web::HTML::FileFilter accepted_file_types, Web::HTML::AllowMultipleFiles allow_multiple_files) override;
     virtual void did_finish_handling_input_event(u64 event_id, Web::EventResult event_result) override;
     virtual void did_update_input_method_state(Optional<Web::DevicePixelRect> caret_rect, bool is_enabled, i32 cursor_position, i32 anchor_position, Utf16String text_before_cursor, Utf16String text_after_cursor) override;
     virtual void did_change_theme_color(Gfx::Color color) override;
     virtual void did_change_background_color(Gfx::Color color) override;
     virtual void did_insert_clipboard_item(Web::Clipboard::SystemClipboardItem item, String, Optional<Web::HTML::CrossProcessId> writing_document_id) override;
+    virtual void did_change_media_session_state(Optional<Web::MediaSession::MediaSessionState>) override;
     virtual void did_change_screen_wake_lock_state(Web::ScreenWakeLockState wake_lock_state) override;
     virtual void did_start_using_gamepads() override;
     virtual void did_update_session_history_entry_navigation_api_state(Web::HTML::CrossProcessId navigable_id, Web::HTML::SessionHistoryEntryIdentity entry_identity, Web::HTML::StorageSerializationRecord navigation_api_state) override;
@@ -415,6 +418,8 @@ private:
     virtual void did_simulate_worker_request_server_connection_loss() override;
     Messages::WebContentTestClient::DidRequestUiProcessSessionHistoryForTestingResponse did_request_ui_process_session_history_for_testing();
     Messages::WebContentTestClient::DidRequestSiteIsolationProcessTreeForTestingResponse did_request_site_isolation_process_tree_for_testing();
+    Messages::WebContentTestClient::DidRequestNowPlayingStateForTestingResponse did_request_now_playing_state_for_testing();
+    virtual void trigger_now_playing_action_for_testing(Web::Bindings::MediaSessionAction action, Optional<double> seek_offset, Optional<double> seek_time, Optional<bool> fast_seek) override;
     Messages::WebContentTestClient::DidRequestTabIsPlayingAudioForTestingResponse did_request_tab_is_playing_audio_for_testing();
     Messages::WebContentTestClient::DidRequestTabIsHeardPlayingAudioForTestingResponse did_request_tab_is_heard_playing_audio_for_testing();
     Messages::WebContentTestClient::DidRequestTabIsUsingMicrophoneForTestingResponse did_request_tab_is_using_microphone_for_testing();

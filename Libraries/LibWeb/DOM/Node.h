@@ -447,6 +447,8 @@ public:
         Type type {};
         GC::Ref<Node> node;
         AffectsElements affects_elements { AffectsElements::No };
+        // For a removal, the sibling that was before the removed node, if any.
+        GC::Ptr<Node> old_previous_sibling {};
     };
     // FIXME: It would be good if we could always provide this metadata for use in optimizations.
     virtual void children_changed(ChildrenChangedMetadata const&) { }
@@ -625,8 +627,6 @@ public:
     bool is_inert() const;
 
     bool has_inclusive_ancestor_with_display_none_ignoring_animations() const;
-    bool has_inclusive_ancestor_with_event_listener(Utf16FlyString const& type) const;
-
     GC::Ptr<ShadowRoot> containing_shadow_root();
     GC::Ptr<ShadowRoot const> containing_shadow_root() const
     {

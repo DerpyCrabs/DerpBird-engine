@@ -18,12 +18,11 @@
 #include <LibGC/Heap.h>
 #include <LibGC/RootVector.h>
 #include <LibJS/Runtime/ExternalMemory.h>
-#include <LibWeb/Animations/Animation.h>
+#include <LibWeb/Animations/RecordHandles.h>
 #include <LibWeb/Bindings/Node.h>
 #include <LibWeb/Bindings/Sanitizer.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/CountersSet.h>
-#include <LibWeb/CSS/GeneratedContent.h>
 #include <LibWeb/CSS/Invalidation/ElementStateInvalidator.h>
 #include <LibWeb/CSS/Invalidation/LanguageInvalidator.h>
 #include <LibWeb/CSS/Invalidation/PseudoClassInvalidator.h>
@@ -1682,7 +1681,7 @@ void Node::remove(bool suppress_observers)
     auto affects_elements = ChildrenChangedMetadata::AffectsElements::No;
     if (document().has_valid_html_collection_caches())
         affects_elements = mutation_affects_elements(*this);
-    ChildrenChangedMetadata metadata { ChildrenChangedMetadata::Type::Removal, *this, affects_elements };
+    ChildrenChangedMetadata metadata { ChildrenChangedMetadata::Type::Removal, *this, affects_elements, old_previous_sibling };
     parent->children_changed(metadata);
     parent->invalidate_html_collection_caches_in_ancestors(affects_elements);
 
@@ -2756,6 +2755,11 @@ void Node::removed_from(IsSubtreeRoot, Node* old_parent, Node&)
     m_is_connected = false;
     m_in_editable_subtree = false;
 
+    // The nodes of a shadow tree count the versions of their tree on the document while they are connected, and on
+    // their shadow root otherwise. The shadow root has missed every change made in the meantime, so it starts over.
+    if (auto* shadow_root = as_if<ShadowRoot>(*this))
+        shadow_root->m_dom_tree_version = shadow_root->m_character_data_version = ++s_last_tree_version;
+
     // https://html.spec.whatwg.org/multipage/infrastructure.html#dom-trees:concept-node-remove-ext
     // 1. Let document be removedNode's node document.
     auto& document = this->document();
@@ -3105,9 +3109,21 @@ u16 Node::compare_document_position(GC::Ptr<Node> other)
 
         // 2. If attr1 and node1 are non-null, and node2 is node1, then:
         if (attr1 && node1 && node2 == node1) {
-            // FIXME: 1. For each attr of node2’s attribute list:
-            //     1. If attr equals attr1, then return the result of adding DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC and DOCUMENT_POSITION_PRECEDING.
-            //     2. If attr equals attr2, then return the result of adding DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC and DOCUMENT_POSITION_FOLLOWING.
+            // 1. For each attr of node2’s attribute list:
+            auto const& element = as<Element>(*node2);
+            for (size_t i = 0; i < element.attribute_list_size(); ++i) {
+                auto const* attr = element.attributes()->item(i).ptr();
+
+                // 1. If attr equals attr1, then return the result of adding DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC
+                //    and DOCUMENT_POSITION_PRECEDING.
+                if (attr == attr1)
+                    return DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC | DOCUMENT_POSITION_PRECEDING;
+
+                // 2. If attr equals attr2, then return the result of adding DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC
+                //    and DOCUMENT_POSITION_FOLLOWING.
+                if (attr == attr2)
+                    return DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC | DOCUMENT_POSITION_FOLLOWING;
+            }
         }
     }
 
@@ -4859,17 +4875,6 @@ bool Node::has_inclusive_ancestor_with_display_none_ignoring_animations() const
             return true;
         ancestor = ancestor_element->element_to_inherit_style_from({}).ptr();
     }
-    return false;
-}
-
-bool Node::has_inclusive_ancestor_with_event_listener(Utf16FlyString const& type) const
-{
-    for (auto const* ancestor = this; ancestor; ancestor = ancestor->parent_or_shadow_host()) {
-        if (ancestor->has_event_listener(type))
-            return true;
-    }
-    if (auto window = document().window())
-        return window->has_event_listener(type);
     return false;
 }
 

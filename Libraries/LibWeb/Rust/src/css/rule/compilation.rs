@@ -1415,9 +1415,7 @@ mod tests {
         assert_eq!(compiled.get(), 1);
         use crate::css::rule::FfiRuleTraversalOrder;
         use crate::css::rule::function::{CompiledFunction, rust_rule_view_compile_function};
-        use crate::css::rule::read::{
-            NativeRuleView, rust_rule_view_keyframes, rust_rule_view_property, rust_rule_view_type,
-        };
+        use crate::css::rule::read::{NativeRuleView, rust_rule_view_property, rust_rule_view_type};
         use std::sync::Arc;
         #[derive(Default)]
         struct Definitions {
@@ -1427,16 +1425,6 @@ mod tests {
             descriptors: std::cell::Cell<usize>,
             font_features: std::cell::Cell<usize>,
         }
-        unsafe extern "C" fn frame(
-            context: *const c_void,
-            _: *const f64,
-            count: usize,
-            _: *const crate::css::declaration_block::DeclarationBlockHeader,
-        ) {
-            assert_eq!(count, 1);
-            let definitions = unsafe { &*context.cast::<Definitions>() };
-            definitions.keyframes.set(definitions.keyframes.get() + 1);
-        }
         unsafe extern "C" fn definition(context: *const c_void, rule: &NativeRuleView<'_>, _: FfiUtf16View) {
             let definitions = unsafe { &*context.cast::<Definitions>() };
             match rust_rule_view_type(rule) {
@@ -1444,9 +1432,10 @@ mod tests {
                     .functions
                     .borrow_mut()
                     .push(unsafe { Arc::from_raw(rust_rule_view_compile_function(rule)) }),
-                NativeRuleType::Keyframes => unsafe {
-                    rust_rule_view_keyframes(rule, context, frame);
-                },
+                NativeRuleType::Keyframes => rule.for_each_keyframe(|keys, _| {
+                    assert_eq!(keys.len(), 1);
+                    definitions.keyframes.set(definitions.keyframes.get() + 1);
+                }),
                 NativeRuleType::Property => {
                     assert!(!rust_rule_view_property(rule).is_null());
                     definitions.properties.set(definitions.properties.get() + 1);
@@ -1658,21 +1647,15 @@ mod tests {
 
     #[test]
     fn native_removal_validation_preserves_the_rule_list() {
-        use crate::css::rule::{RuleRemovalResult, rust_rule_list_remove, rust_rule_list_validate_removal};
+        use crate::css::rule::{RuleRemovalResult, rust_rule_list_remove};
         let sheet = sheet("@namespace p url(urn:p); div {}");
         let rules = sheet.rules();
-        assert_eq!(
-            rust_rule_list_validate_removal(rules, 2),
-            RuleRemovalResult::IndexSizeError
-        );
-        assert_eq!(
-            rust_rule_list_validate_removal(rules, 0),
-            RuleRemovalResult::InvalidStateError
-        );
+        assert_eq!(rules.validate_removal(2), RuleRemovalResult::IndexSizeError);
+        assert_eq!(rules.validate_removal(0), RuleRemovalResult::InvalidStateError);
         assert_eq!(rules.materialized_rules().len(), 2);
-        assert_eq!(rust_rule_list_validate_removal(rules, 1), RuleRemovalResult::Success);
+        assert_eq!(rules.validate_removal(1), RuleRemovalResult::Success);
         rust_rule_list_remove(rules, 1);
-        assert_eq!(rust_rule_list_validate_removal(rules, 0), RuleRemovalResult::Success);
+        assert_eq!(rules.validate_removal(0), RuleRemovalResult::Success);
     }
 
     #[test]

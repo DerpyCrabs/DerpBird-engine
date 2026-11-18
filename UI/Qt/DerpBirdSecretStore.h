@@ -32,6 +32,21 @@ public:
         auto* bytes = secret_value_get(m_value, &length);
         return { reinterpret_cast<u8 const*>(bytes), length };
     }
+    bool matches(DerpBirdSecret const& other) const
+    {
+        auto left = bytes();
+        auto right = other.bytes();
+        if (left.size() != right.size())
+            return false;
+        // Read every byte even when an earlier pair already differs.
+        u8 const volatile* left_data = left.data();
+        u8 const volatile* right_data = right.data();
+        u8 difference = 0;
+        for (size_t i = 0; i < left.size(); ++i)
+            difference |= left_data[i] ^ right_data[i];
+        return difference == 0;
+    }
+
 private:
     void clear() { if (m_value) secret_value_unref(exchange(m_value, nullptr)); }
     SecretValue* m_value;

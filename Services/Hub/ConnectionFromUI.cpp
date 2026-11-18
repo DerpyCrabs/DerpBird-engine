@@ -23,6 +23,7 @@
 #include <LibWebView/ReportSubmission.h>
 #include <LibWebView/Settings.h>
 #include <LibWebView/TabPerformanceMonitor.h>
+#include <LibWebView/UpdateCheck.h>
 #include <LibWebView/WebCompatReport.h>
 #include <LibWebView/WebUI/ApplicationWebUI.h>
 
@@ -359,6 +360,11 @@ void ConnectionFromUI::system_time_zone_changed()
     });
 }
 
+void ConnectionFromUI::media_session_action(Web::Bindings::MediaSessionAction action, Optional<double> seek_offset, Optional<double> seek_time, Optional<bool> fast_seek)
+{
+    Application::the().media_session_coordinator().handle_action(action, seek_offset, seek_time, fast_seek);
+}
+
 void ConnectionFromUI::notification_shown(u64 id)
 {
     NotificationBackendInUI::did_show_remote(id);
@@ -669,6 +675,18 @@ void ConnectionFromUI::stop_request(u64 request_id)
 {
     if (auto request = m_requests.take(request_id); request.has_value())
         (*request)->stop();
+}
+
+void ConnectionFromUI::check_for_updates(WebView::UpdateCheckTrigger trigger)
+{
+    if (auto* update_checker = Application::the().update_checker())
+        update_checker->check(trigger);
+}
+
+void ConnectionFromUI::skip_update_version(String version)
+{
+    if (auto* update_checker = Application::the().update_checker())
+        update_checker->skip_version(version);
 }
 
 void ConnectionFromUI::toggle_devtools_enabled()

@@ -222,7 +222,7 @@ interface Internals {
     // position.
     boolean recordedDisplayListBlocksWheelEventAt(double x, double y);
     [ImplementedAs=recorded_async_scrolling_state_object] object recordedAsyncScrollingState();
-    undefined recordDisplayListForTesting(optional boolean paintOverlay = false, optional boolean cold = false);
+    undefined recordDisplayListForTesting(optional boolean paintOverlay = false, optional boolean cold = false, optional boolean finestRuns = false);
     undefined setAutoplayPolicy(DOMString policy);
 
     DOMString getComputedRole(Element element);
@@ -249,7 +249,9 @@ interface Internals {
     readonly attribute boolean needsDisplayListRecord;
     readonly attribute boolean hasAnimationFrameCallbacks;
 
-    DOMString dumpDisplayList();
+    DOMString dumpDisplayList(optional DisplayListDumpOptions options = {});
+    // What changed in the display list since the previous call for the document, which the first call only summarizes.
+    DOMString dumpDisplayListChanges(optional DisplayListDumpOptions options = {});
     DOMString dumpAccessibilityTree();
     // The per-character offsets that the accessibility tree reports for a text node, as space-separated "x,y" pairs.
     DOMString accessibilityCharacterOffsets(Node node);
@@ -336,6 +338,10 @@ interface Internals {
     undefined clickNotificationForTesting(Notification notification);
     undefined clickNotificationByIdForTesting(unsigned long long browserNotificationId);
     undefined dismissNotificationForTesting(Notification notification);
+    // Makes the platform hold the next notification the page shows, neither showing nor closing it, until it's told to
+    // refuse it.
+    undefined holdNextNotificationShowForTesting();
+    undefined failHeldNotificationShowForTesting();
 
     InternalGamepad connectVirtualGamepad();
 
@@ -489,6 +495,11 @@ interface Internals {
     object imageAnimationStateForURL(USVString url);
     boolean mediaElementIsFetching(HTMLMediaElement element);
     boolean mediaElementIsPlayingAudio(HTMLMediaElement element);
+    any activeMediaSessionState();
+    any nowPlayingStateForTesting();
+    undefined triggerNowPlayingActionForTesting(MediaSessionAction action, optional object? details = null);
+    Promise<undefined> waitForMediaSessionArtwork();
+    undefined triggerMediaSessionAction(MediaSessionAction action, optional object? details = null);
     boolean documentIsPlayingAudio(Document document);
     // Whether the UI process shows this window's tab as playing audio: while the AudioServer has recently heard the tab,
     // and for a while after.
@@ -531,6 +542,7 @@ interface Internals {
 
 enum InternalsNavigatorCompatibilityMode { "chrome", "gecko", "webkit" };
 enum SpellingMenuItem { "none", "guess", "ignore", "learn" };
+enum DisplayListDumpFormat { "text", "jsonl" };
 enum ScrollGesturePhase { "none", "ongoing", "momentum", "ended" };
 enum MouseEventThroughUIProcessType { "mousedown", "mouseup", "mousemove", "mouseleave" };
 
@@ -538,6 +550,16 @@ dictionary StyleRecordsDumpOptions {
     boolean customPropertyEnvironments = false;
     boolean layout = false;
     boolean groups = false;
+};
+
+dictionary DisplayListDumpOptions {
+    boolean owners = true;
+    boolean text = true;
+    boolean fonts = false;
+    boolean recordIds = false;
+    boolean chunks = false;
+    boolean rawNodeIndices = false;
+    DisplayListDumpFormat format = "text";
 };
 
 dictionary LayoutTraceOptions {

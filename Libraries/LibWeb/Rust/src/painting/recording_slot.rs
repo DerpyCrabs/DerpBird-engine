@@ -19,17 +19,17 @@
 use crate::layout::node_data::NodeSlotId;
 use crate::layout::{LayoutNodeArena, RowsVersion};
 use crate::paint_stage::Presenting;
-use crate::painting::display_list_resources::NestedDisplayList;
 use crate::painting::ffi::FfiFlightBlocker;
-use crate::painting::hit_test::HitTestList;
 use crate::painting::paint_read::PaintSource;
 use crate::painting::paint_state::{PendingRecording, PendingRecordingTrace};
 use crate::painting::presentation::Presentation;
-use crate::painting::published_frame::PublishedFrame;
-use crate::painting::record::publish::PresentedOutput;
+use crate::painting::published_frame::{HeldFrame, PublishedFrame};
+use crate::painting::record::change_ticks::RowPaintChange;
+use crate::painting::record::publish::HitTestItemsOnScreen;
 use crate::painting::record::recorder_state::RecorderState;
 use crate::painting::record::vector_images::VectorImageRenderRequest;
 use crate::painting::record::{RecordingInputs, RecordingOutput};
+use crate::painting::vector_image_records::VectorImageRecords;
 use crate::render_state::{LockstepProof, SampledFrame, TaskBoundary};
 use crate::stage_thread::InFlight;
 #[cfg(not(test))]
@@ -47,6 +47,7 @@ pub(crate) struct RecordingJob {
     viewport: NodeSlotId,
     trace_recordings: bool,
     presentation: Option<Presentation>,
+    held_frame: Option<HeldFrame>,
 }
 
 /// What a recording answers: the recorder state it was handed, what it made of what it recorded at
@@ -57,6 +58,7 @@ pub(crate) struct RecordingAnswer {
     rows_version: RowsVersion,
     trace: Option<PendingRecordingTrace>,
     presentation: Option<Presentation>,
+    held_frame: Option<HeldFrame>,
 }
 
 /// What a recording made of what it recorded: nothing, where the document's viewport had no box to
@@ -67,7 +69,7 @@ enum Recorded {
     Nothing,
     Pending(PendingRecording),
     Presented {
-        output: PresentedOutput,
+        output: Arc<RecordingOutput>,
         publishes_recording: bool,
     },
     PresentedUnrecorded,
@@ -92,12 +94,12 @@ impl VectorImageFrame {
         &self.pending.recording.resources.vector_image_render_requests
     }
 
-    /// Presents the frame, recorded with `recorder`, with `display_lists`, those of the SVG images the host rendered, one
-    /// for each of the frame's requests, beside the event loop.
+    /// Presents the frame, recorded with `recorder`, with `vector_images`, the records of the SVG images the host
+    /// rendered, those of each of the frame's requests, beside the event loop.
     pub(crate) fn present(
         self,
         recorder: RecorderState,
-        display_lists: &[Arc<NestedDisplayList>],
+        vector_images: &[Arc<VectorImageRecords>],
         presenting: &mut Presenting,
     ) -> RecordingAnswer {
         let Self {
@@ -107,20 +109,21 @@ impl VectorImageFrame {
             lane,
         } = self;
         let publishes_recording = pending.publishes_recording;
-        let output = present_with_vector_images(&mut presentation, pending, &recorder, presenting, display_lists);
+        let output = present_with_vector_images(&mut presentation, pending, &recorder, presenting, vector_images);
         let recorded = Recorded::Presented {
             output,
             publishes_recording,
         };
-        let answer = RecordingAnswer {
+        let mut answer = RecordingAnswer {
             recorder,
             recorded,
             rows_version,
             trace: None,
             presentation: Some(presentation),
+            held_frame: None,
         };
         if let Some(lane) = lane {
-            lane.deliver(&answer);
+            lane.deliver(&mut answer);
         }
         answer
     }
@@ -148,6 +151,7 @@ impl RecordingAnswer {
             rows_version: RowsVersion::default(),
             trace: None,
             presentation,
+            held_frame: None,
         }
     }
 
@@ -163,6 +167,7 @@ impl RecordingAnswer {
             rows_version,
             trace,
             presentation,
+            held_frame,
         } = self;
         // A recording handed a presentation presented its frame, unless it renders SVG images.
         let (recorded, presentation) = match (recorded, presentation) {
@@ -177,13 +182,21 @@ impl RecordingAnswer {
             ),
             unchanged => unchanged,
         };
+        // The lane of a frame that waits for its SVG images records nothing where the compositor scrolled to.
+        let held_frame = held_frame.filter(|_| !matches!(recorded, Recorded::NeedsVectorImages(_)));
         Self {
             recorder,
             recorded,
             rows_version,
             trace,
             presentation,
+            held_frame,
         }
+    }
+
+    /// Takes the frame this answers, held for its clock lane, if the recording was handed one.
+    pub(crate) fn take_held_frame(&mut self) -> Option<HeldFrame> {
+        self.held_frame.take()
     }
 
     /// Hands `lane` the pieces of the clock lane of the committed frame this answers, once it presented: at once, or
@@ -200,11 +213,10 @@ impl RecordingAnswer {
     /// the frame, and the recording the lane's fork of the render state takes in, if one published. None where the
     /// frame presented nothing a lane starts from.
     pub(crate) fn clock_lane_recorder(&self) -> Option<(RecorderState, Presentation, Option<Arc<RecordingOutput>>)> {
-        let fork_after = |published: Option<&PresentedOutput>| {
+        let fork_after = |published: Option<&Arc<RecordingOutput>>| {
             let mut recorder = self.recorder.fork();
             if let Some(published) = published {
-                recorder.published_hit_test_items = Some(published.published_hit_test_items());
-                recorder.published_recording = Some(published.output.clone());
+                recorder.published_recording = Some(Arc::clone(published));
             }
             recorder
         };
@@ -213,7 +225,7 @@ impl RecordingAnswer {
             Recorded::Presented {
                 output,
                 publishes_recording: true,
-            } => (fork_after(Some(output)), Some(output.output.clone())),
+            } => (fork_after(Some(output)), Some(Arc::clone(output))),
             _ => return None,
         };
         Some((recorder, self.presentation.as_ref()?.for_clock_lane()?, output))
@@ -228,6 +240,7 @@ impl RecordingAnswer {
             rows_version: RowsVersion::default(),
             trace: None,
             presentation: Some(presentation),
+            held_frame: None,
         }
     }
 }
@@ -248,6 +261,7 @@ impl RecordingJob {
             viewport,
             trace_recordings: frozen.trace_recordings,
             presentation,
+            held_frame: frozen.held,
         }
     }
 
@@ -276,22 +290,21 @@ impl RecordingJob {
             viewport,
             trace_recordings,
             mut presentation,
+            held_frame,
         } = self;
         let (pending, trace) = record_frame(frame, &mut recorder, viewport, trace_recordings, inputs);
         // A recording that renders an SVG image the recording published last did not draw leaves its frame for the host
         // to present, which renders it.
-        let vector_image_display_lists = match crate::painting::record::publish::renders_vector_images(&pending) {
+        let rendered_vector_images = match crate::painting::record::publish::renders_vector_images(&pending) {
             false => Some(None),
-            true => {
-                crate::painting::record::publish::published_vector_image_display_lists(&pending, &recorder).map(Some)
-            }
+            true => crate::painting::record::publish::published_vector_image_records(&pending, &recorder).map(Some),
         };
-        let recorded = match (presentation.as_mut(), presenting, vector_image_display_lists) {
-            (Some(presentation), Some(presenting), Some(vector_image_display_lists)) => {
+        let recorded = match (presentation.as_mut(), presenting, rendered_vector_images) {
+            (Some(presentation), Some(presenting), Some(rendered_vector_images)) => {
                 let publishes_recording = pending.publishes_recording;
-                let output = match vector_image_display_lists {
-                    Some(display_lists) => {
-                        present_with_vector_images(presentation, pending, &recorder, presenting, &display_lists)
+                let output = match rendered_vector_images {
+                    Some(vector_images) => {
+                        present_with_vector_images(presentation, pending, &recorder, presenting, &vector_images)
                     }
                     None => present(presentation, pending, &recorder, presenting),
                 };
@@ -308,6 +321,7 @@ impl RecordingJob {
             rows_version,
             trace,
             presentation,
+            held_frame,
         }
     }
 }
@@ -469,6 +483,28 @@ pub(crate) fn yield_claim_hold_for_testing() {
 
 /// Records `frame` of the document's `viewport` with `inputs` and `recorder`, which keeps the inputs of a recording that
 /// publishes, and answers what it recorded, with the trace it left where `trace_recordings` asks for one.
+/// The window a recording of `frame` with `inputs` is made for: none where it records the whole document, the window
+/// of `published`, the recording published last, where that still covers what the frame's viewport shows, or else one
+/// placed where the frame's scrollers are.
+fn window_to_record(
+    frame: &PublishedFrame,
+    inputs: &RecordingInputs,
+    published: Option<&RecordingOutput>,
+) -> Option<Arc<crate::painting::record::window::RecordedWindow>> {
+    if inputs.records_whole_document || inputs.records_without_visual_contexts {
+        return None;
+    }
+    let paint_state = frame.paint_state();
+    let tree = paint_state.visual_context_tree.as_deref()?;
+    Some(crate::painting::record::window::window_of_frame(
+        published.and_then(|published| published.window.as_ref().zip(published.visual_context_tree.as_deref())),
+        tree,
+        inputs.uncaptured.device_viewport_size,
+        inputs.device_pixels_per_css_pixel,
+        paint_state.scroll_own_offsets(),
+    ))
+}
+
 pub(crate) fn record_frame(
     frame: PublishedFrame,
     recorder: &mut RecorderState,
@@ -478,25 +514,23 @@ pub(crate) fn record_frame(
 ) -> (PendingRecording, Option<PendingRecordingTrace>) {
     let RecorderState {
         published_recording,
-        published_hit_test_items,
-        paint_order_tree,
+        published_recording_count,
         scratch,
         absolute_rects,
         published_inputs,
     } = recorder;
     let source = PaintSource::new(&frame, absolute_rects);
-    let (mut recording, publishes_recording) = paint_order_tree.with_access(inputs.publishes_recording, |tree| {
-        crate::painting::record::traversal::record_display_list(
-            &source,
-            scratch,
-            tree,
-            viewport,
-            &inputs,
-            published_recording.clone(),
-            published_hit_test_items.clone(),
-            trace_recordings,
-        )
-    });
+    let publishes_recording = published_recording_count.note_recording(inputs.publishes_recording);
+    let window = window_to_record(&frame, &inputs, published_recording.as_deref());
+    let mut recording = crate::painting::record::traversal::record_display_list(
+        &source,
+        scratch,
+        viewport,
+        &inputs,
+        published_recording.clone(),
+        window,
+        trace_recordings,
+    );
     let output = &mut recording.output;
     output.surface_clear_color = inputs.surface_clear_color;
     output.async_scrolling_metadata = inputs.async_scrolling_metadata.clone().map(|mut metadata| {
@@ -529,29 +563,29 @@ pub(crate) fn present(
     pending: PendingRecording,
     recorder: &RecorderState,
     presenting: &mut Presenting,
-) -> PresentedOutput {
-    let output = PresentedOutput::of(crate::painting::record::publish::publish_to_presenter(
+) -> Arc<RecordingOutput> {
+    let output = Arc::new(crate::painting::record::publish::publish_to_presenter(
         pending, recorder,
     ));
-    presentation.present(&output.output, presenting);
+    presentation.present(&output, presenting);
     output
 }
 
 /// Presents `pending`, which renders SVG images and was recorded with `recorder`, with `presentation`, beside the event
-/// loop, drawing them as `display_lists`, those the host rendered them as, and answers its output.
+/// loop, drawing them as `vector_images`, the records the host rendered them as, and answers its output.
 pub(crate) fn present_with_vector_images(
     presentation: &mut Presentation,
     pending: PendingRecording,
     recorder: &RecorderState,
     presenting: &mut Presenting,
-    display_lists: &[Arc<NestedDisplayList>],
-) -> PresentedOutput {
-    let output = PresentedOutput::of(crate::painting::record::publish::publish_with_vector_images(
+    vector_images: &[Arc<VectorImageRecords>],
+) -> Arc<RecordingOutput> {
+    let output = Arc::new(crate::painting::record::publish::publish_with_vector_images(
         pending,
         recorder,
-        display_lists,
+        vector_images,
     ));
-    presentation.present(&output.output, presenting);
+    presentation.present(&output, presenting);
     output
 }
 
@@ -562,7 +596,6 @@ pub(crate) struct FrameInputs {
     pub(crate) publishes_recording: bool,
     /// The canvas rect the root background painted in the recording published last, if any.
     pub(crate) published_root_background_canvas_rect: Option<crate::css::css_pixels::CssPixelRect>,
-    pub(crate) hit_test_item_capacity_hint: usize,
 }
 
 /// A document's frame, frozen for a recording, with what the recording reads beside it, and the rows version it was
@@ -573,6 +606,8 @@ pub(crate) struct FrozenFrame {
     pub(crate) root_background_source: crate::painting::host::RootBackgroundSource,
     pub(crate) trace_recordings: bool,
     pub(crate) rows_version: crate::layout::RowsVersion,
+    /// The frame again, for the clock lane of a committed frame to keep.
+    pub(crate) held: Option<HeldFrame>,
 }
 
 /// Freezes the frame of the document whose arena `arena` is for a recording of its viewport, or none where the
@@ -598,14 +633,11 @@ pub(crate) fn freeze_recording_frame(arena: &mut LayoutNodeArena, inputs: FrameI
             inputs.css_viewport_rect,
         );
         if canvas_rect != published_canvas_rect {
-            arena.push_paint_damage(root, crate::painting::record::damage::PaintDamage::DRAW_BACKGROUND);
+            arena.note_paint_change(root, RowPaintChange::DRAWING);
         }
     }
-    if inputs.publishes_recording {
-        arena.note_publishing_paint_recording_started();
-    }
     // The recording reads the document as it is now: what the host writes after this goes to the next frame.
-    let frame = arena.freeze_frame(inputs.hit_test_item_capacity_hint);
+    let frame = arena.freeze_frame();
     let rows_version = arena.rows_version();
     let paint_state = arena.paint_state();
     Some(FrozenFrame {
@@ -619,6 +651,7 @@ pub(crate) fn freeze_recording_frame(arena: &mut LayoutNodeArena, inputs: FrameI
             .root_background_source
             .expect("a recording follows paint preparation"),
         trace_recordings: paint_state.trace_recordings,
+        held: None,
     })
 }
 
@@ -678,23 +711,22 @@ pub(crate) enum RecordingLanding {
     /// [`RecordingSlot::take_vector_image_frame`]); it keeps the presentation.
     NeedsVectorImages,
     /// The recording landed after the host wrote the document's rows. What it recorded stands as
-    /// the compositor's frame, whether it presented it or the host does, but not its hit-test list,
-    /// which names boxes that may be gone: the document keeps none.
+    /// the compositor's frame, whether it presented it or the host does, but not what hit testing reads of
+    /// it, as the boxes it shows may be gone.
     LandedBehindRows(Option<Presentation>),
 }
 
-/// What takes in a recording that presented itself: its output, whether the document's hit-test list
-/// changed, and whether the recording publishes.
-pub(crate) type TakeInPresented<'a> = &'a mut dyn FnMut(Arc<RecordingOutput>, bool, bool);
+/// What takes in a recording that presented itself: its output, and whether the recording publishes.
+pub(crate) type TakeInPresented<'a> = &'a mut dyn FnMut(Arc<RecordingOutput>, bool);
 
 /// A recording the host publishes, with what its publication writes of the document's recordings.
 pub(crate) struct Publication<'a> {
     pub(crate) pending: PendingRecording,
-    /// Whether the recording landed after the host wrote the document's rows, so that the hit-test
-    /// list it made names boxes that may be gone.
+    /// Whether the recording landed after the host wrote the document's rows, so that the boxes the
+    /// frame shows may be gone.
     pub(crate) behind_rows: bool,
     pub(crate) recorder: &'a mut RecorderState,
-    pub(crate) hit_test_list: &'a mut Option<HitTestList>,
+    pub(crate) hit_test_items_on_screen: &'a mut HitTestItemsOnScreen,
 }
 
 /// A recording that landed for the host to publish, and whether it landed behind the rows.
@@ -704,8 +736,8 @@ struct PendingPublication {
 }
 
 /// What a document keeps of its recordings: the recording its host is to publish, the trace that
-/// recording left, the recorder state the next recording records with, and the hit-test list of the
-/// last recording published, which hit testing reads.
+/// recording left, the recorder state the next recording records with, and what the hit-test items of
+/// the frame on screen are as of.
 #[derive(Default)]
 pub(crate) struct RecordingSlot {
     pending_recording: Option<PendingPublication>,
@@ -713,7 +745,7 @@ pub(crate) struct RecordingSlot {
     vector_image_frame: Option<SampledFrame<VectorImageFrame>>,
     pending_recording_trace: Option<PendingRecordingTrace>,
     recorder: Recorder,
-    hit_test_list: Option<HitTestList>,
+    hit_test_items_on_screen: HitTestItemsOnScreen,
 }
 
 impl RecordingSlot {
@@ -722,7 +754,7 @@ impl RecordingSlot {
     }
 
     /// The pending recording, for the host to publish, with the recorder state it recorded with and
-    /// the hit-test list it replaces. A recording is pending only once it has landed.
+    /// what the frame it replaces on screen placed. A recording is pending only once it has landed.
     pub(crate) fn take_publication(&mut self) -> Option<Publication<'_>> {
         let Recorder::Here(recorder) = &mut self.recorder else {
             return None;
@@ -732,7 +764,7 @@ impl RecordingSlot {
             pending,
             behind_rows,
             recorder,
-            hit_test_list: &mut self.hit_test_list,
+            hit_test_items_on_screen: &mut self.hit_test_items_on_screen,
         })
     }
 
@@ -755,14 +787,10 @@ impl RecordingSlot {
         matches!(self.recorder, Recorder::InFlight(_))
     }
 
-    /// The hit-test list of the last recording published, if any was.
-    pub(crate) fn hit_test_list(&mut self) -> &mut Option<HitTestList> {
-        &mut self.hit_test_list
-    }
-
-    /// How many items the next recording's hit-test list may hold, going by the last one's.
-    pub(crate) fn hit_test_item_capacity_hint(&self) -> usize {
-        self.hit_test_list.as_ref().map_or(0, |list| list.items.len())
+    /// The generation of the hit-test items of the frame on screen, which moves on whenever a frame places other
+    /// items, or zero where no frame stands.
+    pub(crate) fn hit_test_items_generation(&self) -> u64 {
+        self.hit_test_items_on_screen.generation()
     }
 
     /// The recorder state, for a recording to take until it answers. The host takes a recording in
@@ -805,17 +833,15 @@ impl RecordingSlot {
                 publishes_recording,
             } => crate::painting::record::publish::take_in_presented_output(
                 &mut recorder,
-                &mut self.hit_test_list,
+                &mut self.hit_test_items_on_screen,
                 output,
                 publishes_recording,
-                |output, hit_test_list_changed| {
-                    take_in(output, hit_test_list_changed || behind_rows, publishes_recording);
-                },
+                |output| take_in(output, publishes_recording),
             ),
         }
         self.recorder = Recorder::Here(recorder);
         if behind_rows {
-            self.hit_test_list = None;
+            self.hit_test_items_on_screen.forget();
         }
         presentation
     }
@@ -823,7 +849,7 @@ impl RecordingSlot {
     /// Takes in what a recording the host waited for answered, leaving it pending for the host to
     /// publish.
     pub(crate) fn accept_recording_answer(&mut self, answer: RecordingAnswer) {
-        let presentation = self.land(answer, false, &mut |_, _, _| {
+        let presentation = self.land(answer, false, &mut |_, _| {
             unreachable!("a recording the host waits for presents nothing itself")
         });
         debug_assert!(
@@ -956,6 +982,7 @@ mod tests {
             rows_version: RowsVersion::default(),
             trace: None,
             presentation: None,
+            held_frame: None,
         }
     }
 
@@ -975,12 +1002,13 @@ mod tests {
         recorder_of(&mut slot).unwrap().published_recording = Some(published.clone());
 
         let job = RecordingJob {
-            frame: arena.freeze_frame(0),
+            frame: arena.freeze_frame(),
             rows_version: RowsVersion::default(),
             recorder: slot.take_recorder(),
             viewport: NodeSlotId::INVALID,
             trace_recordings: false,
             presentation: None,
+            held_frame: None,
         };
         assert!(recorder_of(&mut slot).unwrap().published_recording.is_none());
         let RecordingJob { recorder, .. } = job;
@@ -1014,7 +1042,7 @@ mod tests {
         crate::paint_stage::paint_thread().submit(move |_| answer(recorder, recorded))
     }
 
-    fn take_in_nothing(_: Arc<RecordingOutput>, _: bool, _: bool) {
+    fn take_in_nothing(_: Arc<RecordingOutput>, _: bool) {
         panic!("the recording presented nothing itself");
     }
 
@@ -1050,7 +1078,7 @@ mod tests {
         let flight = flight_of(
             &mut slot,
             Recorded::Presented {
-                output: PresentedOutput::of(RecordingOutput::default()),
+                output: Arc::new(RecordingOutput::default()),
                 publishes_recording: true,
             },
         );
@@ -1060,7 +1088,7 @@ mod tests {
             match slot.take_finished_recording_in(
                 &TaskBoundary::for_test(),
                 |_| true,
-                &mut |output, _, publishes_recording| {
+                &mut |output, publishes_recording| {
                     taken_in = Some((output, publishes_recording));
                 },
             ) {
@@ -1076,28 +1104,23 @@ mod tests {
             recorder_of(&mut slot).unwrap().published_recording.as_ref().unwrap(),
             &output
         ));
-        assert!(slot.hit_test_list().is_some());
+        assert_ne!(slot.hit_test_items_generation(), 0);
     }
 
     #[test]
-    fn a_recording_that_lands_behind_the_rows_keeps_no_hit_test_list() {
+    fn a_recording_that_lands_behind_the_rows_leaves_no_hit_test_items_on_screen() {
         let mut slot = RecordingSlot::default();
         let flight = flight_of(
             &mut slot,
             Recorded::Presented {
-                output: PresentedOutput::of(RecordingOutput::default()),
+                output: Arc::new(RecordingOutput::default()),
                 publishes_recording: false,
             },
         );
         slot.fly(flight);
-        let mut hit_test_list_changed = false;
-        let landing = slot.join_recording_in_flight(|_| false, &mut |_, changed, _| hit_test_list_changed = changed);
+        let landing = slot.join_recording_in_flight(|_| false, &mut |_, _| {});
         assert!(matches!(landing, RecordingLanding::LandedBehindRows(None)));
-        assert!(
-            hit_test_list_changed,
-            "the hit-test list the document read is no longer current"
-        );
-        assert!(slot.hit_test_list().is_none());
+        assert_eq!(slot.hit_test_items_generation(), 0);
 
         let flight = flight_of(&mut slot, Recorded::Pending(pending(false)));
         slot.fly(flight);

@@ -4,27 +4,26 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-//! The layers a frame is painted in while canvases and videos update often, and what of them the window server shows
-//! above the frame by itself.
+//! The layers a frame is painted in while canvases and videos update often or it draws nested contexts, and what of
+//! them the window server shows above the frame by itself.
 
+use super::damage::LiveContentChangesSinceLastPaint;
 use super::{
     ContextPresenting, FrameToPaint, PresentingEnvironment, paint_overlays, rect_of_size, replay_into, replaying_only,
 };
-use crate::host::ContextTimer;
 use crate::raster_host::{
     FfiSublayer, FfiSublayerPlacement, LiveContent, MediaKind, PresentableSurfaceHandle, SublayerContentKind,
     SurfaceBlend, SurfaceHandle,
 };
-use libcompositing_rust::display_list::commands::{CanvasId, VideoSinkResourceId};
+use libcompositing_rust::display_list::commands::VideoSinkHandle;
 use libcompositing_rust::display_list::layers::{LayerKind, LayerPlan, LayerPlanInputs, build_layer_plan};
-use libcompositing_rust::display_list::summary::LiveContent as LiveMedia;
+use libcompositing_rust::display_list::summary::{DisplayListSummary, LiveContent as LiveMedia};
 use libcompositing_rust::display_list::window_server_placement::WindowServerPlacement;
 use libcompositing_rust::time::{Duration, MonotonicTime};
 use libgfx_rust::{Color, IntRect, IntSize, ScalingMode};
 use std::collections::HashMap;
 
 const LONGEST_TIME_BETWEEN_UPDATES_THAT_ACTIVATE_MEDIA: Duration = Duration::from_milliseconds(1000);
-const TIME_MEDIA_STAYS_ACTIVE_AFTER_AN_UPDATE: Duration = Duration::from_milliseconds(3000);
 
 // The pool of presentable surfaces the overlays are shown from, apart from those of the painted layers.
 const COMPOSITOR_OVERLAY_SURFACE_POOL: u32 = u32::MAX;
@@ -50,19 +49,27 @@ struct MediaUpdates {
 }
 
 /// Which canvases and videos update often enough to be layers of their own: those updated twice within a second, for
-/// three seconds after their last update.
+/// as long as the display list draws them.
 #[derive(Default)]
 pub struct MediaActivity {
     updates: Vec<MediaUpdates>,
 }
 
+fn summary_draws(summary: &DisplayListSummary, media: LiveMedia) -> bool {
+    match media {
+        LiveMedia::Canvas(id) => summary.canvas_ids.contains(&id.0),
+        LiveMedia::VideoFrame(handle) => summary.video_sink_handles.contains(&handle.0),
+        LiveMedia::ImageFrame(_) | LiveMedia::CompositedContext(_) => false,
+    }
+}
+
 impl MediaActivity {
-    pub fn note_updates(&mut self, updates: &[MediaUpdate], now: MonotonicTime) {
-        self.updates
-            .retain(|media_updates| now - media_updates.last_update <= TIME_MEDIA_STAYS_ACTIVE_AFTER_AN_UPDATE);
+    pub fn note_updates(&mut self, updates: &[MediaUpdate], summary: &DisplayListSummary, now: MonotonicTime) {
         for update in updates {
             self.note_update(update, now);
         }
+        self.updates
+            .retain(|media_updates| summary_draws(summary, media_updates.media));
     }
 
     fn note_update(&mut self, update: &MediaUpdate, now: MonotonicTime) {
@@ -88,10 +95,10 @@ impl MediaActivity {
         });
     }
 
-    pub fn active_media(&self, now: MonotonicTime) -> Vec<LiveMedia> {
+    pub fn active_media(&self) -> Vec<LiveMedia> {
         self.updates
             .iter()
-            .filter(|updates| updates.active && now - updates.last_update <= TIME_MEDIA_STAYS_ACTIVE_AFTER_AN_UPDATE)
+            .filter(|updates| updates.active)
             .map(|updates| updates.media)
             .collect()
     }
@@ -147,7 +154,6 @@ impl ContextLayers {
     }
 
     pub fn drop_layers(&mut self, env: &PresentingEnvironment<'_>) {
-        // NB: The drop timer runs only while there is a plan.
         if self.plan.is_none() && self.surfaces.is_empty() && self.painted_layer_presentations.is_empty() {
             return;
         }
@@ -158,17 +164,6 @@ impl ContextLayers {
             env.raster.drop_presentable_surface_pool(env.context_id, pool as u32);
         }
         self.painted_layer_presentations.clear();
-        env.host.cancel_timer(env.context_id, ContextTimer::LayerDrop);
-    }
-
-    pub fn drop_timer_fired(&mut self, env: &PresentingEnvironment<'_>) {
-        // While the window server shows the media, the layers cost nothing, and the frame on screen still needs their
-        // plan, as for a snapshot. The next frame without a plan puts the media back into the store.
-        if self.plan.is_none() || self.window_server_shows_media {
-            return;
-        }
-        self.drop_layers(env);
-        self.repaint_everything_after_dropping_layers = true;
     }
 }
 
@@ -199,22 +194,12 @@ impl LayerUpdate {
     }
 }
 
-pub fn rect_of_media_layers_showing(
-    plan: &LayerPlan,
-    canvases: &[CanvasId],
-    video_sinks: &[VideoSinkResourceId],
-) -> IntRect {
+pub fn rect_of_media_layers_showing_changes(plan: &LayerPlan, changes: &LiveContentChangesSinceLastPaint) -> IntRect {
     let mut rect = IntRect::default();
     for layer in &plan.layers {
-        let LayerKind::Media { content } = layer.kind else {
-            continue;
-        };
-        let shows_changed_media = match content {
-            LiveMedia::Canvas(id) => canvases.contains(&id),
-            LiveMedia::VideoFrame(id) => video_sinks.contains(&id),
-            LiveMedia::ImageFrame(_) => false,
-        };
-        if shows_changed_media {
+        if let LayerKind::Media { content } = layer.kind
+            && changes.changed(content)
+        {
             rect = rect.united(layer.rect);
         }
     }
@@ -264,28 +249,31 @@ impl ContextPresenting {
         live_content: &LiveContent,
     ) -> LayerUpdate {
         let mut layers = LayerUpdate::default();
-        if !self.presents_to_client {
-            return layers;
-        }
-        layers.active_media = self.layers.media_activity.active_media(env.now);
+        layers.active_media = self.layers.media_activity.active_media();
         // An HDR video is a layer from its first frame for as long as it is drawn, even while paused, so that the window
         // server keeps showing it brighter than SDR white instead of it going back into the frame, which holds SDR.
         if self.remote_layer_may_show_media(env.has_gpu)
             && env.raster.remote_layer_can_show_high_dynamic_range(env.context_id)
             && env.window_server_may_show_high_dynamic_range
         {
-            for id in &frame.display_list.storage().summary().video_sink_ids {
-                let media = LiveMedia::VideoFrame(VideoSinkResourceId(*id));
+            for handle in &frame.display_list.storage().summary().video_sink_handles {
+                let media = LiveMedia::VideoFrame(VideoSinkHandle(*handle));
                 if layers.active_media.contains(&media) {
                     continue;
                 }
                 let holds_high_dynamic_range = live_content
                     .video_sinks
-                    .get(id)
+                    .get(handle)
                     .is_some_and(|sink| sink.has_frame && sink.frame_holds_high_dynamic_range);
                 if holds_high_dynamic_range {
                     layers.active_media.push(media);
                 }
+            }
+        }
+        for live_content_record in &frame.display_list.storage().summary().live_content_records {
+            let content = live_content_record.content;
+            if matches!(content, LiveMedia::CompositedContext(_)) && !layers.active_media.contains(&content) {
+                layers.active_media.push(content);
             }
         }
         if layers.active_media.is_empty() {
@@ -347,7 +335,7 @@ impl ContextPresenting {
                     }
                     (MediaKind::Video, id.0)
                 }
-                LiveMedia::ImageFrame(_) => return false,
+                LiveMedia::ImageFrame(_) | LiveMedia::CompositedContext(_) => return false,
             };
             if !env.raster.remote_layer_can_show(
                 env.context_id,
@@ -376,11 +364,6 @@ impl ContextPresenting {
             layers.plan = Some(new_plan);
         }
         layers.plan_active_media = layer_update.active_media;
-        env.host.set_timer(
-            env.context_id,
-            ContextTimer::LayerDrop,
-            TIME_MEDIA_STAYS_ACTIVE_AFTER_AN_UPDATE,
-        );
     }
 
     pub(super) fn paint_layered_frame(
@@ -418,7 +401,6 @@ impl ContextPresenting {
         plan: &LayerPlan,
     ) -> bool {
         let raster = env.raster;
-        let viewport_size = self.viewport_size;
         let surface_clear_color = frame.display_list.surface_clear_color().unwrap_or(Color::TRANSPARENT);
         raster.start_raster_cache_frame(env.context_id);
         let layer_count = plan.layers.len();
@@ -429,9 +411,9 @@ impl ContextPresenting {
             let layer_surface = &mut surfaces[index];
             let is_base = matches!(layer.kind, LayerKind::Base);
             let rect = if is_base {
-                rect_of_size(viewport_size)
+                rect_of_size(self.raster_size())
             } else {
-                layer.rect
+                self.raster_rect_of(layer.rect)
             };
             if matches!(layer.kind, LayerKind::Media { .. }) || rect.is_empty() {
                 *layer_surface = LayerSurface::default();
@@ -468,7 +450,8 @@ impl ContextPresenting {
             let repaint_rect = if repaints_whole_layer {
                 layer_surface.rect
             } else {
-                layer_update.damage_of_layers[index].intersected(layer_surface.rect)
+                self.raster_rect_of(layer_update.damage_of_layers[index])
+                    .intersected(layer_surface.rect)
             };
             if repaint_rect.is_empty() {
                 continue;
@@ -485,6 +468,7 @@ impl ContextPresenting {
                     Color::TRANSPARENT
                 },
             );
+            self.apply_raster_transform(raster, target);
             replay_into(env, target, frame, replaying_only(&layer.record_spans, false));
             raster.restore_to_count(target, save_count);
             self.layers.last_content_version += 1;
@@ -508,6 +492,7 @@ impl ContextPresenting {
         }
         if !layer_update.shown_by_window_server {
             self.composite_layers_above_base_with_plan(env, surface, frame, plan, damage_rect);
+            self.apply_raster_transform(raster, surface);
             paint_overlays(env, surface, frame.frame_inputs, true);
         }
         raster.restore_to_count(surface, save_count);
@@ -547,8 +532,11 @@ impl ContextPresenting {
     ) {
         for (index, layer) in plan.layers.iter().enumerate().skip(1) {
             if matches!(layer.kind, LayerKind::Media { .. }) {
-                if !layer.rect.intersected(damage_rect).is_empty() {
+                if !self.raster_rect_of(layer.rect).intersected(damage_rect).is_empty() {
+                    let save_count = env.raster.save(surface);
+                    self.apply_raster_transform(env.raster, surface);
                     replay_into(env, surface, frame, replaying_only(&layer.record_spans, true));
+                    env.raster.restore_to_count(surface, save_count);
                 }
                 continue;
             }
@@ -699,7 +687,7 @@ impl ContextPresenting {
                             .get(&id.0)
                             .is_some_and(|sink| sink.has_frame && sink.frame_has_surface),
                     ),
-                    LiveMedia::ImageFrame(_) => continue,
+                    LiveMedia::ImageFrame(_) | LiveMedia::CompositedContext(_) => continue,
                 };
                 if !has_content {
                     continue;

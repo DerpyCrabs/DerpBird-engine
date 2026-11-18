@@ -1356,8 +1356,7 @@ void WebContentView::update_page_surface(PageSurfaceContent content)
     // Where the frame goes in the view, in device pixels, and the part of the frame that the page surface shows.
     auto bitmap_size = paintable->bitmap_size;
     // Wayland subsurface coordinates include the parent window decorations.
-    auto margins = parent->frameMargins();
-    auto view_position = mapTo(window(), QPoint { 0, 0 }) + QPoint { margins.left(), margins.top() };
+    auto view_position = position_in_surface_of(*parent, QPoint { 0, 0 });
     // Round both edges in the parent pixel grid, then make them local to this
     // buffer. Rounding the width alone loses the phase of a fractional origin
     // (e.g. a 196-DIP sidebar at 160%) and filters the whole frame.
@@ -1458,6 +1457,12 @@ QRect WebContentView::rect_shown_in_window() const
     return shown;
 }
 
+QPoint WebContentView::position_in_surface_of(QWindow const& parent, QPoint position) const
+{
+    auto frame_margins = parent.frameMargins();
+    return mapTo(window(), position) + QPoint { frame_margins.left(), frame_margins.top() };
+}
+
 bool WebContentView::can_composite_floating_surfaces() const
 {
     return m_page_surface && !m_page_surface_failed && !m_floating_surface_overlay_failed;
@@ -1480,7 +1485,8 @@ bool WebContentView::update_floating_surface_overlay()
         bounds = QRect(m_hover_overlay_position, m_hover_overlay_image.deviceIndependentSize().toSize());
     struct Surface { QPointer<QWidget> widget; QPoint origin; QRect clip; };
     QVector<Surface> surfaces;
-    for (auto const& widget : m_floating_surfaces) {
+    for (auto const& floating : m_floating_surfaces) {
+        auto const& widget = floating.surface;
         if (!widget || !widget->isVisible()) continue;
         auto origin = widget->mapTo(this, QPoint());
         auto clip = widget->rect();
@@ -1514,7 +1520,7 @@ bool WebContentView::update_floating_surface_overlay()
     }
     m_rendering_floating_surfaces = false;
     painter.end();
-    auto position = mapTo(window(), bounds.topLeft());
+    auto position = position_in_surface_of(*parent, bounds.topLeft());
     if (image == m_last_floating_overlay_image && position == m_last_floating_overlay_position) return true;
     if (!m_page_surface->show_overlay(*parent, image, position)) return false;
     m_last_floating_overlay_image = image;

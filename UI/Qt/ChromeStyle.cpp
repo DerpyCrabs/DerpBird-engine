@@ -329,10 +329,13 @@ QWidget#LadybirdSidebarFooter QToolButton {{
     padding: 0;
 }}
 
-/* NB: The all-tabs button keeps its own size in the toolbar and the sidebar's footer, and the navigation buttons theirs,
-       which is smaller in the sidebar. */
+/*
+ * The all-tabs and bookmarks buttons keep their own size in the sidebar's footer, as does all-tabs in the toolbar.
+ * The navigation buttons keep theirs, which is smaller in the sidebar.
+ */
 QWidget#LadybirdNavigationToolbar QToolButton#LadybirdAllTabsButton,
 QWidget#LadybirdSidebarFooter QToolButton#LadybirdAllTabsButton,
+QWidget#LadybirdSidebarFooter QToolButton#LadybirdSidebarBookmarksButton,
 QWidget#LadybirdNavigationButtons QToolButton {{
     min-width: 0;
     min-height: 0;
@@ -494,12 +497,6 @@ QMenuBar#LadybirdMenuBar QToolButton#LadybirdCloseWindowButton[pressedOutside="t
         background, background_bottom, hover, pressed, control_border, text, disabled_text, close_hover, close_text);
 }
 
-// Hovering a frameless control only lifts it with this soft fill; its ring appears once it is pressed.
-QColor location_edit_border(QPalette const& palette)
-{
-    return Theme::chrome(palette).divider;
-}
-
 QString location_edit_style_sheet(QPalette const& palette)
 {
     auto const& chrome = Theme::chrome(palette);
@@ -636,7 +633,8 @@ QToolButton#LadybirdInUseChip:pressed {{
     background: {14};
 }}
 
-QToolButton#LadybirdLocationAction {{
+QToolButton#LadybirdLocationAction,
+QToolButton#LadybirdLocationTranslate {{
     background: transparent;
     border: 0;
     margin: 0;
@@ -1123,6 +1121,7 @@ QWidget#LadybirdVerticalTabBar[verticalTabsPosition="right"][active="true"] {{
 }}
 
 QToolButton#LadybirdAllTabsButton,
+QToolButton#LadybirdSidebarBookmarksButton,
 QToolButton#LadybirdVerticalTabsToggleButton {{
     background: transparent;
     border: 0;
@@ -1679,9 +1678,7 @@ QFrame#LadybirdSiteSettingsPopover QLabel {{
 }}
 
 QLabel#LadybirdSiteSettingsFavicon {{
-    background: #ffffff;
-    border: 1px solid #d0d0d6;
-    border-radius: 6px;
+    border: 0;
 }}
 
 QLabel#LadybirdSiteSettingsHost {{
@@ -2119,33 +2116,33 @@ QPushButton:pressed {{
         style_sheet_color(primary), style_sheet_color(primary.darker(110)), style_sheet_color(primary.darker(122)));
 }
 
-QString restore_session_card_style_sheet()
+QString page_card_style_sheet()
 {
     auto const& panel = Theme::panel();
     auto primary = Theme::primary();
     return qformatted(R"(
-QFrame#LadybirdRestoreSessionCard {{
+QFrame#LadybirdPageCard {{
     color: {0};
     background: {1};
     border: 0;
     border-radius: 12px;
 }}
 
-QFrame#LadybirdRestoreSessionCard QLabel {{
+QFrame#LadybirdPageCard QLabel {{
     background: transparent;
     font-size: 13px;
 }}
 
-QLabel#LadybirdRestoreSessionTitle {{
+QLabel#LadybirdPageCardTitle {{
     color: {0};
     font-weight: 600;
 }}
 
-QLabel#LadybirdRestoreSessionQuestion {{
+QLabel#LadybirdPageCardText {{
     color: {2};
 }}
 
-QFrame#LadybirdRestoreSessionCard QPushButton {{
+QFrame#LadybirdPageCard QPushButton {{
     border: 0;
     border-radius: 7px;
     min-height: 28px;
@@ -2153,26 +2150,26 @@ QFrame#LadybirdRestoreSessionCard QPushButton {{
     font-size: 13px;
 }}
 
-QPushButton#LadybirdRestoreSessionNotNow {{
+QPushButton#LadybirdPageCardSecondaryButton {{
     color: {0};
     background: {3};
 }}
 
-QPushButton#LadybirdRestoreSessionNotNow:pressed {{
+QPushButton#LadybirdPageCardSecondaryButton:pressed {{
     background: {4};
 }}
 
-QPushButton#LadybirdRestoreSessionRestore {{
+QPushButton#LadybirdPageCardPrimaryButton {{
     color: #ffffff;
     background: {5};
     font-weight: 500;
 }}
 
-QPushButton#LadybirdRestoreSessionRestore:hover {{
+QPushButton#LadybirdPageCardPrimaryButton:hover {{
     background: {6};
 }}
 
-QPushButton#LadybirdRestoreSessionRestore:pressed {{
+QPushButton#LadybirdPageCardPrimaryButton:pressed {{
     background: {7};
 }}
 )",

@@ -26,6 +26,7 @@
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/IDLEventListener.h>
 #include <LibWeb/HTML/BrowsingContext.h>
+#include <LibCore/EventLoop.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/HTMLDocument.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
@@ -70,7 +71,7 @@ public:
             auto buffer = MUST(Core::AnonymousBuffer::create_with_size(sizeof(Gfx::SystemTheme)));
             auto* theme = buffer.data<Gfx::SystemTheme>();
             theme->color[to_underlying(Gfx::ColorRole::Window)] = Color(Color::White).value();
-            theme->color[to_underlying(Gfx::ColorRole::WindowText)] = Color(Color::Black).value();
+            theme->color[to_underlying(Gfx::ColorRole::BaseText)] = Color(Color::Black).value();
             theme->color[to_underlying(Gfx::ColorRole::Base)] = Color(Color::White).value();
             theme->color[to_underlying(Gfx::ColorRole::BaseText)] = Color(Color::Black).value();
             return Gfx::PaletteImpl::create_with_anonymous_buffer(move(buffer));
@@ -121,6 +122,7 @@ GC_DEFINE_ALLOCATOR(TestPageClient);
 
 TEST_CASE(derpbird_script_world_isolates_globals_prototypes_and_dom_expandos)
 {
+    Core::EventLoop event_loop;
     install_test_fonts();
     auto principal = Web::Bindings::create_a_principal_javascript_realm();
     VERIFY(principal.ptr());
@@ -655,6 +657,7 @@ TEST_CASE(derpbird_script_world_revocation_releases_queued_web_lock)
 
 TEST_CASE(derpbird_credential_fields_revalidate_forms_documents_and_script_mutation)
 {
+    Core::EventLoop event_loop;
     install_test_fonts();
     Web::Bindings::create_a_principal_javascript_realm();
     auto& vm = Web::Bindings::main_thread_vm();

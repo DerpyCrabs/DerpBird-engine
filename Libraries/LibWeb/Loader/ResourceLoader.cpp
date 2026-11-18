@@ -170,7 +170,7 @@ void ResourceLoader::prefetch_dns(GC::Ptr<DOM::Document> document, URL::URL cons
 
     if (!document || document->content_blocking_enabled()) {
         if (ContentBlocker::the().check(url, source_url, ContentBlocker::ResourceType::Other, {}, document ? document->relevant_settings_object().top_level_creation_url : Optional<URL::URL> {}).blocked) {
-            dbgln("ResourceLoader: Refusing to prefetch DNS for '{}': \033[31;1mURL was filtered\033[0m", url);
+            dbgln_if(SPAM_DEBUG, "ResourceLoader: Refusing to prefetch DNS for '{}': \033[31;1mURL was filtered\033[0m", url);
             return;
         }
     }
@@ -191,7 +191,7 @@ void ResourceLoader::preconnect(GC::Ptr<DOM::Document> document, URL::URL const&
 
     if (!document || document->content_blocking_enabled()) {
         if (ContentBlocker::the().check(url, source_url, ContentBlocker::ResourceType::Other, {}, document ? document->relevant_settings_object().top_level_creation_url : Optional<URL::URL> {}).blocked) {
-            dbgln("ResourceLoader: Refusing to pre-connect to '{}': \033[31;1mURL was filtered\033[0m", url);
+            dbgln_if(SPAM_DEBUG, "ResourceLoader: Refusing to pre-connect to '{}': \033[31;1mURL was filtered\033[0m", url);
             return;
         }
     }

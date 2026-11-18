@@ -8,9 +8,11 @@
 //! sender may ask for, and the answer a synchronous one gets.
 
 use super::{CompositorCore, ContextOwnerCheckResult};
+use crate::display_list_chunk_stores::chunks_of_list_sent_whole;
 use crate::host::{PresentationId, WebContentClientId};
-use crate::nested_display_lists::{NestedDisplayListStore, ReferencedResources};
 use libcompositing_rust::display_list::replay::{ReplayFrame, ReplaySelection, replay_display_list};
+use libcompositing_rust::display_list::storage::DisplayListStorage;
+use libcompositing_rust::display_list::window::RecordedWindow;
 use libcompositing_rust::ipc_types::compositor_presentation_client::messages::DidNotDispatchInputEvent;
 use libcompositing_rust::ipc_types::compositor_presentation_server::messages::{
     HandleAndDispatchKeyEvent, HandleAndDispatchMouseEvent, HandleAndDispatchPinchEvent,
@@ -50,7 +52,6 @@ fn display_list_timing_enabled() -> bool {
     })
 }
 
-const NESTED_DISPLAY_LISTS_THAT_NEST_THEMSELVES: &str = "WebContent published display lists that nest themselves";
 const DISPLAY_LIST_WITH_UNUSABLE_SCROLLING_STATE: &str =
     "WebContent published a display list with scrolling state the compositor cannot use";
 
@@ -216,13 +217,17 @@ impl MessagesFromWebContent<'_> {
             Ok(false)
         };
         let SharedDisplayList {
-            packed_tape,
-            tape_size,
-            run_count,
+            chunks_in_paint_order,
+            packed_chunks,
+            packed_chunk_sizes,
             properties,
             ..
         } = message.display_list;
-        let storage = match raster.receive_display_list_storage(packed_tape, tape_size, run_count) {
+        let storage = match raster
+            .receive_display_list_chunks(packed_chunks, &packed_chunk_sizes)
+            .and_then(|sent| chunks_of_list_sent_whole(sent, &chunks_in_paint_order))
+            .and_then(|chunks| DisplayListStorage::of_received_chunks(&chunks))
+        {
             Ok(storage) => storage,
             Err(error) => {
                 let _ = writeln!(
@@ -235,37 +240,21 @@ impl MessagesFromWebContent<'_> {
                 ));
             }
         };
-        let transaction = message.nested_display_lists;
-        if transaction.removes_anything() || !transaction.video_sinks.is_empty() {
-            return not_rasterized("Resource transaction holds more than the display lists it nests");
-        }
-        let mut nested_display_lists = NestedDisplayListStore::default();
-        for display_list in transaction.display_lists {
-            nested_display_lists.add(display_list);
-        }
         let tree = message.visual_context_tree;
         if properties.compatible_visual_context_tree_structural_epoch != tree.structural_epoch
             || !tree.display_list_references_only_live_nodes(storage.command_runs())
         {
             return not_rasterized("Display list does not match its visual context tree");
         }
-        let mut resources = ReferencedResources::default();
-        nested_display_lists.collect_referenced_resources(&storage, &tree, &mut resources);
-        if !nested_display_lists.nested_display_lists_are_replayable(&resources) {
-            return not_rasterized("Nested display list is missing or refers to itself");
-        }
-        let ids = |set: &std::collections::HashSet<u64>| set.iter().copied().collect::<Vec<u64>>();
-        if !raster.staged_rasterization_has_resources(
-            client,
-            token,
-            &ids(&resources.font_ids),
-            &ids(&resources.image_frame_ids),
-        ) {
+        let summary = storage.summary();
+        let mut image_frame_ids = summary.image_frame_ids.clone();
+        tree.for_each_effects_filter_image_frame_id(&mut |id| image_frame_ids.push(id));
+        if !raster.staged_rasterization_has_resources(client, token, &summary.font_ids, &image_frame_ids) {
             return not_rasterized("Display list draws resources that were not staged for it");
         }
         let time_ns = self.now.nanoseconds();
         let success = raster.rasterize_staged(client, token, |painter| {
-            let frame = ReplayFrame::unscrolled(time_ns, &nested_display_lists);
+            let frame = ReplayFrame::unscrolled(time_ns);
             replay_display_list(
                 &tree,
                 storage.bytes(),
@@ -285,18 +274,18 @@ impl compositor_web_content_server::Stub for MessagesFromWebContent<'_> {
     fn update_display_list(&mut self, message: UpdateDisplayList) -> Result<(), Misbehavior> {
         let started_at = std::time::Instant::now();
         let SharedDisplayList {
-            packed_tape,
-            tape_size,
-            run_count,
+            chunks_in_paint_order,
+            packed_chunks,
+            packed_chunk_sizes,
             properties,
             async_scrolling_metadata,
         } = message.display_list;
-        let storage = match self
+        let sent = match self
             .core
             .raster()
-            .receive_display_list_storage(packed_tape, tape_size, run_count)
+            .receive_display_list_chunks(packed_chunks, &packed_chunk_sizes)
         {
-            Ok(storage) => storage,
+            Ok(sent) => sent,
             Err(error) => {
                 let _ = writeln!(
                     std::io::stderr(),
@@ -305,6 +294,29 @@ impl compositor_web_content_server::Stub for MessagesFromWebContent<'_> {
                 return Err(Misbehavior(
                     "WebContent published a display list its shared buffer does not hold",
                 ));
+            }
+        };
+        let sent_chunk_count = sent.len();
+        // The chunks are taken in before anything else is checked: the list counts as one of the latest of the context
+        // on both ends whether it is installed or not.
+        let chunks = match self.core.take_in_display_list_chunks(
+            self.client_id,
+            message.context_id,
+            sent,
+            &chunks_in_paint_order,
+        ) {
+            Ok(Some(chunks)) => chunks,
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(Misbehavior(error)),
+        };
+        let storage = match DisplayListStorage::of_received_chunks(&chunks) {
+            Ok(storage) => storage,
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Compositor: Dropping display list update from WebContent: {error}"
+                );
+                return Ok(());
             }
         };
         let adopt_time = started_at.elapsed();
@@ -328,7 +340,42 @@ impl compositor_web_content_server::Stub for MessagesFromWebContent<'_> {
             );
             return Ok(());
         }
+        if !self
+            .core
+            .raster()
+            .context_holds_fonts(message.context_id, &storage.summary().font_ids)
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "Compositor: Dropping display list update that draws fonts its context does not hold"
+            );
+            return Ok(());
+        }
+        let mut image_frame_ids = storage.summary().image_frame_ids.clone();
+        tree.for_each_effects_filter_image_frame_id(&mut |id| image_frame_ids.push(id));
+        if !self
+            .core
+            .raster()
+            .take_registered_image_frames(message.context_id, &image_frame_ids)
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "Compositor: Dropping display list update that draws image frames that are not registered"
+            );
+            return Ok(());
+        }
+        let window = match properties.window.as_ref().map(RecordedWindow::from_ipc) {
+            Some(None) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Compositor: Dropping display list update whose window no recording could have placed"
+                );
+                return Ok(());
+            }
+            window => window.flatten(),
+        };
         let scroll_state_snapshot = message.scroll_state;
+        let storage_size = storage.bytes().len();
         let display_list = DisplayList::new(
             storage,
             properties.id,
@@ -336,7 +383,8 @@ impl compositor_web_content_server::Stub for MessagesFromWebContent<'_> {
             async_scrolling_metadata,
             properties.surface_clear_color,
             properties.root_group_color,
-        );
+        )
+        .with_window(window);
         if !self.core.install_display_list_update(
             message.context_id,
             Rc::new(display_list),
@@ -346,16 +394,13 @@ impl compositor_web_content_server::Stub for MessagesFromWebContent<'_> {
         ) {
             return Err(Misbehavior(DISPLAY_LIST_WITH_UNUSABLE_SCROLLING_STATE));
         }
-        if !self
-            .core
-            .apply_resource_transaction(message.context_id, message.resource_transaction)
-        {
-            return Err(Misbehavior(NESTED_DISPLAY_LISTS_THAT_NEST_THEMSELVES));
-        }
+        self.core.keep_only_drawn_resources(message.context_id);
         if display_list_timing_enabled() {
             let _ = writeln!(
                 std::io::stderr(),
-                "DISPLAY_LIST_RECEIVE bytes={tape_size} adopt={} µs install={} µs",
+                "DISPLAY_LIST_RECEIVE bytes={} chunks={} sent={sent_chunk_count} adopt={} µs install={} µs",
+                storage_size,
+                chunks.len(),
                 adopt_time.as_micros(),
                 (started_at.elapsed() - adopt_time).as_micros()
             );
@@ -374,6 +419,19 @@ impl compositor_web_content_server::Stub for MessagesFromWebContent<'_> {
         if !self.context_is_owned_by_sender(message.context_id)? {
             return Ok(());
         }
+        let mut image_frame_ids = Vec::new();
+        tree.for_each_effects_filter_image_frame_id(&mut |id| image_frame_ids.push(id));
+        if !self
+            .core
+            .raster()
+            .take_registered_image_frames(message.context_id, &image_frame_ids)
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "Compositor: Dropping visual context tree update that draws image frames that are not registered"
+            );
+            return Ok(());
+        }
         let tree_was_replaced = self.core.update_visual_context_tree(
             message.context_id,
             AccumulatedVisualContextTree::from_arc(tree),
@@ -381,12 +439,8 @@ impl compositor_web_content_server::Stub for MessagesFromWebContent<'_> {
             message.keyboard_scroll_state,
             self.now,
         );
-        if tree_was_replaced
-            && !self
-                .core
-                .apply_resource_transaction(message.context_id, message.resource_transaction)
-        {
-            return Err(Misbehavior(NESTED_DISPLAY_LISTS_THAT_NEST_THEMSELVES));
+        if tree_was_replaced {
+            self.core.keep_only_drawn_resources(message.context_id);
         }
         Ok(())
     }

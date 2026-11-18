@@ -5,7 +5,6 @@
 #include <AK/JsonObject.h>
 #include "DerpBirdTaskService.h"
 #include <AK/OwnPtr.h>
-#include <AK/Memory.h>
 #include <AK/Variant.h>
 #include <QDir>
 #include <QFile>
@@ -186,9 +185,7 @@ private:
                     if (entry.username != request.username) continue;
                     auto saved = TRY(vault->load(entry.id, *document, cancel));
                     if (!saved.has_value()) continue;
-                    auto expected = request.secret->bytes();
-                    auto actual = saved->bytes();
-                    if (expected.size() == actual.size() && timing_safe_compare(expected.data(), actual.data(), actual.size()))
+                    if (request.secret->matches(*saved))
                         return Response { MatchValue { true } };
                 }
                 return Response { MatchValue { false } };

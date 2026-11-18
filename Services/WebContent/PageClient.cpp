@@ -44,7 +44,6 @@
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Bodies.h>
 #include <LibWeb/Geolocation/GeolocationCoordinates.h>
-#include <LibWeb/Geolocation/GeolocationPositionError.h>
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/LocalNavigable.h>
@@ -70,6 +69,7 @@
 #include <LibWeb/WebDriver/InputState.h>
 #include <LibWeb/WebDriver/UserPrompt.h>
 #include <LibWeb/WebIDL/Promise.h>
+#include <LibWebCommon/Geolocation/GeolocationPositionErrorCode.h>
 #include <LibWebCommon/HTML/NavigationPopulationRequest.h>
 #include <LibWebCommon/WebDriver/Input.h>
 #include <LibWebCommon/WebView/Debugger.h>
@@ -92,9 +92,9 @@ static constexpr size_t s_max_download_data_ipc_chunk_size = 16 * MiB;
 
 GC_DEFINE_ALLOCATOR(PageClient);
 
-static Web::Geolocation::GeolocationPositionError::ErrorCode geolocation_position_error_code_from_ipc(u16 error_code)
+static Web::Geolocation::GeolocationPositionErrorCode geolocation_position_error_code_from_ipc(u16 error_code)
 {
-    using ErrorCode = Web::Geolocation::GeolocationPositionError::ErrorCode;
+    using ErrorCode = Web::Geolocation::GeolocationPositionErrorCode;
 
     switch (error_code) {
     case to_underlying(ErrorCode::PermissionDenied):
@@ -268,7 +268,6 @@ void PageClient::setup_palette()
     auto buffer = buffer_or_error.release_value();
     auto* theme = buffer.data<Gfx::SystemTheme>();
     theme->color[to_underlying(Gfx::ColorRole::Window)] = Color(Color::Magenta).value();
-    theme->color[to_underlying(Gfx::ColorRole::WindowText)] = Color(Color::Cyan).value();
     m_palette_impl = Gfx::PaletteImpl::create_with_anonymous_buffer(buffer);
 }
 
@@ -1364,7 +1363,7 @@ void PageClient::geolocation_position_response(u64 request_id, WebView::Geolocat
     else if (auto coordinates = geolocation_coordinates_from_ipc(position); coordinates.has_value())
         page().receive_geolocation_position(request_id, *coordinates);
     else
-        page().receive_geolocation_position(request_id, Web::Geolocation::GeolocationPositionError::ErrorCode::PositionUnavailable);
+        page().receive_geolocation_position(request_id, Web::Geolocation::GeolocationPositionErrorCode::PositionUnavailable);
 }
 
 void PageClient::page_did_request_geolocation_position(u64 request_id, Web::HTML::CrossProcessId requesting_document_id)
@@ -1418,6 +1417,16 @@ void PageClient::page_did_request_click_notification_by_id_for_testing(u64 brows
 void PageClient::page_did_request_dismiss_notification_for_testing(u64 notification_id)
 {
     client().async_did_request_dismiss_notification_for_testing(m_id, notification_id);
+}
+
+void PageClient::page_did_request_hold_next_notification_show_for_testing()
+{
+    client().async_did_request_hold_next_notification_show_for_testing(m_id);
+}
+
+void PageClient::page_did_request_fail_held_notification_show_for_testing()
+{
+    client().async_did_request_fail_held_notification_show_for_testing(m_id);
 }
 
 Optional<Web::Permissions::PermissionSnapshot> PageClient::page_did_request_permission_snapshot(URL::Origin const& top_level_origin)
@@ -1994,6 +2003,19 @@ bool PageClient::page_did_request_has_populated_document_for_testing(Web::HTML::
     return false;
 }
 
+Optional<Web::MediaSession::MediaSessionState> PageClient::page_did_request_now_playing_state_for_testing()
+{
+    if (auto* test_connection = client().test_connection())
+        return test_connection->did_request_now_playing_state_for_testing(m_id);
+    return {};
+}
+
+void PageClient::page_did_trigger_now_playing_action_for_testing(Web::Bindings::MediaSessionAction action, Optional<double> seek_offset, Optional<double> seek_time, Optional<bool> fast_seek)
+{
+    if (auto* test_connection = client().test_connection())
+        test_connection->async_trigger_now_playing_action_for_testing(m_id, action, seek_offset, seek_time, fast_seek);
+}
+
 bool PageClient::page_did_request_tab_is_playing_audio_for_testing()
 {
     if (auto* test_connection = client().test_connection())
@@ -2275,6 +2297,11 @@ void PageClient::rebind_media_playback_manager(MediaClient::RemotePlaybackManage
 NonnullRefPtr<Audio::RecordStream::CreatePromise> PageClient::create_audio_record_stream(StringView device_id, Audio::RecordStream::RecordCallback callback)
 {
     return Audio::RecordStream::create(device_id, audio_playback_group(m_id), move(callback));
+}
+
+void PageClient::page_did_change_media_session_state(Optional<Web::MediaSession::MediaSessionState> const& state)
+{
+    client().async_did_change_media_session_state(m_id, state);
 }
 
 void PageClient::page_did_change_screen_wake_lock_state(Web::ScreenWakeLockState wake_lock_state)

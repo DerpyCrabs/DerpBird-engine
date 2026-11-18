@@ -11,8 +11,10 @@
 //! it, so frames reach the compositor in the order their jobs were handed out, and code that runs anywhere else cannot
 //! present a frame: it has no [`Presenting`] to present with.
 
+use crate::painting::display_list::chunks::{Chunk, ChunkId};
 use crate::painting::display_list::commands::CompositorContextId;
-use crate::painting::display_list::storage::DisplayListStorage;
+use crate::painting::display_list::storage::{PackedChunkSize, packed_size_of_chunks, write_packed_chunks};
+use crate::painting::presentation::SentDisplayListChunks;
 use crate::render_state::SampledFrame;
 use crate::stage_thread::{InFlight, Relay, Riding, StageThread};
 use libcompositing_rust::ipc_types::{
@@ -48,8 +50,6 @@ unsafe extern "C" {
         font_count: usize,
         image_frames: *const *const c_void,
         image_frame_count: usize,
-        video_sinks: *const u64,
-        video_sink_count: usize,
         target_bitmap: *const c_void,
     ) -> bool;
 }
@@ -84,8 +84,9 @@ impl CompositorPoster {
         self.0.try_post(message).expect("a message to the compositor encodes")
     }
 
-    /// Posts `fonts` and `image_frames` for the compositor context `context_id` names to hold, ahead of the transaction
-    /// that names them, and answers whether the compositor could still be reached.
+    /// Describes `fonts` to the compositor context `context_id` names and registers `image_frames` with the
+    /// compositor, ahead of the display list or the visual context tree that draws them, and answers whether the
+    /// compositor could still be reached. The caller holds `image_frames` until it has posted what draws them.
     pub(crate) fn post_fonts_and_image_frames(
         &self,
         context_id: CompositorContextId,
@@ -111,20 +112,23 @@ impl CompositorPoster {
         }
     }
 
-    /// The display list `storage` holds, with `properties` and `async_scrolling_metadata`, as a message carries it, or none
-    /// where its tape cannot be placed in shared memory.
+    /// The display list that names `chunks_in_paint_order` and carries `new_chunks`, the ones the compositor does not
+    /// keep, with `properties` and `async_scrolling_metadata`, as a message carries it, or none where the chunks cannot
+    /// be placed in shared memory.
     pub(crate) fn share_display_list(
         &self,
-        storage: &DisplayListStorage,
+        chunks_in_paint_order: Vec<ChunkId>,
+        new_chunks: &[&Chunk],
         properties: Compositing_DisplayListProperties,
         async_scrolling_metadata: Option<Compositing_AsyncScrollingMetadata>,
     ) -> Option<SharedDisplayList> {
-        let packed_tape =
-            self.shared_buffer_with(storage.packed_size(), |destination| storage.write_packed(destination))?;
+        let packed_chunks = self.shared_buffer_with(packed_size_of_chunks(new_chunks), |destination| {
+            write_packed_chunks(new_chunks, destination);
+        })?;
         Some(SharedDisplayList {
-            packed_tape,
-            tape_size: storage.bytes().len() as u64,
-            run_count: storage.command_runs().len() as u64,
+            chunks_in_paint_order,
+            packed_chunks,
+            packed_chunk_sizes: new_chunks.iter().map(|chunk| PackedChunkSize::of(chunk)).collect(),
             properties,
             async_scrolling_metadata,
         })
@@ -162,9 +166,8 @@ impl CompositorPoster {
         })
     }
 
-    /// Stages `fonts`, `image_frames` and `video_sinks`, each a resource id and a sink handle, for the rasterization
-    /// `token` names into `target_bitmap`, a shareable `Gfx::Bitmap`, and answers whether the compositor could still be
-    /// reached.
+    /// Stages `fonts` and `image_frames` for the rasterization `token` names into `target_bitmap`, a shareable
+    /// `Gfx::Bitmap`, and answers whether the compositor could still be reached.
     ///
     /// # Safety
     ///
@@ -174,12 +177,10 @@ impl CompositorPoster {
         token: u64,
         fonts: &[FontHandle],
         image_frames: &[ImageFrameHandle],
-        video_sinks: &[(u64, u64)],
         target_bitmap: *const c_void,
     ) -> bool {
         let fonts: Vec<*const c_void> = fonts.iter().map(FontHandle::as_raw).collect();
         let image_frames: Vec<*const c_void> = image_frames.iter().map(ImageFrameHandle::as_raw).collect();
-        let video_sinks: Vec<u64> = video_sinks.iter().flat_map(|(id, handle)| [*id, *handle]).collect();
         // SAFETY: This holds a reference to the poster, the handles keep the fonts and frames live for the call, in
         // which C++ takes references of its own, and the caller keeps the bitmap live for it.
         unsafe {
@@ -190,8 +191,6 @@ impl CompositorPoster {
                 fonts.len(),
                 image_frames.as_ptr(),
                 image_frames.len(),
-                video_sinks.as_ptr(),
-                video_sinks.len() / 2,
                 target_bitmap,
             )
         }
@@ -222,6 +221,16 @@ unsafe impl Sync for StageCell {}
 struct PaintStage {
     /// The poster of the connection to the compositor, while it can be reached.
     poster: Option<CompositorPoster>,
+    /// What the compositor at the other end of the poster keeps of the display lists sent for each context, which a
+    /// new connection starts without.
+    sent_display_list_chunks: std::collections::HashMap<CompositorContextId, SentDisplayListChunks>,
+}
+
+impl PaintStage {
+    fn present_through(&mut self, poster: Option<CompositorPoster>) {
+        self.poster = poster;
+        self.sent_display_list_chunks.clear();
+    }
 }
 
 fn the_paint_thread() -> &'static PaintThread {
@@ -264,10 +273,22 @@ impl Presenting<'_> {
         self.stage.poster.as_ref()
     }
 
+    /// The poster frames are presented through, with what the compositor keeps of the display lists sent for each
+    /// context, or none while the compositor cannot be reached.
+    pub(crate) fn poster_and_sent_display_list_chunks(
+        &mut self,
+    ) -> Option<(
+        &CompositorPoster,
+        &mut std::collections::HashMap<CompositorContextId, SentDisplayListChunks>,
+    )> {
+        let stage = &mut *self.stage;
+        Some((stage.poster.as_ref()?, &mut stage.sent_display_list_chunks))
+    }
+
     /// Drops the poster of a compositor that can no longer be reached: the connection learns of that on its own thread,
     /// and hands over the poster of the next one.
     pub(crate) fn lose_compositor(&mut self) {
-        self.stage.poster = None;
+        self.stage.present_through(None);
     }
 }
 
@@ -320,7 +341,7 @@ pub unsafe extern "C" fn paint_stage_adopt_compositor_poster(poster: FfiThreadSa
     let incoming = IncomingPoster(unsafe { CompositorPoster::adopt(poster) });
     paint_thread().post(move || {
         let IncomingPoster(poster) = incoming;
-        Presenting::lend(|presenting| presenting.stage.poster = Some(poster));
+        Presenting::lend(|presenting| presenting.stage.present_through(Some(poster)));
     });
 }
 
@@ -401,8 +422,6 @@ mod ffi_test_stubs {
         _: *const *const c_void,
         _: usize,
         _: *const *const c_void,
-        _: usize,
-        _: *const u64,
         _: usize,
         _: *const c_void,
     ) -> bool {

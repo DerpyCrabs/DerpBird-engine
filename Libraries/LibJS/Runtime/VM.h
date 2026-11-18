@@ -26,7 +26,6 @@
 #include <AK/Variant.h>
 #include <AK/Vector.h>
 #include <AK/kmalloc.h>
-#include <LibCrypto/Forward.h>
 #include <LibGC/Function.h>
 #include <LibGC/Heap.h>
 #include <LibGC/RootHashMap.h>
@@ -210,8 +209,6 @@ public:
         __Count,
     };
     Utf16String const& error_message(ErrorMessage) const;
-
-    bool did_reach_stack_space_limit() const;
 
     // Pushes onto the runtime's execution context stack in place, as the runtime itself does, unless the stack's
     // storage is full, which only the runtime can grow.

@@ -11,8 +11,9 @@
 #![allow(non_camel_case_types)]
 
 use crate::css_pixels::{CssPixelPoint, CssPixels};
+use crate::display_list::chunks::ChunkId;
 use crate::display_list::commands::{CompositorContextId, UniqueNodeId};
-use crate::display_list::storage::{DisplayListStorage, packed_size, receive_packed};
+use crate::display_list::storage::PackedChunkSize;
 use crate::visual_context::VisualContextTree;
 use libipc_rust::wire::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, File};
 use std::sync::Arc;
@@ -156,22 +157,24 @@ impl Decode for Core_AnonymousBuffer {
     }
 }
 
-/// `Compositing::DisplayList`: a display list on its way to the compositor, with its tape and run table packed in shared
-/// memory, which the compositor copies out of it, and what travels beside them.
+/// `Compositing::DisplayList`: a display list on its way to the compositor. It names its chunks in paint order, and
+/// carries the records and runs of those the compositor does not keep packed in shared memory, which the compositor
+/// copies out of it, with what travels beside them.
 #[derive(Debug)]
 pub struct SharedDisplayList {
-    pub packed_tape: Core_AnonymousBuffer,
-    pub tape_size: u64,
-    pub run_count: u64,
+    pub chunks_in_paint_order: Vec<ChunkId>,
+    pub packed_chunks: Core_AnonymousBuffer,
+    /// The size of each chunk packed, in the order they are packed.
+    pub packed_chunk_sizes: Vec<PackedChunkSize>,
     pub properties: Compositing_DisplayListProperties,
     pub async_scrolling_metadata: Option<Compositing_AsyncScrollingMetadata>,
 }
 
 impl Encode for SharedDisplayList {
     fn encode(&self, encoder: &mut Encoder) -> Result<(), EncodeError> {
-        encoder.encode(&self.packed_tape)?;
-        encoder.encode(&self.tape_size)?;
-        encoder.encode(&self.run_count)?;
+        encoder.encode(&self.chunks_in_paint_order)?;
+        encoder.encode(&self.packed_chunks)?;
+        encoder.encode(&self.packed_chunk_sizes)?;
         encoder.encode(&self.properties)?;
         encoder.encode(&self.async_scrolling_metadata)
     }
@@ -180,135 +183,44 @@ impl Encode for SharedDisplayList {
 impl Decode for SharedDisplayList {
     fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
-            packed_tape: decoder.decode()?,
-            tape_size: decoder.decode()?,
-            run_count: decoder.decode()?,
+            chunks_in_paint_order: decoder.decode()?,
+            packed_chunks: decoder.decode()?,
+            packed_chunk_sizes: decoder.decode()?,
             properties: decoder.decode()?,
             async_scrolling_metadata: decoder.decode()?,
         })
     }
 }
 
-/// A display list that another one nests, with the tree it was recorded against.
-#[derive(Clone)]
-pub struct NestedDisplayListResource {
-    pub properties: Compositing_DisplayListProperties,
-    pub storage: Arc<DisplayListStorage>,
-    pub tree: Arc<VisualContextTree>,
-}
-
-impl NestedDisplayListResource {
-    /// Encodes the list as a resource transaction carries it: what travels alongside its tape, the tape and run table,
-    /// and its tree.
-    pub fn encode_into(&self, encoder: &mut Encoder) -> Result<(), EncodeError> {
-        encoder.encode(&self.properties)?;
-        encoder.encode_size(self.storage.bytes().len())?;
-        encoder.encode_size(self.storage.command_runs().len())?;
-        encoder.append_bytes(&self.storage.packed());
-        encoder.encode(&self.tree)
-    }
-}
-
-impl std::fmt::Debug for NestedDisplayListResource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NestedDisplayListResource")
-            .field("properties", &self.properties)
-            .finish_non_exhaustive()
-    }
-}
-
-/// `Compositing::DisplayListResourceTransaction` as it reaches the compositor's logic, which holds no fonts and no
-/// image frames: those go ahead of it, in messages that the C++ of the compositor takes.
-#[derive(Clone, Debug, Default)]
-pub struct Compositing_DisplayListResourceTransaction {
-    // The resource ID of each video sink, and the handle of the sink.
-    pub video_sinks: Vec<(u64, u64)>,
-    pub display_lists: Vec<NestedDisplayListResource>,
-    pub font_ids_to_remove: Vec<u64>,
-    pub image_frame_ids_to_remove: Vec<u64>,
-    pub video_sink_ids_to_remove: Vec<u64>,
-    pub display_list_ids_to_remove: Vec<u64>,
-}
-
-impl Compositing_DisplayListResourceTransaction {
-    pub fn removes_anything(&self) -> bool {
-        !self.font_ids_to_remove.is_empty()
-            || !self.image_frame_ids_to_remove.is_empty()
-            || !self.video_sink_ids_to_remove.is_empty()
-            || !self.display_list_ids_to_remove.is_empty()
-    }
-}
-
-impl Encode for Compositing_DisplayListResourceTransaction {
+impl Encode for ChunkId {
     fn encode(&self, encoder: &mut Encoder) -> Result<(), EncodeError> {
-        // No fonts, and no image frames.
-        encoder.encode_size(0)?;
-        encoder.encode_size(0)?;
-        encoder.encode_size(self.video_sinks.len())?;
-        for (id, handle) in &self.video_sinks {
-            encoder.encode(id)?;
-            encoder.encode(handle)?;
-        }
-        encoder.encode_size(self.display_lists.len())?;
-        for display_list in &self.display_lists {
-            display_list.encode_into(encoder)?;
-        }
-        encoder.encode(&self.font_ids_to_remove)?;
-        encoder.encode(&self.image_frame_ids_to_remove)?;
-        encoder.encode(&self.video_sink_ids_to_remove)?;
-        encoder.encode(&self.display_list_ids_to_remove)
+        encoder.encode(&self.0[0])?;
+        encoder.encode(&self.0[1])
     }
 }
 
-impl Decode for Compositing_DisplayListResourceTransaction {
-    const MIN_ENCODED_SIZE: usize = 0;
+impl Decode for ChunkId {
+    const MIN_ENCODED_SIZE: usize = 2 * size_of::<u64>();
 
     fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        if decoder.decode_size()? != 0 || decoder.decode_size()? != 0 {
-            return Err(DecodeError::InvalidValue(
-                "a display list's fonts and image frames go ahead of it",
-            ));
-        }
-        let video_sink_count = decoder.decode_size()?;
-        let mut video_sinks = Vec::new();
-        for _ in 0..video_sink_count {
-            video_sinks.push((decoder.decode()?, decoder.decode()?));
-        }
-        let display_list_count = decoder.decode_size()?;
-        let mut display_lists = Vec::new();
-        for _ in 0..display_list_count {
-            let properties: Compositing_DisplayListProperties = decoder.decode()?;
-            let tape_size = decoder.decode_size()?;
-            let run_count = decoder.decode_size()?;
-            let packed_size =
-                packed_size(tape_size, run_count).ok_or(DecodeError::InvalidValue("Display list sizes overflow"))?;
-            let packed = decoder.read_bytes(packed_size)?;
-            let storage = receive_packed(packed, tape_size, run_count).map_err(DecodeError::InvalidValue)?;
-            let tree: Arc<VisualContextTree> = decoder.decode()?;
-            if properties.compatible_visual_context_tree_structural_epoch != tree.structural_epoch {
-                return Err(DecodeError::InvalidValue(
-                    "Display list resource does not match its visual context tree",
-                ));
-            }
-            if !tree.display_list_references_only_live_nodes(storage.command_runs()) {
-                return Err(DecodeError::InvalidValue(
-                    "Display list resource references nodes its visual context tree does not hold",
-                ));
-            }
-            display_lists.push(NestedDisplayListResource {
-                properties,
-                storage,
-                tree,
-            });
-        }
+        Ok(Self([decoder.decode()?, decoder.decode()?]))
+    }
+}
+
+impl Encode for PackedChunkSize {
+    fn encode(&self, encoder: &mut Encoder) -> Result<(), EncodeError> {
+        encoder.encode(&self.record_bytes)?;
+        encoder.encode(&self.run_count)
+    }
+}
+
+impl Decode for PackedChunkSize {
+    const MIN_ENCODED_SIZE: usize = 2 * size_of::<u64>();
+
+    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
-            video_sinks,
-            display_lists,
-            font_ids_to_remove: decoder.decode()?,
-            image_frame_ids_to_remove: decoder.decode()?,
-            video_sink_ids_to_remove: decoder.decode()?,
-            display_list_ids_to_remove: decoder.decode()?,
+            record_bytes: decoder.decode()?,
+            run_count: decoder.decode()?,
         })
     }
 }

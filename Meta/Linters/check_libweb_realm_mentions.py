@@ -35,7 +35,12 @@ CHECKED_SUFFIXES = {
 # This is intentionally exact. If a component goes down, tighten the baseline in
 # the same change. If it goes up, justify the architecture change here.
 ALLOWED_REALM_MENTIONS = {
-    "Animations": (5, 14, "animation callbacks/events and CSS value materialization still pass spec-selected realms"),
+    "Animations": (
+        2,
+        4,
+        "host callbacks of the Rust animation code take the realm it selects to read the current high resolution time, "
+        "find an animation's relevant global object and wrap elements",
+    ),
     "CSS": (
         7,
         11,
@@ -43,7 +48,7 @@ ALLOWED_REALM_MENTIONS = {
     ),
     "Clipboard": (4, 8, "the C++ facades create the Rust objects and wrap DataTransfers in a given realm"),
     "ContentSecurityPolicy": (4, 10, "CSP violation/report objects and callbacks still materialize JS-facing values"),
-    "CookieStore": (2, 19, "cookie-store async callbacks and promise/value materialization still thread realms"),
+    "CookieStore": (2, 3, "the C++ facade creates the Rust CookieStore in a given realm"),
     "Crypto": (2, 3, "CryptoKey wrappers use the caller's realm and wrapper world"),
     "DOM": (
         9,
@@ -73,6 +78,12 @@ ALLOWED_REALM_MENTIONS = {
     ),
     "Infra": (2, 13, "JSON parse/serialization helpers still expose JS values in selected realms"),
     "Internals": (1, 1, "test-only internals still expose JS-facing helper objects and promises"),
+    "MediaSession": (
+        4,
+        10,
+        "MediaMetadata and ChapterInformation build the frozen arrays their [SameObject] FrozenArray attributes return, "
+        "freezing the elements too, which the generated conversion doesn't do",
+    ),
     "SVG": (2, 8, "SVG length objects still store/use realms for detached/reflected JS/CSS materialization"),
     "ServiceWorker": (
         6,

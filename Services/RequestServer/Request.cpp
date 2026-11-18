@@ -847,7 +847,8 @@ void Request::handle_fetch_complete(int result_code)
             if (m_type == RequestType::BackgroundRevalidation && m_disk_cache->mode() == HTTP::DiskCache::Mode::Testing)
                 m_response_headers->set({ HTTP::TEST_CACHE_REVALIDATION_STATUS_HEADER, "fresh"sv });
 
-            m_cache_entry_reader->revalidation_succeeded(m_response_headers);
+            auto current_time_offset_for_testing = HTTP::compute_current_time_offset_for_testing(m_disk_cache, *m_request_headers);
+            m_cache_entry_reader->revalidation_succeeded(m_response_headers, m_request_start_time + current_time_offset_for_testing, UnixDateTime::now() + current_time_offset_for_testing);
             m_cache_entry_was_revalidated = true;
             transition_to_state(m_type == RequestType::Fetch ? State::ReadCache : State::Complete);
             return;
@@ -1394,8 +1395,24 @@ void Request::handle_dns_lookup_state()
     }
 
     m_pending_ip_addresses.clear();
-    // Avoid leaking hostnames resolved by the proxy.
     m_proxy = proxy_configuration().proxy_for(m_url).copy();
+    // The proxy configuration can change while a lookup is pending, so resolve again for a different proxy.
+    if (!m_proxy_host_resolved || m_resolved_proxy != m_proxy) {
+        resolve_proxy_host(m_proxy, weak_callback(*this, [proxy = m_proxy](auto& self, ErrorOr<void> result) {
+            if (result.is_error()) {
+                dbgln("Request::handle_dns_lookup_state: Proxy lookup failed: {}", result.error());
+                self.m_network_error = Requests::NetworkError::UnableToResolveProxy;
+                self.transition_to_state(State::Error);
+                return;
+            }
+            self.m_proxy_host_resolved = true;
+            self.m_resolved_proxy = proxy;
+            self.handle_dns_lookup_state();
+        }));
+        return;
+    }
+
+    // Avoid leaking hostnames resolved by the proxy.
     if (m_proxy.has_value() && m_proxy->resolves_hostnames()
         && !IPv4Address::from_string(m_url.serialized_host()).has_value()
         && !IPv6Address::from_string(m_url.serialized_host()).has_value()) {
@@ -1450,6 +1467,23 @@ void Request::resolve_connection_host(ByteString host)
             self.m_dns_result = move(snapshot);
             self.check_canonical_urls_before_connect();
         }));
+}
+
+// Pins the request's host, if it was resolved, and its proxy's host, if that's given by name, so that curl resolves
+// neither itself.
+void Request::set_curl_resolve_list(Optional<ByteString> host_entry)
+{
+    curl_slist* resolve_list = nullptr;
+    if (host_entry.has_value())
+        resolve_list = curl_slist_append(resolve_list, host_entry->characters());
+    if (auto proxy_entry = curl_resolve_entry_for_proxy(m_proxy); proxy_entry.has_value())
+        resolve_list = curl_slist_append(resolve_list, proxy_entry->characters());
+    if (!resolve_list)
+        return;
+
+    auto result = curl_easy_setopt(m_curl_easy_handle, CURLOPT_RESOLVE, resolve_list);
+    VERIFY(result == CURLE_OK);
+    m_curl_string_lists.append(resolve_list);
 }
 
 StringView Request::connect_host() const
@@ -1631,15 +1665,7 @@ void Request::handle_connect_state()
     set_option(CURLOPT_PROXY, m_proxy.has_value() ? m_proxy->to_curl_url().characters() : "");
 
     // Pre-populate the multi's hostcache so libcurl skips its threaded resolver entirely.
-    if (m_dns_result) {
-        auto formatted_address = build_curl_resolve_list(*m_dns_result, m_url.serialized_host(), m_url.port_or_default());
-        if (curl_slist* resolve_list = curl_slist_append(nullptr, formatted_address.characters())) {
-            set_option(CURLOPT_RESOLVE, resolve_list);
-            m_curl_string_lists.append(resolve_list);
-        } else {
-            VERIFY_NOT_REACHED();
-        }
-    }
+    set_curl_resolve_list(m_dns_result ? build_curl_resolve_list(*m_dns_result, m_url.serialized_host(), m_url.port_or_default()) : Optional<ByteString> {});
 
     if ((m_query_response_policy & 8) && m_dns_result && (!m_proxy.has_value() || !m_proxy->resolves_hostnames())) {
         // CONNECT_TO controls the connection-pool destination, while TLS/SNI
@@ -1881,16 +1907,7 @@ void Request::handle_fetch_state()
 
     set_option(CURLOPT_PROXY, m_proxy.has_value() ? m_proxy->to_curl_url().characters() : "");
 
-    if (m_dns_result) {
-        auto formatted_address = build_curl_resolve_list(*m_dns_result, connect_host(), connect_port());
-
-        if (curl_slist* resolve_list = curl_slist_append(nullptr, formatted_address.characters())) {
-            set_option(CURLOPT_RESOLVE, resolve_list);
-            m_curl_string_lists.append(resolve_list);
-        } else {
-            VERIFY_NOT_REACHED();
-        }
-    }
+    set_curl_resolve_list(m_dns_result ? build_curl_resolve_list(*m_dns_result, connect_host(), connect_port()) : Optional<ByteString> {});
 
     // libcurl authenticates the alternative as the origin.
     if (m_alternative_service.has_value() && (connect_host() != m_url.serialized_host() || connect_port() != m_url.port_or_default())) {
@@ -2600,7 +2617,7 @@ void Request::send_headers_to_client()
     auto cache_state = Requests::CacheState::NotCached;
     if (m_cache_status == CacheStatus::ReadFromCache)
         cache_state = m_cache_entry_was_revalidated ? Requests::CacheState::Validated : Requests::CacheState::Local;
-    m_client->async_headers_became_available(m_request_id, m_response_headers->headers(), m_status_code, m_reason_phrase, cache_state, m_http_version, m_canonical_host_names, policy_ip_addresses());
+    m_client->async_headers_became_available(m_request_id, m_url, m_response_headers->headers(), m_status_code, m_reason_phrase, cache_state, m_http_version, m_canonical_host_names, policy_ip_addresses());
 }
 
 void Request::write_to_disk_cache(ReadonlyBytes bytes)

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Atomic.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/Promise.h>
 #include <LibCore/System.h>
@@ -12,8 +13,15 @@
 
 namespace Requests {
 
+static u64 take_transport_epoch()
+{
+    static Atomic<u64> s_next_transport_epoch { 1 };
+    return s_next_transport_epoch.fetch_add(1);
+}
+
 RequestClient::RequestClient(NonnullOwnPtr<IPC::Transport> transport)
     : IPC::ConnectionToServer<RequestClientEndpoint, RequestServerEndpoint>(*this, move(transport))
+    , m_transport_epoch(take_transport_epoch())
 {
     m_request_server_client_id = send_sync<Messages::RequestServer::GetClientId>()->client_id();
 }
@@ -21,6 +29,7 @@ RequestClient::RequestClient(NonnullOwnPtr<IPC::Transport> transport)
 RequestClient::RequestClient(NonnullOwnPtr<IPC::Transport> transport, int client_id)
     : IPC::ConnectionToServer<RequestClientEndpoint, RequestServerEndpoint>(*this, move(transport))
     , m_request_server_client_id(client_id)
+    , m_transport_epoch(take_transport_epoch())
 {
 }
 
@@ -273,13 +282,13 @@ void RequestClient::query_response_header_policy(u64 request_id, u64 generation,
     IPCProxy::async_resolve_response_header_policy(request_id, generation, mask & 24, background);
 }
 
-void RequestClient::headers_became_available(u64 request_id, Vector<HTTP::Header> response_headers, Optional<u32> status_code, Optional<String> reason_phrase, CacheState cache_state, ByteString http_version, String canonical_host_names, String ip_addresses)
+void RequestClient::headers_became_available(u64 request_id, URL::URL url, Vector<HTTP::Header> response_headers, Optional<u32> status_code, Optional<String> reason_phrase, CacheState cache_state, ByteString http_version, String canonical_host_names, String ip_addresses)
 {
     RefPtr<Request> request = m_requests.get(request_id).value_or(nullptr);
     if (request) {
         auto headers = HTTP::HeaderList::create(move(response_headers));
         headers->set_canonical_host_names(move(canonical_host_names));
-        request->did_receive_headers({}, move(headers), status_code, reason_phrase, cache_state, move(http_version), move(ip_addresses));
+        request->did_receive_headers({}, move(url), move(headers), status_code, reason_phrase, cache_state, move(http_version), move(ip_addresses));
     } else
         warnln("Received headers for non-existent request {}", request_id);
 }

@@ -19,10 +19,9 @@ use crate::host::{
 };
 use crate::overlays::UIOverlays;
 use crate::presenting::ContextPresenting;
-use crate::raster_host::{FfiResourceChanges, FfiVideoSinkResource, RasterHost, SurfaceHandle};
+use crate::raster_host::{RasterHost, SurfaceHandle};
 use crate::wheel_gesture_routing::WheelGestureIdAllocator;
 use libcompositing_rust::ipc_types::Compositing_ContextVisibility as ContextVisibility;
-use libcompositing_rust::ipc_types::Compositing_DisplayListResourceTransaction;
 use libcompositing_rust::scrolling::{
     AccumulatedVisualContextTree, CompositorContextId, DisplayList, KeyboardScrollState, ScrollStateSnapshot,
 };
@@ -46,6 +45,7 @@ pub struct CompositorCore {
     is_entered: Cell<bool>,
     wheel_gesture_id_allocator: Rc<WheelGestureIdAllocator>,
     scrollbars_always_shown: bool,
+    display_list_chunk_stores: RefCell<crate::display_list_chunk_stores::DisplayListChunkStores>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,7 +117,24 @@ impl CompositorCore {
             is_entered: Cell::new(false),
             wheel_gesture_id_allocator: Rc::new(WheelGestureIdAllocator::default()),
             scrollbars_always_shown,
+            display_list_chunk_stores: RefCell::default(),
         }
+    }
+
+    /// Takes in the chunks of the display list `client` sent for `context_id` (see [`DisplayListChunkStores::take_in`]).
+    ///
+    /// [`DisplayListChunkStores::take_in`]: crate::display_list_chunk_stores::DisplayListChunkStores::take_in
+    pub fn take_in_display_list_chunks(
+        &self,
+        client: WebContentClientId,
+        context_id: CompositorContextId,
+        sent: Vec<libcompositing_rust::display_list::storage::ReceivedChunk>,
+        chunks_in_paint_order: &[libcompositing_rust::display_list::chunks::ChunkId],
+    ) -> Result<Option<Vec<std::sync::Arc<libcompositing_rust::display_list::storage::ReceivedChunk>>>, &'static str>
+    {
+        self.display_list_chunk_stores
+            .borrow_mut()
+            .take_in(client, context_id, sent, chunks_in_paint_order)
     }
 
     pub fn raster(&self) -> &RasterHost {
@@ -180,6 +197,7 @@ impl CompositorCore {
         }
         self.contexts.remove(&context_id);
         self.presenting.remove(&context_id);
+        self.display_list_chunk_stores.borrow_mut().forget_context(context_id);
         self.update_scroll_capabilities();
         self.raster
             .set_maximum_display_refresh_rate(self.maximum_display_refresh_rate());
@@ -691,48 +709,22 @@ impl CompositorCore {
         installed
     }
 
-    /// Adds and removes the resources that a display list or a visual context tree that the context took comes with.
-    /// Answers false, changing nothing, for display lists that would nest themselves.
-    pub fn apply_resource_transaction(
-        &self,
-        context_id: CompositorContextId,
-        transaction: Compositing_DisplayListResourceTransaction,
-    ) -> bool {
+    /// Tells the host which fonts, image frames, video sinks and SVG images the context draws, now that it took a
+    /// display list or a visual context tree. The host keeps those for it, and lets go of the others.
+    pub fn keep_only_drawn_resources(&self, context_id: CompositorContextId) {
         let _entered = self.enter();
 
         let Some(context) = self.context_if_present(context_id) else {
-            return true;
+            return;
         };
-        let changes_resources_held_by_the_host = !transaction.video_sinks.is_empty() || transaction.removes_anything();
-        if !transaction.display_lists.is_empty() || !transaction.display_list_ids_to_remove.is_empty() {
-            let mut context = context.borrow_mut();
-            let nested_display_lists = context.nested_display_lists_mut();
-            if !nested_display_lists.add_all(transaction.display_lists) {
-                return false;
-            }
-            for &display_list_id in &transaction.display_list_ids_to_remove {
-                nested_display_lists.remove(display_list_id);
-            }
-        }
-        if !changes_resources_held_by_the_host {
-            return true;
-        }
-        let video_sinks: Vec<FfiVideoSinkResource> = transaction
-            .video_sinks
-            .iter()
-            .map(|&(id, sink_handle)| FfiVideoSinkResource { id, sink_handle })
-            .collect();
-        self.raster.apply_resource_changes(
-            context_id,
-            &FfiResourceChanges {
-                video_sinks: ak::Span::new(&video_sinks),
-                font_ids_to_remove: ak::Span::new(&transaction.font_ids_to_remove),
-                image_frame_ids_to_remove: ak::Span::new(&transaction.image_frame_ids_to_remove),
-                video_sink_ids_to_remove: ak::Span::new(&transaction.video_sink_ids_to_remove),
-                display_list_ids_to_remove: ak::Span::new(&transaction.display_list_ids_to_remove),
-            },
-        );
-        true
+        let font_ids = context.borrow().font_ids_drawn();
+        self.raster.set_drawn_fonts(context_id, &font_ids);
+        let image_frame_ids = context.borrow().image_frame_ids_drawn();
+        self.raster.set_drawn_image_frames(context_id, &image_frame_ids);
+        let video_sink_handles = context.borrow().video_sink_handles_drawn();
+        self.raster.set_drawn_video_sinks(context_id, &video_sink_handles);
+        let vector_image_ids = context.borrow().vector_image_ids_drawn();
+        self.raster.set_drawn_vector_images(context_id, &vector_image_ids);
     }
 
     // Returns false for a tree that does not fit the installed display list, of which only the scroll state is taken.
@@ -797,16 +789,6 @@ impl CompositorCore {
                 self.resize_backing_stores_if_needed(context_id, now);
             }
             ContextTimer::SurplusStoreRetirement => self.retire_idle_surplus_backing_stores(context_id),
-            ContextTimer::LayerDrop => {
-                if let Some(presenting) = self.presenting_of(context_id) {
-                    let environment = self.environment(
-                        context_id,
-                        now,
-                        &libcompositing_rust::display_list::replay::NoCompositedContexts,
-                    );
-                    presenting.borrow_mut().layer_drop_timer_fired(&environment);
-                }
-            }
             _ => {
                 let caret_damage_rect = context.borrow_mut().timer_fired(timer, now);
                 if let Some(caret_damage_rect) = caret_damage_rect {

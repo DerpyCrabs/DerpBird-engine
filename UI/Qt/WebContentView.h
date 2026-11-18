@@ -180,6 +180,7 @@ public:
     // A card that floats over the page, such as the find bar. Qt paints it above the page, so whatever presents the
     // page above Qt's painting steps aside while it shows.
     void add_floating_surface(QWidget&);
+    void remove_floating_surface(QWidget&);
     // The address field's suggestions float over the page as such a card does, but outlive the view, as they belong to
     // the window.
     void set_suggestions_over_page(bool);
@@ -206,8 +207,6 @@ public:
     // Frames that the Compositor shows itself are only announced while something here wants to hear of them.
     void add_frame_notification_interest();
     void remove_frame_notification_interest();
-
-    WebView::AccessibilityTreeManager const* accessibility_tree_manager() const { return m_accessibility_manager.ptr(); }
 
 #if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
     QAccessibleInterface* accessibility_interface_for_node(i64 node_id);
@@ -360,7 +359,11 @@ private:
     bool m_tab_preview_is_stale { true };
     bool m_tab_preview_request_in_flight { false };
     QPointer<ScreenshotViewer> m_screenshot_viewer;
-    Vector<QPointer<QWidget>> m_floating_surfaces;
+    struct FloatingSurface {
+        QPointer<QWidget> surface;
+        QPointer<QObject> watcher;
+    };
+    Vector<FloatingSurface> m_floating_surfaces;
     bool can_composite_floating_surfaces() const;
     bool update_floating_surface_overlay();
     void schedule_floating_surface_update();
@@ -500,6 +503,7 @@ private:
     void release_retired_backing_stores_no_longer_painted();
     void release_all_retired_backing_stores();
     QRect rect_shown_in_window() const;
+    QPoint position_in_surface_of(QWindow const& parent, QPoint) const;
 
     // Shows the page's frames on Wayland by handing their dma-bufs to the compositor of the desktop. Without it, the
     // page's window draws them in a swap chain of its own.
@@ -507,7 +511,7 @@ private:
     bool m_page_surface_failed { false };
     // Where the page surface shows a frame, in device pixels of the view.
     QRect m_page_surface_rect;
-    // Where the page surface last showed a frame, in the logical coordinates of the browser window.
+    // Where the page surface last showed a frame, in the logical coordinates of the browser window's surface.
     QPoint m_page_surface_position;
     // The backing stores the view is done with that the compositor of the desktop may still read. The page they belong
     // to can stop displaying the tab before the compositor is done.

@@ -26,14 +26,12 @@
 #include <LibWeb/HTML/HTMLDocument.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
-#include <LibWeb/Geolocation/Geolocation.h>
 #include <LibWeb/HTML/WindowProxy.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/IntersectionObserver/IntersectionObserver.h>
 #include <LibWeb/Page/DerpBirdScriptWorld.h>
 #include <LibWeb/Platform/FontPlugin.h>
-#include <LibWeb/WebIDL/CallbackType.h>
 
 namespace {
 
@@ -181,10 +179,7 @@ TEST_CASE(derpbird_function_timers_keep_receiver_in_script_world)
         geoCallback;
     )JS"_utf16));
     VERIFY(!geo_callback_result.is_abrupt());
-    auto& geo_function = geo_callback_result.value().as_object();
-    auto geo_callback = vm.heap().allocate<Web::WebIDL::CallbackType>(geo_function, geo_function.shape().realm());
-    auto geolocation = Web::Geolocation::Geolocation::create(*document->window());
-    geolocation->get_current_position(geo_callback, geo_callback, {});
+    run("navigator.geolocation.getCurrentPosition(geoCallback, geoCallback)"_utf16);
     expired = false;
     deadline->start();
     event_loop.spin_until([&] { return expired || run("geoDone"_utf16).as_bool(); });
@@ -192,7 +187,7 @@ TEST_CASE(derpbird_function_timers_keep_receiver_in_script_world)
     VERIFY(!expired);
     EXPECT(run("geoIsolated"_utf16).as_bool());
     run("document.documentElement.removeAttribute('data-geo-callback')"_utf16);
-    geolocation->get_current_position(geo_callback, geo_callback, {});
+    run("navigator.geolocation.getCurrentPosition(geoCallback, geoCallback)"_utf16);
     // Queue callbacks before revocation, then let real task delivery run. A
     // surviving world and the page must continue receiving their own timers.
     run(R"JS(

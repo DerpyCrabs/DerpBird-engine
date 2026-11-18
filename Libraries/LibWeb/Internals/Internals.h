@@ -10,6 +10,7 @@
 #include <LibCompositing/Types.h>
 #include <LibGC/Root.h>
 #include <LibWeb/Bindings/Internals.h>
+#include <LibWeb/Bindings/MediaSession.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
@@ -198,7 +199,7 @@ public:
     GC::Ref<JS::Object> recorded_display_list_wheel_target_at(double x, double y, double delta_x, double delta_y);
     bool recorded_display_list_blocks_wheel_event_at(double x, double y);
     GC::Ref<JS::Object> recorded_async_scrolling_state_object();
-    void record_display_list_for_testing(bool paint_overlay, bool cold);
+    void record_display_list_for_testing(bool paint_overlay, bool cold, bool finest_runs);
     void set_autoplay_policy(Utf16String const& policy);
 
     Utf16String get_computed_role(DOM::Element& element);
@@ -228,7 +229,8 @@ public:
     bool needs_display_list_record();
     bool has_animation_frame_callbacks();
 
-    Utf16String dump_display_list();
+    Utf16String dump_display_list(Bindings::DisplayListDumpOptions const&);
+    Utf16String dump_display_list_changes(Bindings::DisplayListDumpOptions const&);
     Utf16String dump_accessibility_tree();
     String accessibility_character_offsets(GC::Ref<DOM::Node>);
     String dump_accessibility_node_data(GC::Ref<DOM::Node>);
@@ -283,7 +285,7 @@ public:
     void set_geolocation_emulated_position(double latitude, double longitude, double accuracy, Optional<double> altitude, Optional<double> altitude_accuracy, Optional<double> heading, Optional<double> speed);
     void set_geolocation_emulated_position_unavailable();
 
-    GC::Ref<WebIDL::Promise> request_permission(Utf16String const& name);
+    WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> request_permission(Utf16String const& name);
     GC::Ref<WebIDL::Promise> set_permission(Utf16String const& name, Utf16String const& state);
     void set_next_permission_prompt_outcome(Utf16String const& name, Utf16String const& outcome, bool held);
     void set_system_microphone_authorization(Utf16String const& authorization, Utf16String const& answer, bool held);
@@ -297,6 +299,8 @@ public:
     void click_notification_for_testing(NotificationsAPI::Notification&);
     void click_notification_by_id_for_testing(WebIDL::UnsignedLongLong browser_notification_id);
     void dismiss_notification_for_testing(NotificationsAPI::Notification&);
+    void hold_next_notification_show_for_testing();
+    void fail_held_notification_show_for_testing();
 
     void set_manual_rendering_opportunities(bool enabled);
     void inject_rendering_opportunity(double frame_time_ms);
@@ -359,6 +363,11 @@ public:
     WebIDL::ExceptionOr<GC::Ref<JS::Object>> image_animation_state_for_url(Utf16String const& url);
     bool media_element_is_fetching(HTML::HTMLMediaElement&);
     bool media_element_is_playing_audio(HTML::HTMLMediaElement&);
+    JS::Value active_media_session_state();
+    JS::Value now_playing_state_for_testing();
+    WebIDL::ExceptionOr<void> trigger_now_playing_action_for_testing(Bindings::MediaSessionAction, GC::Ptr<JS::Object> details);
+    GC::Ref<WebIDL::Promise> wait_for_media_session_artwork();
+    WebIDL::ExceptionOr<void> trigger_media_session_action(Bindings::MediaSessionAction, GC::Ptr<JS::Object> details);
     bool document_is_playing_audio(DOM::Document&);
     bool tab_is_playing_audio();
     bool tab_is_heard_playing_audio();
@@ -393,6 +402,12 @@ private:
     GC::Root<JS::Cell> m_actions_executor;
     bool m_actions_running { false };
     Optional<Utf16String> m_pending_action_test_result;
+
+    struct DisplayListDumpForChanges {
+        UniqueNodeID document_id;
+        String jsonl;
+    };
+    Optional<DisplayListDumpForChanges> m_display_list_dump_for_changes;
     Vector<GC::Ref<InternalGamepad>> m_gamepads;
     Optional<HTML::DevToolsObjectTable> m_devtools_object_table;
     HTML::DevToolsLoggedObjects m_devtools_logged_objects;
