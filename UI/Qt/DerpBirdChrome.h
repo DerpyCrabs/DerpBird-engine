@@ -129,6 +129,7 @@ private:
     };
     QHash<Tab*, Observation> m_observed_tabs;
     u64 m_revision { 0 };
+    bool m_focus_address_pending { false };
     bool m_snapshot_queued { false };
 };
 

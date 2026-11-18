@@ -113,6 +113,7 @@ public:
     void did_get_real_size() { m_has_had_real_size = true; }
 
     void navigate(URL::URL const&);
+    void restore_navigation(URL::URL const&, Optional<WebView::SessionHistorySnapshot>);
     void load_html(StringView);
 
     void open_file();

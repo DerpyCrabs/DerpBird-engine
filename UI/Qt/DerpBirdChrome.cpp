@@ -834,7 +834,10 @@ void DerpBirdChrome::observe_tab(Tab& tab)
                     self->queue_snapshot();
                 });
         };
-        connect(&tab.location_edit(), &QLineEdit::textChanged, scope, [this] { queue_snapshot(); });
+        connect(&tab.location_edit(), &QLineEdit::textChanged, scope, [this] {
+            if (m_content->isHidden()) place_content();
+            queue_snapshot();
+        });
         // Native surfaces can change while QStackedWidget is removing a page,
         // before its stack and tab bar have matching indices again.
         connect(&tab.view(), &WebContentView::native_surface_changed, scope, [this] { place_content(); }, Qt::QueuedConnection);
@@ -847,8 +850,10 @@ void DerpBirdChrome::observe_tab(Tab& tab)
         WebView::ViewImplementation::NavigationListener listener;
         listener.on_load_start = [self = QPointer(this), view = QPointer(&tab.view())](auto const&) { if (self && self->m_autofill_view == view) self->clear_autofill(); };
         listener.on_load_finish = [self = QPointer(this)](auto const&) {
-            if (self)
+            if (self) {
+                if (self->m_content->isHidden()) self->place_content();
                 self->queue_snapshot();
+            }
         };
         observation.navigation_listener = tab.view().add_navigation_listener(AK::move(listener));
         place_content();
@@ -1034,6 +1039,8 @@ JsonValue DerpBirdChrome::snapshot()
         JsonObject entry;
         entry.set("id"sv, tab_id(tab));
         entry.set("url"sv, tab.url().serialize());
+        if (tab.is_loaded() && tab.url() == URL::about_blank() && tab.url_is_hidden())
+            entry.set("blankNewTab"sv, true);
         entry.set("title"sv, ak_string_from_qstring(tab.title()));
         auto icon_key = tab.favicon().cacheKey();
         auto cached = m_favicon_cache.find(&tab);
@@ -1168,7 +1175,12 @@ void DerpBirdChrome::queue_snapshot()
     m_snapshot_queued = true;
     QTimer::singleShot(0, this, [this] {
         m_snapshot_queued = false;
-        m_shell->send_derpbird_shell_message("derpbird.snapshot"_string, snapshot());
+        auto state = snapshot();
+        if (m_focus_address_pending) {
+            m_focus_address_pending = false;
+            state.as_object().set("focusAddress"sv, true);
+        }
+        m_shell->send_derpbird_shell_message("derpbird.snapshot"_string, state);
     });
 }
 
@@ -1235,10 +1247,10 @@ bool DerpBirdChrome::eventFilter(QObject* watched, QEvent* event)
 void DerpBirdChrome::focus_address()
 {
     clear_autofill();
+    place_content();
     m_shell->setFocus();
-    // This constant program only runs in the dedicated shell view.
-    m_shell->run_javascript(
-        "window.dispatchEvent(new Event('derpbird-shell-keyboard-focus'));window.dispatchEvent(new Event('derpbird-focus-address'))"_string);
+    m_focus_address_pending = true;
+    queue_snapshot();
 }
 
 ErrorOr<JsonValue> DerpBirdChrome::request(JsonValue const& data)
@@ -1471,6 +1483,8 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
                 { *parsed }, {}, BrowserWindow::IsPopupWindow::No,
                 *is_private ? WebView::IsPrivate::Yes : WebView::IsPrivate::No, {}, ShowWindow::Yes, {},
                 data.get_string("agentId"sv).has_value() ? qstring_from_ak_string(*data.get_string("agentId"sv)) : QString {});
+        } else if (!url.has_value()) {
+            m_window.open_new_tab();
         } else {
             m_window.new_tab_from_url(*parsed, Web::HTML::ActivateTab::Yes,
                 BrowserWindow::TabLocation::end());
@@ -1855,7 +1869,13 @@ void DerpBirdChrome::place_content()
     if (!m_content || m_placing_content) return;
     QScopedValueRollback placing(m_placing_content, true);
     auto placement = m_surface_state.placement(rect());
-    if (!placement.visible()) {
+    auto* active = m_window.current_tab();
+    auto* split = split_for(active);
+    // The shell paints the empty new tab. The native web canvas can already
+    // be white before the shell receives its first snapshot for this tab.
+    bool shell_new_tab = active && !split && (active->url() == WebView::Settings::default_new_tab_page_url()
+        || (active->is_loaded() && active->url_is_hidden() && (active->url().scheme().is_empty() || active->url() == URL::about_blank())));
+    if (!placement.visible() || shell_new_tab) {
         m_shell->set_compositing_above(nullptr);
         m_content->hide();
         return;
@@ -1863,8 +1883,6 @@ void DerpBirdChrome::place_content()
     if (m_content->geometry() != placement.viewport) m_content->setGeometry(placement.viewport);
     m_content->setAttribute(Qt::WA_TransparentForMouseEvents, m_surface_state.captures_input());
     if (m_content->mask() != placement.visible_region) m_content->setMask(placement.visible_region);
-    auto* active = m_window.current_tab();
-    auto* split = split_for(active);
     QPointer<Tab> first = split ? split->first.data() : active;
     QPointer<Tab> second = split ? split->second : nullptr;
     QRect first_rect(QPoint(), placement.viewport.size()), second_rect;

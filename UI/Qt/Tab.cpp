@@ -1024,8 +1024,29 @@ void Tab::ensure_loaded()
     Optional<WebView::SessionHistorySnapshot> history;
     if (m_session_tab_id.has_value())
         history = m_window->session().load_tab_history(*m_session_tab_id);
+    restore_navigation(deferred_url, AK::move(history));
+}
+
+void Tab::restore_navigation(URL::URL const& url, Optional<WebView::SessionHistorySnapshot> history)
+{
+    if (m_window->derpbird_chrome() && url == URL::about_blank()) {
+        // Older profiles store the default page as a URL alone or a single
+        // browser-initiated blank entry. Preserve histories created by sites.
+        bool browser_blank = !history.has_value();
+        if (history.has_value() && history->entries.size() == 1 && history->used_steps.size() == 1) {
+            auto const& entry = history->entries.first();
+            auto const& state = entry.document_state;
+            browser_blank = entry.url == url && state.user_agent_initiated == Web::HTML::UserAgentInitiated::Yes
+                && state.about_base_url == url && state.nested_histories.is_empty()
+                && (!state.initiator_origin.has_value() || state.initiator_origin->is_opaque());
+        }
+        if (browser_blank) {
+            navigate(WebView::Settings::default_new_tab_page_url());
+            return;
+        }
+    }
     if (!history.has_value() || view().restore_session_history_from_snapshot(history.release_value()).is_error())
-        navigate(deferred_url);
+        navigate(url);
 }
 
 URL::URL Tab::url() const

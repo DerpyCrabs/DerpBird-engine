@@ -770,7 +770,8 @@ void BrowserWindow::on_devtools_disabled()
 
 Tab& BrowserWindow::new_tab_from_url(URL::URL const& url, Web::HTML::ActivateTab activate_tab, TabLocation location)
 {
-    auto& tab = create_new_tab(activate_tab, location);
+    bool empty_start_page = derpbird_chrome() && url == WebView::Settings::default_new_tab_page_url();
+    auto& tab = create_new_tab(activate_tab, location, empty_start_page);
     tab.navigate(url);
     return tab;
 }
@@ -873,9 +874,7 @@ Tab& BrowserWindow::create_restored_tab(RestoredSessionTab const& restored, int 
     m_tabs_container->insert_tab(index, tab, "New Tab");
     initialize_tab(tab);
 
-    auto history = session().load_tab_history(restored.tab_id);
-    if (!history.has_value() || tab->view().restore_session_history_from_snapshot(history.release_value()).is_error())
-        tab->navigate(restored.url);
+    tab->restore_navigation(restored.url, session().load_tab_history(restored.tab_id));
     return *tab;
 }
 
@@ -915,11 +914,14 @@ bool BrowserWindow::has_chrome_in_titlebar()
     return use_native_macos_window_controls() || uses_client_side_decorations();
 }
 
-Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab, TabLocation location)
+Tab& BrowserWindow::create_new_tab(Web::HTML::ActivateTab activate_tab, TabLocation location, bool empty_start_page)
 {
     cancel_window_close_preflight();
 
     auto* tab = new Tab(this);
+    // Mark the browser-owned page before selecting the tab can expose its initial canvas.
+    if (empty_start_page)
+        tab->set_url_is_hidden(true);
 
     if (m_current_tab == nullptr) {
         set_current_tab(tab);

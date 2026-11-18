@@ -406,6 +406,15 @@ static bool config_variable_value_is_valid(ConfigVariableDefinition const& varia
     return true;
 }
 
+// Older profiles used about:blank for the browser's empty start page.
+// Only normalize the new-tab preference, never a URL requested by a website.
+static URL::URL resolve_new_tab_preference(URL::URL url)
+{
+    if (url == URL::about_blank())
+        return Settings::default_new_tab_page_url();
+    return url;
+}
+
 void Settings::load_from_json(JsonValue const& json_value)
 {
     auto const& json = json_value.as_object();
@@ -416,7 +425,7 @@ void Settings::load_from_json(JsonValue const& json_value)
 
     if (auto new_tab_page_url = json.get_string(NEW_TAB_PAGE_URL_KEY); new_tab_page_url.has_value()) {
         if (auto parsed_new_tab_page_url = URL::Parser::basic_parse(*new_tab_page_url); parsed_new_tab_page_url.has_value())
-            m_new_tab_page_url = parsed_new_tab_page_url.release_value();
+            m_new_tab_page_url = resolve_new_tab_preference(parsed_new_tab_page_url.release_value());
     }
 
     m_restore_previous_session = !json.get_bool(SESSION_RESTORE_INITIALIZED_KEY).value_or(false) || json.get_bool(RESTORE_PREVIOUS_SESSION_KEY).value_or(true);
@@ -1055,7 +1064,7 @@ URL::URL const& Settings::default_new_tab_page_url()
 
 void Settings::set_new_tab_page_url(URL::URL new_tab_page_url)
 {
-    m_new_tab_page_url = move(new_tab_page_url);
+    m_new_tab_page_url = resolve_new_tab_preference(move(new_tab_page_url));
     persist_settings();
 
     for (auto& observer : m_observers)

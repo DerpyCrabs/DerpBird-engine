@@ -1887,8 +1887,7 @@ void Application::reopen_recently_closed_tab(BrowserWindow* target_window, Optio
         if (restored_tab_index == unit.active_tab_index)
             tab_to_activate = &tab;
 
-        if (!closed_tab.history.has_value() || tab.view().restore_session_history_from_snapshot(closed_tab.history.release_value()).is_error())
-            tab.navigate(closed_tab.active_url);
+        tab.restore_navigation(closed_tab.active_url, move(closed_tab.history));
 
         if (closed_tab.pinned) {
             // Back in its own window, a pinned tab goes back to its place in the pinned group.
