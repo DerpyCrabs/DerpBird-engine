@@ -62,6 +62,7 @@ private:
     void set_volume(double);
     void toggle_mute();
     void toggle_fullscreen();
+    void update_download_button();
 
     struct TimelineRange {
         double start { 0 };

@@ -96,6 +96,9 @@ void MediaControls::create_shadow_tree()
     if (is_picture_in_picture_player())
         MUST(m_dom->container->class_list()->add("picture-in-picture-player"_utf16));
 
+    if (m_dom->download_inline && (!m_media_element->paused() || m_media_element->played()->length()))
+        MUST(m_dom->container->class_list()->add("started"_utf16));
+    update_download_button();
     // Initialize state
     update_play_pause_icon();
     update_timestamp();
@@ -212,6 +215,7 @@ void MediaControls::set_up_event_listeners()
     add_event_listener(media_realm, media_element, HTML::EventNames::playing, [](MediaControls& self) {
         self.update_play_pause_icon();
         self.update_placeholder_visibility();
+        MUST(self.m_dom->container->class_list()->add("started"_utf16));
         self.request_timeline_update();
         return true;
     });
@@ -239,7 +243,12 @@ void MediaControls::set_up_event_listeners()
         self.update_volume_and_mute_indicator();
         return true;
     });
+    add_event_listener(media_realm, media_element, HTML::EventNames::loadstart, [](MediaControls& self) {
+        self.update_download_button();
+        return true;
+    });
     add_event_listener(media_realm, media_element, HTML::EventNames::loadedmetadata, [](MediaControls& self) {
+        self.update_download_button();
         self.update_timestamp();
         self.update_volume_and_mute_indicator();
         return true;
@@ -253,6 +262,8 @@ void MediaControls::set_up_event_listeners()
         return true;
     });
     add_event_listener(media_realm, media_element, HTML::EventNames::emptied, [](MediaControls& self) {
+        MUST(self.m_dom->container->class_list()->remove("started"_utf16));
+        self.update_download_button();
         self.update_placeholder_visibility();
         self.update_timeline();
         self.update_timestamp();
@@ -422,6 +433,17 @@ void MediaControls::set_up_event_listeners()
         });
     }
 
+    if (m_dom->download_inline) {
+        add_event_listener(realm, *m_dom->download_inline, UIEvents::EventNames::click, [](MediaControls& self, UIEvents::MouseEvent const& event) {
+            if (event.is_trusted()) {
+                self.update_download_button();
+                if (self.m_dom->download_inline->has_attribute(AttributeNames::href))
+                    self.m_dom->download_inline->download_the_hyperlink({}, UserNavigationInvolvement::BrowserUI);
+            }
+            return true;
+        });
+    }
+
     // Fullscreen button
     if (m_dom->fullscreen_button) {
         add_event_listener(realm, *m_dom->fullscreen_button, UIEvents::EventNames::click, [](MediaControls& self) {
@@ -573,6 +595,22 @@ void MediaControls::toggle_mute()
 {
     m_media_element->set_muted(!m_media_element->muted());
     show_controls();
+}
+
+void MediaControls::update_download_button()
+{
+    if (!m_dom->download_inline)
+        return;
+    auto const& source = m_media_element->current_src();
+    auto url = m_host->document().encoding_parse_url(source);
+    bool downloadable = !source.is_empty() && url.has_value() && url->scheme().is_one_of("http"sv, "https"sv)
+        && !url->serialize_path().ends_with(".m3u8"sv, CaseSensitivity::CaseInsensitive)
+        && !url->serialize_path().ends_with(".mpd"sv, CaseSensitivity::CaseInsensitive);
+    MUST(m_dom->container->class_list()->toggle("downloadable"_utf16, downloadable));
+    if (downloadable)
+        m_dom->download_inline->set_attribute_value(AttributeNames::href, source);
+    else
+        m_dom->download_inline->remove_attribute(AttributeNames::href);
 }
 
 void MediaControls::toggle_fullscreen()

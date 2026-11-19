@@ -374,3 +374,10 @@
     height: 36px;
     margin-left: 4px;
 }
+
+.container .download-inline {
+    display: none;
+}
+.container.downloadable.started .download-inline {
+    display: flex;
+}
