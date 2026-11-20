@@ -527,6 +527,14 @@ void View::forward_callbacks_to_ui(bool is_tab)
         }
     };
 
+    on_set_pointer_lock = [this](bool enabled, bool raw) {
+        auto* ui = ConnectionFromUI::the();
+        if (!ui)
+            return false;
+        auto response = ui->send_sync_but_allow_failure<Messages::HubClient::ViewSetPointerLock>(view_id(), enabled, raw);
+        return response && response->accepted();
+    };
+
     on_fullscreen_window = [this] {
         if (auto* ui = ConnectionFromUI::the()) {
             push_state_to_ui();

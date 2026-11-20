@@ -306,6 +306,16 @@ void ConnectionFromClient::set_viewport_is_fullscreen(Web::PageId page_id, Web::
         page->page().set_viewport_is_fullscreen(is_fullscreen);
 }
 
+void ConnectionFromClient::pointer_lock_lost(Web::PageId page_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+    auto document = page->page().local_traversable()->active_document();
+    if (document && document->pointer_lock_element())
+        document->set_pointer_lock_element(nullptr);
+}
+
 void ConnectionFromClient::deny_fullscreen_window(Web::PageId page_id)
 {
     if (auto page = this->page(page_id); page.has_value())

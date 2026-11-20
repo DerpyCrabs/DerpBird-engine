@@ -232,6 +232,7 @@ private:
     virtual void view_resize_window(u64 view_id, Gfx::IntSize size) override;
     virtual void view_maximize_window(u64 view_id) override;
     virtual void view_minimize_window(u64 view_id) override;
+    virtual Messages::HubClient::ViewSetPointerLockResponse view_set_pointer_lock(u64 view_id, bool enabled, bool raw) override;
     virtual void view_fullscreen_window(u64 view_id) override;
     virtual void view_exit_fullscreen_window(u64 view_id) override;
     virtual void view_request_color_picker(u64 view_id, Color current_color) override;

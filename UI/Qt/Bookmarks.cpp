@@ -29,8 +29,8 @@ Bookmarks::Bookmarks(BookmarkStore& store)
     create_menus();
     create_context_menus();
 
-    Application::web_ui_pages().register_page("bookmarks"_string, "Bookmarks"_string, [](u64 web_ui_id, WebView::IsPrivate) -> NonnullOwnPtr<WebUIPage> {
-        return make<BookmarksPage>(web_ui_id);
+    Application::web_ui_pages().register_page("bookmarks"_string, "Bookmarks"_string, [](u64 web_ui_id, WebView::IsPrivate is_private) -> NonnullOwnPtr<WebUIPage> {
+        return make<BookmarksPage>(web_ui_id, is_private);
     });
 
     HashTable<String> favicon_hashes;

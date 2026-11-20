@@ -848,6 +848,7 @@ public:
     virtual void page_did_request_restore_window() { }
     virtual void page_did_request_maximize_window(u64) { }
     virtual void page_did_request_minimize_window() { }
+    virtual bool page_set_pointer_lock(bool, bool) { return false; }
     virtual void page_did_request_fullscreen_window() { }
     virtual void page_did_request_exit_fullscreen() { }
     virtual void page_did_exit_picture_in_picture() { }

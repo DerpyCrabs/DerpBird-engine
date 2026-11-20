@@ -1,3 +1,5 @@
 requestPointerLock promise is iframe realm: true
 requestPointerLock promise is parent realm: false
-requestPointerLock rejection name: NotSupportedError
+requestPointerLock rejection name: InvalidStateError
+error dispatched to requesting document: true
+pointer lock element after rejection: null

@@ -15,6 +15,7 @@
 #include <UI/Qt/Application.h>
 #include <UI/Qt/ApplicationActions.h>
 #include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/DerpBirdChrome.h>
 #include <UI/Qt/ChromeLayout.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/DownloadPresentation.h>
@@ -2091,6 +2092,7 @@ void WindowToolbar::show_feedback_popover()
 // The downloads hang from the downloads button. Without any, the downloads page opens instead.
 void WindowToolbar::show_downloads_popover()
 {
+    if (auto* chrome = browser_window().derpbird_chrome()) { chrome->show_downloads(); return; }
     auto downloads = RemoteDownloads::the().downloads_of_session(m_is_private);
     if (!downloads_button_state(downloads).has_downloads) {
         m_open_downloads_page_action->trigger();

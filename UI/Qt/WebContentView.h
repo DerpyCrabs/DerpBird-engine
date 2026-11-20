@@ -84,6 +84,7 @@ struct WindowsD3DHandle;
 
 namespace Ladybird {
 
+class WaylandPointerLock;
 class WaylandPageSurface;
 
 }
@@ -332,6 +333,9 @@ private:
     bool m_follows_mouse_while_inactive { false };
 
     Optional<ByteString> m_tooltip_text;
+#ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
+    std::unique_ptr<WaylandPointerLock> m_pointer_lock;
+#endif
     QTimer m_tooltip_hover_timer;
 
     Gfx::IntSize m_viewport_size;

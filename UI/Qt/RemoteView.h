@@ -278,6 +278,7 @@ public:
     WebView::SessionHistorySnapshot session_history_snapshot() const;
     ErrorOr<void> restore_session_history_from_snapshot(WebView::SessionHistorySnapshot);
     void exit_fullscreen() { HubConnection::the().async_view_exit_fullscreen(view_id()); }
+    void pointer_lock_lost() { HubConnection::the().async_view_pointer_lock_lost(view_id()); }
     void deny_fullscreen_window() { HubConnection::the().async_view_deny_fullscreen_window(view_id()); }
     void set_is_fullscreen(Web::ViewportIsFullscreen is_fullscreen) { HubConnection::the().async_view_set_is_fullscreen(view_id(), is_fullscreen); }
     Function<void()> prepare_for_close_without_prompting();
@@ -428,6 +429,7 @@ public:
     decltype(Hub::View::on_resize_window) on_resize_window;
     decltype(Hub::View::on_maximize_window) on_maximize_window;
     decltype(Hub::View::on_minimize_window) on_minimize_window;
+    decltype(Hub::View::on_set_pointer_lock) on_set_pointer_lock;
     decltype(Hub::View::on_fullscreen_window) on_fullscreen_window;
     decltype(Hub::View::on_exit_fullscreen_window) on_exit_fullscreen_window;
     decltype(Hub::View::on_request_color_picker) on_request_color_picker;

@@ -46,6 +46,8 @@
 #include <UI/Qt/NavigationPolicy.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/Tab.h>
+#include <UI/Qt/SystemAppearance.h>
+#include <UI/Qt/Theme.h>
 #include <UI/Qt/WebContentView.h>
 
 namespace Ladybird {
@@ -81,6 +83,17 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     if (auto result = Application::the().derpbird_script_store(); result.is_error())
         warnln("Unable to load userscripts: {}", result.error());
     m_shell_preferences = std::make_unique<QSettings>(QString::fromUtf8(Application::the().derpbird_profile_paths().config.characters()) + "/DerpBirdChrome.ini", QSettings::IniFormat);
+    // Upgrade the legacy shell-only theme to the browser-wide appearance setting once.
+    if (m_shell_preferences->contains("theme")) {
+        auto appearance = Application::settings().appearance();
+        if (appearance.interface_theme == WebView::ThemePreference::System) {
+            appearance.interface_theme = m_shell_preferences->value("theme").toString() == "light"
+                ? WebView::ThemePreference::Light : WebView::ThemePreference::Dark;
+            Application::settings().set_appearance(appearance);
+        }
+        m_shell_preferences->remove("theme");
+    }
+    connect(&SystemAppearance::the(), &SystemAppearance::interface_appearance_changed, this, [this] { queue_snapshot(); });
     load_workspaces();
     // Browser commands must also work while focus belongs to a web page.
     // The native menu/toolbar is hidden when this chrome is active.
@@ -754,6 +767,23 @@ void DerpBirdChrome::observe_tab(Tab& tab)
     auto observe_view = [this, &tab, scope] {
         auto& observation = m_observed_tabs[&tab];
         observation.view = &tab.view();
+        tab.view().on_derpbird_request = [this, &tab](JsonValue const& payload, auto complete) {
+            if (tab.url().serialize(URL::ExcludeFragment::Yes) != "about:settings"sv || !payload.is_object()) {
+                complete(Error::from_string_literal("Settings page is no longer open"));
+                return;
+            }
+            auto request = payload.as_object().get_object("settings"sv);
+            auto type = request.has_value() ? request->get_string("type"sv).value_or(String {}) : String {};
+            if (type != "read"sv) {
+                if (!type.is_one_of("shell.set-always-close"sv, "shell.set-wrap-tabs"sv, "shell.set-sidebar-width"sv, "workspace.switch"sv, "workspace.update"sv)) {
+                    complete(Error::from_string_literal("Unknown settings operation"));
+                    return;
+                }
+                auto result = command(JsonValue { *request });
+                if (result.is_error()) { complete(result.release_error()); return; }
+            }
+            complete(JsonValue { settings_snapshot() });
+        };
         tab.view().on_blocking_log_change = [this] { if (m_blocking_log_visible) queue_snapshot(); };
         tab.view().installEventFilter(this);
         tab.view().on_derpbird_inspect = [self = QPointer(this), target = QPointer(&tab)](Web::UniqueNodeID node) {
@@ -876,6 +906,7 @@ void DerpBirdChrome::release_observation(Tab* tab)
     m_observed_tabs.erase(found);
     delete observation.scope;
     if (auto view = observation.view) {
+        view->on_derpbird_request = nullptr;
         view->on_blocking_log_change = nullptr;
         view->on_derpbird_inspect = nullptr;
         view->on_derpbird_credential_focus = nullptr;
@@ -1028,6 +1059,53 @@ ErrorOr<void> DerpBirdChrome::move_tree_tab(Tab& source, Tab& target, StringView
     return {};
 }
 
+void DerpBirdChrome::download_updated(RemoteDownloads::Download const& download)
+{
+    if (download.is_private == m_window.is_private()) queue_snapshot();
+}
+
+void DerpBirdChrome::download_removed(u64, WebView::IsPrivate session)
+{
+    if (session == m_window.is_private()) queue_snapshot();
+}
+
+void DerpBirdChrome::show_downloads()
+{
+    m_shell->run_javascript("window.dispatchEvent(new Event('derpbird-open-downloads'))"_string);
+}
+
+JsonObject DerpBirdChrome::settings_snapshot() const
+{
+    JsonObject state;
+    JsonObject workspaces;
+    JsonArray workspace_items;
+    for (auto const& w : m_workspaces) {
+        JsonObject item;
+        item.set("id"sv, ak_string_from_qstring(w.id));
+        item.set("name"sv, ak_string_from_qstring(w.name));
+        item.set("icon"sv, ak_string_from_qstring(w.icon));
+        item.set("color"sv, ak_string_from_qstring(w.color));
+        workspace_items.must_append(AK::move(item));
+    }
+    workspaces.set("active"sv, ak_string_from_qstring(m_workspace));
+    workspaces.set("items"sv, AK::move(workspace_items));
+    state.set("workspaces"sv, AK::move(workspaces));
+    JsonObject preferences;
+    auto const& settings = Application::settings().tab_settings();
+    preferences.set("layout"sv, settings.vertical_tabs_enabled ? "vertical"sv : "horizontal"sv);
+    JsonObject chrome_layout;
+    chrome_layout.set("preset"sv, settings.vertical_tabs_enabled ? (settings.everything_in_sidebar ? "compact"sv : "sidebar"sv) : (settings.address_bar_on_bottom ? "bottom"sv : "classic"sv));
+    chrome_layout.set("side"sv, settings.vertical_tabs_position == WebView::VerticalTabsPosition::Right ? "right"sv : "left"sv);
+    chrome_layout.set("address"sv, settings.address_bar_on_bottom ? "bottom"sv : "top"sv);
+    preferences.set("chromeLayout"sv, AK::move(chrome_layout));
+    preferences.set("sidebarWidth"sv, clamp<int>(settings.vertical_tabs_expanded_width.value_or(196), 120, 600));
+    preferences.set("theme"sv, Theme::is_dark() ? "dark"sv : "light"sv);
+    preferences.set("alwaysClose"sv, m_shell_preferences->value("alwaysClose", true).toBool());
+    preferences.set("wrapTabs"sv, m_shell_preferences->value("wrapTabs", false).toBool());
+    state.set("preferences"sv, AK::move(preferences));
+    return state;
+}
+
 JsonValue DerpBirdChrome::snapshot()
 {
     restore_splits();
@@ -1067,20 +1145,7 @@ JsonValue DerpBirdChrome::snapshot()
         entry.set("private"sv, m_window.is_private() == WebView::IsPrivate::Yes);
         tabs.must_append(AK::move(entry));
     }
-    JsonObject state;
-    JsonObject workspaces;
-    JsonArray workspace_items;
-    for (auto const& w : m_workspaces) {
-        JsonObject item;
-        item.set("id"sv, ak_string_from_qstring(w.id));
-        item.set("name"sv, ak_string_from_qstring(w.name));
-        item.set("icon"sv, ak_string_from_qstring(w.icon));
-        item.set("color"sv, ak_string_from_qstring(w.color));
-        workspace_items.must_append(AK::move(item));
-    }
-    workspaces.set("active"sv, ak_string_from_qstring(m_workspace));
-    workspaces.set("items"sv, AK::move(workspace_items));
-    state.set("workspaces"sv, AK::move(workspaces));
+    auto state = settings_snapshot();
     state.set("addressSuggestions"sv, m_address_suggestions);
     StringBuilder dynamic_rules;
     for (auto line : Application::settings().custom_content_blocker_filters().bytes_as_string_view().split_view('\n')) {
@@ -1111,6 +1176,26 @@ JsonValue DerpBirdChrome::snapshot()
         proposal = JsonValue {};
     state.set("credentialProposal"sv, AK::move(proposal));
     auto* active = m_window.current_tab();
+    JsonArray downloads;
+    using Status = WebView::FileDownloader::DownloadStatus;
+    for (auto const& file : RemoteDownloads::the().downloads_of_session(m_window.is_private())) {
+        JsonObject entry;
+        entry.set("id"sv, String::number(file.id));
+        entry.set("name"sv, String::from_utf8_with_replacement_character(file.destination.basename(), String::WithBOMHandling::No));
+        entry.set("path"sv, String::from_utf8_with_replacement_character(file.destination.string().view(), String::WithBOMHandling::No));
+        entry.set("received"sv, file.downloaded_size);
+        if (file.total_size.has_value()) entry.set("total"sv, *file.total_size);
+        entry.set("resumable"sv, file.can_resume);
+        switch (file.status) {
+        case Status::InProgress: entry.set("status"sv, "Downloading"sv); break;
+        case Status::Completed: entry.set("status"sv, "Finished"sv); break;
+        case Status::Paused: entry.set("status"sv, "Paused"sv); break;
+        case Status::Failed: entry.set("status"sv, "Failed"sv); break;
+        case Status::Canceled: entry.set("status"sv, "Canceled"sv); break;
+        }
+        downloads.must_append(AK::move(entry));
+    }
+    state.set("downloads"sv, AK::move(downloads));
     state.set("scriptCommands"sv, active && active->is_loaded() ? active->view().derpbird_script_commands() : JsonArray {});
     auto* logged_view = m_blocking_log_visible && active && active->is_loaded() ? &active->view() : nullptr;
     if (m_request_log_view.data() != logged_view) {
@@ -1138,19 +1223,6 @@ JsonValue DerpBirdChrome::snapshot()
     state.set("automation"sv, AK::move(automation));
     state.set("version"sv, 1);
     state.set("revision"sv, ++m_revision);
-    JsonObject preferences;
-    auto const& settings = Application::settings().tab_settings();
-    preferences.set("layout"sv, settings.vertical_tabs_enabled ? "vertical"sv : "horizontal"sv);
-    JsonObject chrome_layout;
-    chrome_layout.set("preset"sv, settings.vertical_tabs_enabled ? (settings.everything_in_sidebar ? "compact"sv : "sidebar"sv) : (settings.address_bar_on_bottom ? "bottom"sv : "classic"sv));
-    chrome_layout.set("side"sv, settings.vertical_tabs_position == WebView::VerticalTabsPosition::Right ? "right"sv : "left"sv);
-    chrome_layout.set("address"sv, settings.address_bar_on_bottom ? "bottom"sv : "top"sv);
-    preferences.set("chromeLayout"sv, AK::move(chrome_layout));
-    preferences.set("sidebarWidth"sv, clamp<int>(settings.vertical_tabs_expanded_width.value_or(196), 120, 600));
-    preferences.set("theme"sv, m_shell_preferences->value("theme", "dark").toString() == "light" ? "light"sv : "dark"sv);
-    preferences.set("alwaysClose"sv, m_shell_preferences->value("alwaysClose", true).toBool());
-    preferences.set("wrapTabs"sv, m_shell_preferences->value("wrapTabs", false).toBool());
-    state.set("preferences"sv, AK::move(preferences));
     state.set("tabs"sv, AK::move(tabs));
     JsonArray splits;
     for (auto const& split : m_splits) {
@@ -1190,6 +1262,16 @@ void DerpBirdChrome::clear_autofill()
     if (!m_credential_autofill.is_null()) { m_credential_autofill = JsonValue {}; queue_snapshot(); }
 }
 
+void DerpBirdChrome::cycle_workspace_tab(int direction)
+{
+    auto count = m_window.tab_count();
+    auto current = m_window.tab_index(m_window.current_tab());
+    for (int offset = 1; offset <= count; ++offset) {
+        auto index = (current + direction * offset + count) % count;
+        if (tab_workspace(*m_window.tab_at(index)) == m_workspace) { m_window.activate_tab(index); break; }
+    }
+}
+
 bool DerpBirdChrome::eventFilter(QObject* watched, QEvent* event)
 {
     // The native tab bar still owns all workspaces. Keep its keyboard cycling
@@ -1201,12 +1283,7 @@ bool DerpBirdChrome::eventFilter(QObject* watched, QEvent* event)
             key->accept();
             if (event->type() == QEvent::ShortcutOverride) return true;
             int direction = key->key() == Qt::Key_PageUp || key->key() == Qt::Key_Backtab || key->modifiers().testFlag(Qt::ShiftModifier) ? -1 : 1;
-            auto count = m_window.tab_count();
-            auto current = m_window.tab_index(m_window.current_tab());
-            for (int offset = 1; offset <= count; ++offset) {
-                auto index = (current + direction * offset + count) % count;
-                if (tab_workspace(*m_window.tab_at(index)) == m_workspace) { m_window.activate_tab(index); break; }
-            }
+            cycle_workspace_tab(direction);
             return true;
         }
     }
@@ -1418,12 +1495,16 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         Application::settings().set_tab_settings(settings);
         return {};
     }
-    if (type == "shell.set-appearance"sv) {
+    if (type.is_one_of("shell.set-appearance"sv, "shell.set-always-close"sv)) {
         auto theme = data.get_string("theme"sv);
         auto always_close = data.get_bool("alwaysClose"sv);
-        if (!theme.has_value() || !theme->is_one_of("dark"sv, "light"sv) || !always_close.has_value())
+        if (!always_close.has_value() || (type == "shell.set-appearance"sv && (!theme.has_value() || !theme->is_one_of("dark"sv, "light"sv))))
             return Error::from_string_literal("Invalid appearance setting");
-        m_shell_preferences->setValue("theme", *theme == "light"sv ? "light" : "dark");
+        if (type == "shell.set-appearance"sv) {
+            auto appearance = Application::settings().appearance();
+            appearance.interface_theme = *theme == "light"sv ? WebView::ThemePreference::Light : WebView::ThemePreference::Dark;
+            Application::settings().set_appearance(appearance);
+        }
         m_shell_preferences->setValue("alwaysClose", *always_close);
         m_shell_preferences->sync();
         if (m_shell_preferences->status() != QSettings::NoError) return Error::from_string_literal("Cannot save appearance setting");
@@ -1457,10 +1538,31 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         m_pending_surface_state = AK::move(pending);
         return {};
     }
+    if (type == "download.action"sv) {
+        auto& downloads = RemoteDownloads::the();
+        auto action = data.get_string("action"sv).value_or(String {});
+        if (action == "clear"sv) {
+            downloads.prune_inactive_downloads(m_window.is_private());
+            return {};
+        }
+        auto id = data.get_string("id"sv).value_or(String {}).to_number<u64>();
+        if (!id.has_value()) return Error::from_string_literal("Invalid download ID");
+        auto file = downloads.download(*id);
+        if (!file.has_value() || file->is_private != m_window.is_private()) return Error::from_string_literal("Download no longer available");
+        using Status = WebView::FileDownloader::DownloadStatus;
+        if (action == "pause"sv && file->can_resume && file->status == Status::InProgress) downloads.pause_download(*id);
+        else if (action == "resume"sv && file->can_resume && (file->status == Status::Paused || file->status == Status::Failed)) downloads.resume_download(*id);
+        else if (action == "cancel"sv && WebView::FileDownloader::status_is_active(file->status)) downloads.cancel_download(*id);
+        else if (action == "open"sv && file->status == Status::Completed) downloads.open(*id);
+        else if (action == "reveal"sv && file->status == Status::Completed) downloads.show_in_folder(*id);
+        else return Error::from_string_literal("Unknown download action");
+        return {};
+    }
     if (type == "browser.open-page"sv) {
         auto name = data.get_string("page"sv);
         if (!name.has_value() || !name->is_one_of("history"sv, "downloads"sv, "bookmarks"sv, "settings"sv))
             return Error::from_string_literal("Unknown browser page");
+        if (*name == "downloads"sv) { show_downloads(); return {}; }
         auto url = URL::Parser::basic_parse(TRY(String::formatted("about:{}", *name))).release_value();
         // Reuse a page only within this window's session, including private mode.
         for (int i = 0; i < m_window.tab_count(); ++i) {

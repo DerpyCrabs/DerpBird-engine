@@ -1734,6 +1734,10 @@ void BrowserWindow::move_focus_between_chrome_and_page()
 
 void BrowserWindow::open_next_tab()
 {
+    if (m_derpbird_chrome) {
+        m_derpbird_chrome->cycle_workspace_tab(1);
+        return;
+    }
     if (m_tabs_container->count() <= 1)
         return;
 
@@ -1745,6 +1749,10 @@ void BrowserWindow::open_next_tab()
 
 void BrowserWindow::open_previous_tab()
 {
+    if (m_derpbird_chrome) {
+        m_derpbird_chrome->cycle_workspace_tab(-1);
+        return;
+    }
     if (m_tabs_container->count() <= 1)
         return;
 

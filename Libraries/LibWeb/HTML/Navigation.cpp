@@ -147,11 +147,9 @@ GC::Ptr<NavigationHistoryEntry> Navigation::current_entry() const
     // The current entry of a Navigation navigation is the result of running the following steps:
 
     // 1. If navigation has entries and events disabled, then return null.
-    if (has_entries_and_events_disabled())
+    // A document can already be observable while the Hub is restoring its history entries.
+    if (has_entries_and_events_disabled() || m_current_entry_index == -1)
         return nullptr;
-
-    // 2. Assert: navigation's current entry index is not −1.
-    VERIFY(m_current_entry_index != -1);
 
     // 3. Return navigation's entry list[navigation's current entry index].
     return m_entry_list[m_current_entry_index];
@@ -194,11 +192,8 @@ bool Navigation::can_go_back() const
     // The canGoBack getter steps are:
 
     // 1. If this has entries and events disabled, then return false.
-    if (has_entries_and_events_disabled())
+    if (has_entries_and_events_disabled() || m_current_entry_index == -1)
         return false;
-
-    // 2. Assert: navigation's current entry index is not −1.
-    VERIFY(m_current_entry_index != -1);
 
     // 3. If this's current entry index is 0, then return false.
     // 4. Return true.
@@ -211,11 +206,8 @@ bool Navigation::can_go_forward() const
     // The canGoForward getter steps are:
 
     // 1. If this has entries and events disabled, then return false.
-    if (has_entries_and_events_disabled())
+    if (has_entries_and_events_disabled() || m_current_entry_index == -1)
         return false;
-
-    // 2. Assert: navigation's current entry index is not −1.
-    VERIFY(m_current_entry_index != -1);
 
     // 3. If this's current entry index is equal to this's entry list's size − 1, then return false.
     // 4. Return true.

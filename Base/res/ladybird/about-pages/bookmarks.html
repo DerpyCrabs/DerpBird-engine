@@ -270,6 +270,7 @@
                 font-size: 13px;
             }
         </style>
+    <script type="module" src="resource://ladybird/about-pages/derpbird-assets/collections.js"></script>
     </head>
     <body>
         <nav class="folders" id="folders" aria-label="Bookmark folders">
@@ -400,6 +401,10 @@
                 return result;
             }
 
+            function openBookmarkUI(action, target) {
+                document.dispatchEvent(new CustomEvent("bookmarkUI", { detail: {action, target} }));
+            }
+
             function showContextMenu(event, item, parentId, anchor) {
                 event.preventDefault();
                 event.stopPropagation();
@@ -412,7 +417,7 @@
                     clientY = Math.round(rect.bottom + 4);
                 }
 
-                ladybird.sendMessage("showContextMenu", {
+                openBookmarkUI("menu", {
                     clientX,
                     clientY,
                     id: item.id,
@@ -476,7 +481,7 @@
                 const id = folder ? folder.id : null;
                 const children = folder ? folder.children || [] : BOOKMARKS;
                 const link = createElement("a", { href: "#", className: "folder-link" });
-                link.style.paddingLeft = `${10 + depth * 20}px`;
+                link.style.setProperty('--folder-depth', String(depth));
                 link.innerHTML = FOLDER_SVG;
                 link.append(
                     createElement("span", {
@@ -606,7 +611,7 @@
             document.querySelector("main").addEventListener("contextmenu", event => {
                 if (event.defaultPrevented) return;
                 event.preventDefault();
-                ladybird.sendMessage("showContextMenu", {
+                openBookmarkUI("menu", {
                     clientX: event.clientX,
                     clientY: event.clientY,
                     targetFolderId: CURRENT_FOLDER_ID,
@@ -614,7 +619,7 @@
             });
 
             document.getElementById("new-folder-button").addEventListener("click", () => {
-                ladybird.sendMessage("newFolder", { targetFolderId: CURRENT_FOLDER_ID });
+                openBookmarkUI("folder", { targetFolderId: CURRENT_FOLDER_ID });
             });
 
             document.addEventListener("WebUILoaded", () => {

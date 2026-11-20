@@ -11,6 +11,8 @@
 #include <LibWebView/UserAgent.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/ApplicationActions.h>
+#include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/DerpBirdChrome.h>
 #include <UI/Qt/HubConnection.h>
 #include <UI/Qt/Tab.h>
 
@@ -139,6 +141,10 @@ ApplicationActions::ApplicationActions(PageOptions const& options)
         Application::the().activate_or_open_tab_with_url(URL::about_version());
     });
     m_open_downloads_page_action = Action::create("Downloads"sv, ActionID::ViewDownloads, [] {
+        if (auto* window = Application::the().active_window_if_any(); window && window->derpbird_chrome()) {
+            window->derpbird_chrome()->show_downloads();
+            return;
+        }
         Application::the().activate_or_open_tab_with_url(URL::about_downloads());
     });
     m_open_settings_page_action = Action::create("Settings"sv, ActionID::OpenSettingsPage, [] {

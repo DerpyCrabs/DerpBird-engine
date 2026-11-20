@@ -120,6 +120,13 @@ public:
     };
     KeyboardScrollSnapshot keyboard_scroll_snapshot() const;
     EventResult handle_keyup(UIEvents::KeyCode, unsigned modifiers, u32 code_point, bool repeat);
+    void pointer_lock_changed(bool locked)
+    {
+        if (locked)
+            m_mousemove_previous_screen_position = m_pointer_lock_screen_position;
+        else
+            m_mousemove_previous_screen_position.clear();
+    }
     void cancel_keyboard_activation();
 
     EventResult handle_drag_and_drop_event(DragEvent::Type, CSSPixelPoint, CSSPixelPoint screen_position, unsigned button, unsigned buttons, unsigned modifiers, Vector<HTML::SelectedFile> files);
@@ -380,6 +387,7 @@ private:
     bool m_handling_outdated_input { false };
     // The UI process's id of the input event being handled, or 0.
     u64 m_handling_input_event_id { 0 };
+    CSSPixelPoint m_pointer_lock_screen_position;
     CSSPixelPoint m_last_known_mouse_screen_position;
     unsigned m_last_known_mouse_buttons { 0 };
     unsigned m_last_known_mouse_modifiers { 0 };

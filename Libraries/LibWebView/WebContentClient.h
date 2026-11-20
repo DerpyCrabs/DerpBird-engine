@@ -255,6 +255,7 @@ private:
     virtual void storage_area_write_acknowledged(Web::StorageAPI::StorageAreaId) override;
     virtual void storage_area_write_refused(Web::StorageAPI::StorageAreaId, Vector<StorageItem>) override;
     virtual void storage_area_reset(Web::StorageAPI::StorageAreaId, Vector<StorageItem>) override;
+    virtual Messages::WebContentClient::SetPointerLockResponse set_pointer_lock(Web::PageId page_id, bool enabled, bool raw) override;
     virtual Messages::WebContentClient::DidStartDownloadWithoutRequestResponse did_start_download_without_request(Web::PageId page_id, URL::URL, ByteString suggested_filename, Optional<u64> total_size) override;
     virtual Messages::WebContentClient::DidStartDownloadResponse did_start_download(Web::PageId page_id, Web::HTML::CrossProcessId navigable_id, Optional<Utf16String> navigation_id, URL::URL, ByteString suggested_filename, Optional<u64> total_size, HTTP::Cookie::SameSiteContext same_site_context, int request_server_client_id, u64 request_server_request_id, ByteBuffer initial_data, JsonValue network_response) override;
     virtual Messages::WebContentClient::DidRequestNewWebViewResponse did_request_new_web_view(Web::PageId page_id, Web::HTML::ActivateTab, Web::HTML::WebViewHints, Web::HTML::CrossProcessId current_navigable_id, Utf16String name, bool no_opener, Optional<URL::URL> current_document_base_url) override;

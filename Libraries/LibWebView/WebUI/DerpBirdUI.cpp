@@ -46,6 +46,19 @@ void DerpBirdUI::request(JsonValue const& data)
         async_send_message("derpbird.response"sv, move(response));
         return;
     }
+    // Match the downloads WebUI: opening a local file requires a user gesture.
+    auto command = payload->as_object().get_object("command"sv);
+    if (command.has_value() && command->get_string("type"sv) == "download.action"sv) {
+        auto action = command->get_string("action"sv);
+        if (action.has_value() && action->is_one_of("open"sv, "reveal"sv) && !client().page(page_id())->consume_transient_user_activation()) {
+            JsonObject response;
+            response.set("requestId"sv, *request_id);
+            response.set("ok"sv, false);
+            response.set("error"sv, "Click the file action to open it"sv);
+            async_send_message("derpbird.response"sv, move(response));
+            return;
+        }
+    }
     m_pending.set(*request_id);
     // Retain this channel until completion, but never deliver into a replacement
     // document, even a navigation back to the same URL in the same view.

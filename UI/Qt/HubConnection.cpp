@@ -1142,6 +1142,12 @@ void HubConnection::view_minimize_window(u64 view_id)
         view->on_minimize_window();
 }
 
+Messages::HubClient::ViewSetPointerLockResponse HubConnection::view_set_pointer_lock(u64 view_id, bool enabled, bool raw)
+{
+    auto* view = RemoteView::find(view_id);
+    return { view && view->on_set_pointer_lock && view->on_set_pointer_lock(enabled, raw) };
+}
+
 void HubConnection::view_fullscreen_window(u64 view_id)
 {
     if (auto* view = RemoteView::find(view_id); view && view->on_fullscreen_window)

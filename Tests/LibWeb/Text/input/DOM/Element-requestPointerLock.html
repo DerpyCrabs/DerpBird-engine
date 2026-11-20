@@ -7,6 +7,7 @@
 
         const other = iframe.contentWindow;
         const element = other.document.createElement("div");
+        const lockError = new Promise(resolve => other.document.onpointerlockerror = resolve);
         const promise = element.requestPointerLock({ unadjustedMovement: true });
 
         println(`requestPointerLock promise is iframe realm: ${promise instanceof other.Promise}`);
@@ -17,5 +18,8 @@
         } catch (e) {
             println(`requestPointerLock rejection name: ${e.name}`);
         }
+        const event = await lockError;
+        println(`error dispatched to requesting document: ${event.target === other.document}`);
+        println(`pointer lock element after rejection: ${other.document.pointerLockElement}`);
     });
 </script>

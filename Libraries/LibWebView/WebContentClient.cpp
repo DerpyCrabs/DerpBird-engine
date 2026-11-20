@@ -978,6 +978,13 @@ void WebContentClient::storage_area_reset(Web::StorageAPI::StorageAreaId area_id
     async_storage_area_reset(area_id, move(keys), move(values));
 }
 
+Messages::WebContentClient::SetPointerLockResponse WebContentClient::set_pointer_lock(Web::PageId page_id, bool enabled, bool raw)
+{
+    if (auto* page = this->page(page_id))
+        return page->set_pointer_lock(enabled, raw);
+    return { false };
+}
+
 Messages::WebContentClient::DidStartDownloadWithoutRequestResponse WebContentClient::did_start_download_without_request(Web::PageId page_id, URL::URL url, ByteString suggested_filename, Optional<u64> total_size)
 {
     if (auto* page = this->page(page_id))

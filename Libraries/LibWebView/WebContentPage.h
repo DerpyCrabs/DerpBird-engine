@@ -281,6 +281,7 @@ private:
     virtual void did_request_resize_window(Gfx::IntSize size, u64 completion_id) override;
     virtual void did_request_maximize_window(u64 completion_id) override;
     virtual void did_request_minimize_window() override;
+    Messages::WebContentClient::SetPointerLockResponse set_pointer_lock(bool enabled, bool raw);
     virtual void did_request_fullscreen_window() override;
     virtual void did_request_exit_fullscreen() override;
     virtual void did_exit_picture_in_picture() override;

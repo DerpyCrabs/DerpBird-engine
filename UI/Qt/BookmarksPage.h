@@ -15,13 +15,15 @@ class BookmarksPage final
     : public WebUIPage
     , public BookmarkStoreObserver {
 public:
-    explicit BookmarksPage(u64 web_ui_id);
+    BookmarksPage(u64 web_ui_id, WebView::IsPrivate);
 
     virtual void received_message(String const& name, JsonValue const& data) override;
 
 private:
     virtual void bookmarks_changed() override;
 
+    WebView::IsPrivate m_is_private;
+    void save_bookmark(JsonObject const&);
     void load_bookmarks();
     void move_item(JsonValue const&);
     void new_folder(JsonValue const&);

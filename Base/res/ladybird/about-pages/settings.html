@@ -997,10 +997,11 @@
                 }
             }
         </style>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
     </head>
-    <body>
+    <body class="unified preferences-theme">
         <nav class="settings-sidebar">
-            <label class="search-field">
+            <h1>Settings</h1><label class="search-field">
                 <span class="visually-hidden">Search settings</span>
                 <svg
                     viewBox="0 0 16 16"
@@ -1018,6 +1019,8 @@
                 <button id="tab-button-appearance" class="tab-button active" data-tab="appearance" role="tab">
                     Appearance
                 </button>
+                <button class="tab-button" role="tab" data-tab="tabs" id="tab-button-tabs">Tabs &amp; navigation</button>
+                <button class="tab-button" role="tab" data-tab="workspaces" id="tab-button-workspaces">Workspaces</button>
                 <button id="tab-button-search" class="tab-button" data-tab="search" role="tab">Search</button>
                 <button id="tab-button-browsing" class="tab-button" data-tab="browsing" role="tab">
                     Startup and browsing
@@ -1564,7 +1567,34 @@
                     </div>
                 </div>
             </div>
-        </main>
+        <div class="tab-panel" id="tab-tabs" data-title="Tabs &amp; navigation"></div>
+<div class="tab-panel" id="tab-workspaces" data-title="Workspaces"></div>
+<template id="tab-controls">
+  <div class="card"><div class="card-body haz-settings" id="layouts"></div></div>
+  <h3 class="card-title">Tab controls</h3><div class="card"><div class="card-body">
+    <div class="card-group inline-container"><label for="always-close">Always show close buttons</label><input type="checkbox" switch id="always-close" checked></div>
+    <div class="card-group inline-container"><label for="wrap-tabs">Wrap horizontal tabs</label><input type="checkbox" switch id="wrap-tabs"></div>
+    <div class="card-group inline-container"><label for="sidebar-width">Sidebar width</label><select id="sidebar-width"><option value="196">Compact · 196 px</option><option value="240">Comfortable · 240 px</option><option value="280">Wide · 280 px</option></select></div>
+  </div></div>
+</template>
+<template id="workspace-controls">
+  <h3 class="card-title">Current workspace</h3>
+  <div class="card"><div class="card-body"><div class="haz-workspace-row card-group">
+    <strong id="current-workspace"></strong><button class="pref-button" id="rename-workspace">Rename workspace</button>
+  </div></div></div>
+  <h3 class="card-title">Switch workspace</h3><div class="card"><div class="card-body" id="workspace-list"></div></div>
+</template>
+<dialog id="workspace-dialog" class="pref-dialog" aria-labelledby="workspace-title">
+  <div class="dialog-header"><h3 id="workspace-title" class="dialog-title">Rename workspace</h3><button class="close-button dialog-button" type="button" aria-label="Close dialog"></button></div>
+  <form id="workspace-form" novalidate>
+    <label for="workspace-name">Workspace name</label>
+    <input id="workspace-name" type="text" maxlength="32" required aria-describedby="workspace-hint">
+    <p class="description" id="workspace-hint">Up to 32 characters.</p>
+    <p class="field-error" id="workspace-error" hidden>Enter a workspace name.</p>
+    <footer><button type="button" class="pref-button ghost" id="workspace-cancel">Cancel</button><button type="submit" class="pref-button primary">Save changes</button></footer>
+  </form>
+</dialog>
+</main>
 
         <dialog id="languages-dialog" closedby="any">
             <div class="dialog-header">

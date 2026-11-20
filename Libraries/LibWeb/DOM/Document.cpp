@@ -1008,6 +1008,7 @@ void Document::visit_edges(Cell::Visitor& visitor)
     for (auto const& import : m_pending_css_import_rules)
         import->visit_edges(visitor);
     visitor.visit(m_page);
+    visitor.visit(m_pointer_lock_element);
     visitor.visit(m_window);
     visitor.visit(m_relevant_global_event_target);
     visitor.visit(m_style_sheets);
@@ -6478,6 +6479,7 @@ void Document::run_unloading_cleanup_steps()
 // https://html.spec.whatwg.org/multipage/document-lifecycle.html#destroy-a-document
 void Document::destroy()
 {
+    exit_pointer_lock();
     page().active_media_session_tracker().document_became_inactive(*this);
 
     // FIXME: 1. Assert: this is running as part of a task queued on document's relevant agent's event loop.
@@ -7049,6 +7051,7 @@ bool Document::is_allowed_to_use_feature(PolicyControlledFeature feature) const
 
 void Document::did_stop_being_active_document_in_navigable()
 {
+    exit_pointer_lock();
     page().active_media_session_tracker().document_became_inactive(*this);
 
     stop_compositor_animation_timers();
@@ -11678,6 +11681,26 @@ void Document::set_onvisibilitychange(WebIDL::CallbackType* value)
     set_event_handler_attribute(HTML::EventNames::visibilitychange, value);
 }
 
+WebIDL::CallbackType* Document::onpointerlockchange()
+{
+    return event_handler_attribute(HTML::EventNames::pointerlockchange);
+}
+
+void Document::set_onpointerlockchange(WebIDL::CallbackType* value)
+{
+    set_event_handler_attribute(HTML::EventNames::pointerlockchange, value);
+}
+
+WebIDL::CallbackType* Document::onpointerlockerror()
+{
+    return event_handler_attribute(HTML::EventNames::pointerlockerror);
+}
+
+void Document::set_onpointerlockerror(WebIDL::CallbackType* value)
+{
+    set_event_handler_attribute(HTML::EventNames::pointerlockerror, value);
+}
+
 WebIDL::CallbackType* Document::onfullscreenchange()
 {
     return event_handler_attribute(HTML::EventNames::fullscreenchange);
@@ -12249,9 +12272,28 @@ void Document::remove_pending_css_import_rule(Badge<CSS::StyleSheetImport>, Nonn
     }
 }
 
+void Document::queue_pointer_lock_event(Utf16FlyString const& name)
+{
+    HTML::queue_global_task(HTML::Task::Source::UserInteraction, relevant_global_object(*this),
+        GC::create_function(heap(), GC::captures(*this, name), [](Document& document, Utf16FlyString const& name) {
+            document.dispatch_event(Event::create(HTML::relevant_global_object(document), name));
+        }));
+}
+
+void Document::set_pointer_lock_element(Element* element)
+{
+    m_pointer_lock_element = element;
+    if (auto navigable = this->navigable())
+        navigable->event_handler().pointer_lock_changed(element != nullptr);
+    queue_pointer_lock_event(HTML::EventNames::pointerlockchange);
+}
+
 void Document::exit_pointer_lock()
 {
-    dbgln("FIXME: exit_pointer_lock()");
+    if (!m_pointer_lock_element)
+        return;
+    page().client().page_set_pointer_lock(false, false);
+    set_pointer_lock_element(nullptr);
 }
 
 static bool contains_named_namespace(CSS::SelectorList const& selectors)

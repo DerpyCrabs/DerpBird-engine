@@ -39,6 +39,9 @@ public:
     void set_context_menu_item(Optional<String> item_id, Optional<String> target_folder_id, Optional<String> parent_folder_id);
     void open_in_new_tab(String const& bookmark_id, Web::HTML::ActivateTab);
 
+    void open_url_in_new_window(String const& bookmark_id, WebView::IsPrivate) const;
+    void open_folder_in_new_tabs(String const& folder_id) const;
+
 private:
     virtual void bookmarks_changed() override;
 
@@ -64,8 +67,7 @@ private:
 
     void open_url(URL::URL const&) const;
     void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const;
-    void open_url_in_new_window(String const& bookmark_id, WebView::IsPrivate) const;
-    void open_folder_in_new_tabs(String const& folder_id) const;
+
 
     void update_autocomplete_bookmarks();
 

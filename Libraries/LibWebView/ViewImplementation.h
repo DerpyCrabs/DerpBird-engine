@@ -509,6 +509,7 @@ public:
     void run_javascript(String const&);
     void js_console_input(String const&);
     void exit_fullscreen();
+    void pointer_lock_lost();
     void deny_fullscreen_window();
 
     void set_is_fullscreen(Web::ViewportIsFullscreen is_fullscreen);
@@ -710,6 +711,7 @@ public:
     Function<void(Gfx::IntSize)> on_resize_window;
     Function<void()> on_maximize_window;
     Function<void()> on_minimize_window;
+    Function<bool(bool, bool)> on_set_pointer_lock;
     Function<void()> on_fullscreen_window;
     Function<void()> on_exit_fullscreen_window;
     Function<void(Color current_color)> on_request_color_picker;

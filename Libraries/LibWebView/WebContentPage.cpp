@@ -1642,6 +1642,13 @@ void WebContentPage::did_request_minimize_window()
         view().on_minimize_window();
 }
 
+Messages::WebContentClient::SetPointerLockResponse WebContentPage::set_pointer_lock(bool enabled, bool raw)
+{
+    if (enabled && (traversable().active_document().host() != this || !consume_transient_user_activation()))
+        return { false };
+    return { view().on_set_pointer_lock && view().on_set_pointer_lock(enabled, raw) };
+}
+
 void WebContentPage::did_request_fullscreen_window()
 {
     // Element fullscreen needs and consumes the activation of the user's input, which the renderer checks. A
@@ -3077,6 +3084,13 @@ Messages::WebContentClient::DidStartDownloadResponse WebContentPage::did_start_d
         move(on_response_finished));
     if (!is_download_in_progress(file_downloader, download_id))
         return { Optional<u64> {} };
+
+    // An attachment response has no document to display in a newly opened tab.
+    // The downloader now owns the transfer independently of this view.
+    auto& tab = traversable();
+    if (navigable_id == tab.id() && tab.is_created_by_web_content()
+        && tab.active_document().is_initial_about_blank() && view().on_close)
+        view().on_close();
 
     return { download_id };
 }

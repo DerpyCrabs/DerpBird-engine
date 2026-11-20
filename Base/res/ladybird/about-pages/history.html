@@ -224,6 +224,7 @@
                 border: 0;
             }
         </style>
+    <script type="module" src="resource://ladybird/about-pages/derpbird-assets/collections.js"></script>
     </head>
     <body>
         <div class="history-header">
@@ -240,7 +241,7 @@
                 >
                     <path d="M7 2.5a4.5 4.5 0 1 1 0 9a4.5 4.5 0 1 1 0-9zM10.5 10.5L14 14" />
                 </svg>
-                <input id="history-search" type="search" placeholder="Search history" spellcheck="false" autofocus />
+                <input id="history-search" type="search" placeholder="Search history" spellcheck="false" />
             </label>
             <button id="clear-history" class="secondary-button">Clear history…</button>
         </div>
@@ -339,18 +340,18 @@
                 requestHistory(0);
             }
 
-            function removeEntry(entry) {
+            async function removeEntry(entry) {
                 const name = entry.title || entry.url;
-                if (!window.confirm(`Remove ${name} from browsing history?`)) return;
+                if (!await window.confirmHistoryChange(`Remove ${name} from browsing history?`)) return;
 
                 ladybird.sendMessage("removeHistoryEntry", { url: entry.url });
                 refreshHistory();
             }
 
-            function forgetSite(entry) {
+            async function forgetSite(entry) {
                 if (!entry.siteKey) return;
 
-                if (!window.confirm(`Forget all history from ${entry.siteKey}?`)) return;
+                if (!await window.confirmHistoryChange(`Forget all history from ${entry.siteKey}?`)) return;
 
                 ladybird.sendMessage("forgetHistorySite", { url: entry.url });
                 refreshHistory();

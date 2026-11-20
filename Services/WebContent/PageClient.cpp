@@ -999,6 +999,12 @@ void PageClient::page_did_request_minimize_window()
     client().async_did_request_minimize_window(m_id);
 }
 
+bool PageClient::page_set_pointer_lock(bool enabled, bool raw)
+{
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::SetPointerLock>(m_id, enabled, raw);
+    return response && response->accepted();
+}
+
 void PageClient::page_did_request_fullscreen_window()
 {
     client().async_did_request_fullscreen_window(m_id);

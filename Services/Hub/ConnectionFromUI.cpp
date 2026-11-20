@@ -1396,6 +1396,12 @@ void ConnectionFromUI::view_request_close(u64 view_id)
     }
 }
 
+void ConnectionFromUI::view_pointer_lock_lost(u64 view_id)
+{
+    if (auto* view = find_view(view_id))
+        view->pointer_lock_lost();
+}
+
 void ConnectionFromUI::view_deny_fullscreen_window(u64 view_id)
 {
     if (auto* view = find_view(view_id))

@@ -375,6 +375,7 @@ endpoint HubClient
     view_resize_window(u64 view_id, Gfx::IntSize size) =|
     view_maximize_window(u64 view_id) =|
     view_minimize_window(u64 view_id) =|
+    view_set_pointer_lock(u64 view_id, bool enabled, bool raw) => (bool accepted)
     view_fullscreen_window(u64 view_id) =|
     view_exit_fullscreen_window(u64 view_id) =|
     view_request_color_picker(u64 view_id, Color current_color) =|

@@ -2957,6 +2957,8 @@ void Element::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor, No
 {
     if (is_subtree_root == IsSubtreeRoot::Yes)
         finish_derpbird_pending_insertion(true);
+    if (document().pointer_lock_element() == this)
+        document().exit_pointer_lock();
     Base::removed_from(is_subtree_root, old_ancestor, old_root);
 
     // https://html.spec.whatwg.org/multipage/dom.html#render-blocking-mechanism
@@ -7084,10 +7086,25 @@ GC::Ref<CSS::StylePropertyMapReadOnly> Element::computed_style_map()
     return *computed_style_map_cache;
 }
 
-WebIDL::ExceptionOr<void> Element::request_pointer_lock(PointerLockOptions const&)
+WebIDL::ExceptionOr<void> Element::request_pointer_lock(PointerLockOptions const& options)
 {
-    dbgln("FIXME: request_pointer_lock()");
-    return WebIDL::NotSupportedError::create("request_pointer_lock() is not implemented"_utf16);
+    auto& doc = document();
+    if (doc.pointer_lock_element() == this)
+        return {};
+    if (!is_connected() || !doc.is_fully_active() || !doc.window() || !doc.window()->has_transient_activation()) {
+        doc.queue_pointer_lock_event(HTML::EventNames::pointerlockerror);
+        return WebIDL::InvalidStateError::create("Pointer lock requires an active element and a user gesture"_utf16);
+    }
+    if (has_flag(doc.active_sandboxing_flag_set(), HTML::SandboxingFlagSet::SandboxedPointerLock)) {
+        doc.queue_pointer_lock_event(HTML::EventNames::pointerlockerror);
+        return WebIDL::SecurityError::create("Pointer lock is disabled by the sandbox"_utf16);
+    }
+    if (!doc.navigable()->is_top_level_traversable() || !doc.page().client().page_set_pointer_lock(true, options.unadjusted_movement)) {
+        doc.queue_pointer_lock_event(HTML::EventNames::pointerlockerror);
+        return WebIDL::NotSupportedError::create("The window could not acquire pointer lock"_utf16);
+    }
+    doc.set_pointer_lock_element(this);
+    return {};
 }
 
 // The element to inherit style from.

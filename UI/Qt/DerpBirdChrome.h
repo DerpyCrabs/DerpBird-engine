@@ -5,6 +5,7 @@
 #include <AK/WeakPtr.h>
 #include <LibWebView/ViewImplementation.h>
 #include <UI/Qt/Actions.h>
+#include <UI/Qt/RemoteDownloads.h>
 #include <LibWebView/Settings.h>
 #include <LibWebView/Autocomplete.h>
 #include <QHash>
@@ -34,7 +35,8 @@ class Tab;
 class WebContentView;
 
 class DerpBirdChrome final : public QWidget
-    , public WebView::SettingsObserver {
+    , public WebView::SettingsObserver
+    , private RemoteDownloadsObserver {
 public:
     explicit DerpBirdChrome(BrowserWindow&);
     ~DerpBirdChrome() override;
@@ -42,6 +44,9 @@ public:
     void unobserve_tab(Tab&);
     void queue_snapshot();
     void focus_address();
+    void show_downloads();
+
+    void cycle_workspace_tab(int direction);
     ErrorOr<void> inspect_tab(Tab&, Optional<Web::UniqueNodeID> = {});
     void update_display_metadata(double device_pixel_ratio, Optional<u64> display_id, double refresh_rate);
     Tab* tree_parent(Tab&) const;
@@ -52,6 +57,9 @@ public:
 
 
 private:
+    void download_added(RemoteDownloads::Download const& d) override { download_updated(d); }
+    void download_updated(RemoteDownloads::Download const&) override;
+    void download_removed(u64, WebView::IsPrivate) override;
     QString m_automation_window_id;
     QHash<QString, QPointer<DerpBirdActivityOverlay>> m_activity_overlays;
     struct Workspace { QString id; QString name; QString icon; QString color; QPointer<Tab> last_tab; };
@@ -90,6 +98,7 @@ private:
     void clear_autofill();
     JsonValue m_filter_proposal;
     QPointer<Tab> m_filter_tab;
+    JsonObject settings_snapshot() const;
     JsonValue snapshot();
     ErrorOr<JsonValue> request(JsonValue const&);
     ErrorOr<void> command(JsonValue const&);

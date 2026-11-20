@@ -53,6 +53,9 @@
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/SystemAppearance.h>
 #include <UI/Qt/Theme.h>
+#ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
+#    include <UI/Qt/WaylandPointerLock.h>
+#endif
 #include <UI/Qt/WebContentView.h>
 #include <UI/Qt/SurfacePixelCoverage.h>
 #ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
@@ -141,6 +144,41 @@ WebContentView::WebContentView(QWidget* window, Optional<u64> hub_view_id, WebCo
                                   .is_tab = initial_state.is_tab,
                               })
 {
+#ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
+    on_set_pointer_lock = [this](bool enabled, bool raw) {
+        if (!enabled) {
+            m_pointer_lock.reset();
+            unsetCursor();
+            return true;
+        }
+        if (!hasFocus() || !isVisible() || !isActiveWindow() || m_pointer_lock)
+            return false;
+        auto* window = this->window()->windowHandle();
+        auto lock = std::make_unique<WaylandPointerLock>();
+        if (!window || !lock->acquire(*window))
+            return false;
+        lock->raw = raw;
+        auto anchor = m_last_click_position;
+        lock->on_motion = [this, anchor, position = QPointF(mapToGlobal(anchor.toPoint()))](QPointF delta) mutable {
+            position += delta;
+            QMouseEvent event { QEvent::MouseMove, anchor, position, Qt::NoButton, QGuiApplication::mouseButtons(), QGuiApplication::keyboardModifiers() };
+            enqueue_native_event(Web::MouseEvent::Type::MouseMove, event);
+        };
+        lock->on_unlock = [this] {
+            // The listener is executing on the lock object. Dispose of it after dispatch returns.
+            QTimer::singleShot(0, this, [this] {
+                if (m_pointer_lock && !m_pointer_lock->active()) {
+                    m_pointer_lock.reset();
+                    unsetCursor();
+                    pointer_lock_lost();
+                }
+            });
+        };
+        m_pointer_lock = std::move(lock);
+        setCursor(Qt::BlankCursor);
+        return true;
+    };
+#endif
 #ifdef LADYBIRD_QT_USE_RHI_WIDGET
     // Keep the QRhiWidget out of the top-level QWidget backing store. If it is
     // parented before becoming native, Qt propagates its RHI config to the whole
@@ -331,6 +369,12 @@ WebContentView::WebContentView(QWidget* window, Optional<u64> hub_view_id, WebCo
     };
 
     on_crash_overlay_state_change = [this](bool active) {
+#ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
+        if (active && m_pointer_lock) {
+            m_pointer_lock.reset();
+            unsetCursor();
+        }
+#endif
         if (active)
             close_select_dropdown_after_crash();
         set_crash_overlay_visible(active);
@@ -840,6 +884,15 @@ static bool is_browser_reserved_shortcut(QKeyEvent const& event)
 
 void WebContentView::keyPressEvent(QKeyEvent* event)
 {
+#ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
+    if (m_pointer_lock && event->key() == Qt::Key_Escape) {
+        m_pointer_lock.reset();
+        unsetCursor();
+        pointer_lock_lost();
+        event->accept();
+        return;
+    }
+#endif
     if (is_node_picker_active()) {
         if (event->key() == Qt::Key_Escape)
             node_picker_cancel();
@@ -1086,6 +1139,13 @@ void WebContentView::focusInEvent(QFocusEvent*)
 
 void WebContentView::focusOutEvent(QFocusEvent*)
 {
+#ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
+    if (m_pointer_lock) {
+        m_pointer_lock.reset();
+        unsetCursor();
+        pointer_lock_lost();
+    }
+#endif
     update_page_focus();
 }
 
@@ -2408,6 +2468,10 @@ Optional<RemoteView::ScreenRects> WebContentView::screen_rects() const
 
 void WebContentView::update_cursor(Gfx::Cursor cursor)
 {
+#ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
+    if (m_pointer_lock)
+        return;
+#endif
     cursor.visit([this](Gfx::StandardCursor standard_cursor) {
         switch (standard_cursor) {
         case Gfx::StandardCursor::Hidden:

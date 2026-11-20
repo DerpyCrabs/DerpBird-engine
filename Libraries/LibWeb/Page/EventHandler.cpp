@@ -5691,6 +5691,12 @@ EventHandler::DispatchedPointerEvent EventHandler::dispatch_a_pointer_event_for_
     //    - Otherwise, set the target to the object returned by normal hit test mechanisms.
     GC::Ptr<DOM::Node> node = hit_test_target;
     GC::Ptr<DOM::Node> pointer_capture_target = m_mouse_pointer.capture_target.ptr();
+    if (auto* lock_target = document.pointer_lock_element()) {
+        pointer_capture_target = lock_target;
+        screen_position = m_pointer_lock_screen_position;
+    } else {
+        m_pointer_lock_screen_position = screen_position;
+    }
     auto hit_test_coordinates = coordinates;
     if (pointer_capture_target) {
         node = pointer_capture_target;
@@ -5775,7 +5781,7 @@ EventHandler::DispatchedPointerEvent EventHandler::dispatch_a_pointer_event_for_
         // After running process pending pointer capture steps, if the pointer supports hover, user agent MUST also
         // send corresponding boundary events necessary to reflect the current position of the pointer with no capture.
         // NB: A cancelled pointer leaves the window, which its caller moves it out of.
-        if (type == PointerEventType::PointerUp && pointer_capture_target && m_navigable->active_document().ptr() == &document) {
+        if (type == PointerEventType::PointerUp && pointer_capture_target && !document.pointer_lock_element() && m_navigable->active_document().ptr() == &document) {
             // NB: The listeners of the events above may have invalidated layout.
             document.update_layout(DOM::UpdateLayoutReason::EventHandlerHandleMouseUp);
             track_the_effective_position_of_the_legacy_mouse_pointer(hit_test_target, DOM::HoverEventData {

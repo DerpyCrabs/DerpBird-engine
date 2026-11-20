@@ -1704,6 +1704,10 @@ public:
     void set_onvisibilitychange(WebIDL::CallbackType*);
 
     // https://fullscreen.spec.whatwg.org/#api
+    [[nodiscard]] WebIDL::CallbackType* onpointerlockchange();
+    void set_onpointerlockchange(WebIDL::CallbackType*);
+    [[nodiscard]] WebIDL::CallbackType* onpointerlockerror();
+    void set_onpointerlockerror(WebIDL::CallbackType*);
     [[nodiscard]] WebIDL::CallbackType* onfullscreenchange();
     void set_onfullscreenchange(WebIDL::CallbackType*);
     [[nodiscard]] WebIDL::CallbackType* onfullscreenerror();
@@ -1850,6 +1854,9 @@ public:
     void invalidate_content_blocker_style_sheet();
     bool content_blocker_style_sheet_may_need_refresh_for_class_or_id(Utf16FlyString const* id, ReadonlySpan<Utf16FlyString> class_names);
 
+    Element* pointer_lock_element() const { return m_pointer_lock_element.ptr(); }
+    void set_pointer_lock_element(Element*);
+    void queue_pointer_lock_event(Utf16FlyString const&);
     void exit_pointer_lock();
 
     RefPtr<SelectorQuery const> selector_query_for(Utf16String const&) const;
@@ -1998,6 +2005,7 @@ private:
     mutable Optional<String> m_serialized_base_url;
     mutable OwnPtr<ElementByIdMap> m_element_by_id;
 
+    GC::Ptr<Element> m_pointer_lock_element;
     GC::Ptr<HTML::Window> m_window;
     GC::Ref<DOM::EventTarget> m_relevant_global_event_target;
 

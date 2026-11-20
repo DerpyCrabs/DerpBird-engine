@@ -20,6 +20,8 @@
 #include <LibWebView/PermissionManager.h>
 #include <LibWebView/SearchEngine.h>
 #include <LibWebView/WebContentClient.h>
+#include <LibWebView/WebContentPage.h>
+#include <LibWebView/ViewImplementation.h>
 #include <LibWebView/WebUI/SettingsUI.h>
 
 namespace WebView {
@@ -81,6 +83,20 @@ void SettingsUI::register_interfaces()
 {
     m_site_permissions_observer = make<SettingsUISitePermissionsObserver>(*this);
 
+    register_interface("derpbird.settings"sv, [this](JsonValue data) {
+        auto* page = client().page(page_id());
+        if (!page || !page->is_open() || page->web_ui().ptr() != this || !page->displays_tab() || &page->view().page() != page
+            || !page->view().on_derpbird_request || page->view().url().serialize(URL::ExcludeFragment::Yes) != "about:settings"sv) return;
+        JsonObject request;
+        request.set("settings"sv, move(data));
+        page->view().on_derpbird_request(JsonValue { move(request) }, [self = NonnullRefPtr { *this }](ErrorOr<JsonValue> result) {
+            if (!self->has_client()) return;
+            auto* page = self->client().page(self->page_id());
+            if (!page || !page->is_open() || page->web_ui().ptr() != self.ptr()) return;
+            if (result.is_error()) self->async_send_message("derpbird.settingsError"sv, MUST(String::formatted("{}", result.error())));
+            else self->async_send_message("derpbird.settings"sv, result.release_value());
+        });
+    });
     register_interface("loadFeatures"sv, [this](auto const&) {
         load_features();
     });
