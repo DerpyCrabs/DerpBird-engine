@@ -413,9 +413,9 @@ public:
     // As above, for a subtree that may have entered the flat tree, whose animations a record that did not move has yet
     // to plan.
     void settle_animations_of_flat_tree_subtree(Layout::BegunRead const&, Function<void(Element&)> const& compose_element);
-    // Clears the styles of the descendants of a display:none element, which have no boxes: a CSSOM read or the subtree's
-    // reveal materializes them again. The styles of the SVG elements visible content can reference are computed again.
-    void clear_computed_styles_from_display_none_descendants(Layout::BegunRead const& read);
+    // Clears the style of a descendant of a display:none element, which has no box: a CSSOM read or the subtree's
+    // reveal materializes it again. The style of an SVG element visible content can reference is computed again.
+    void clear_computed_style_below_display_none(Layout::BegunRead const& read);
     // The custom-property environment an engine-computed record was published with: the one the
     // element inherits, or one the engine resolved over it. Nothing when it cannot be installed.
     [[nodiscard]] RefPtr<CSS::CustomPropertyData const> custom_property_environment_of_engine_record(Layout::BegunRead const& read, u64 environment, bool& installable) const;
@@ -446,8 +446,10 @@ public:
     // Composes the style records swapped in for those of the element's pseudo-elements the `composed` mask names, a
     // bit at each kind: applies the plan each record decides, samples the animations over it, and runs the transition
     // step for those the `transition_steps` mask names, against the record each held before, which
-    // `before_change_style_records` names in the order of `computed_pseudo_elements`.
-    CSS::RequiredInvalidationAfterStyleChange compose_style_pseudo_element_records(Layout::BegunRead const& read, u16 composed, u16 transition_steps, Array<CSS::InstalledStyle, computed_pseudo_elements.size()> const& before_change_styles);
+    // `before_change_style_records` names in the order of `computed_pseudo_elements`. A pseudo-element the
+    // `displayed_before` mask names, which was displayed before its record was swapped in, ends the CSS animations and
+    // transitions it owns where the record is `display: none`.
+    CSS::RequiredInvalidationAfterStyleChange compose_style_pseudo_element_records(Layout::BegunRead const& read, u16 composed, u16 transition_steps, Array<CSS::InstalledStyle, computed_pseudo_elements.size()> const& before_change_styles, u16 displayed_before);
 
     void set_needs_layout_tree_rebuild(Layout::BegunRead const& read, SetNeedsLayoutTreeUpdateReason, CSS::LayoutTreeRebuildRoot);
 
@@ -751,6 +753,7 @@ public:
     int scroll_height();
 
     bool is_actually_disabled() const;
+    bool is_disabled_form_control() const;
 
     WebIDL::ExceptionOr<GC::Ptr<Element>> insert_adjacent_element(Utf16View where, GC::Ref<Element> element);
     WebIDL::ExceptionOr<void> insert_adjacent_text(Utf16View where, Utf16View data);
@@ -1077,8 +1080,6 @@ private:
     RareData const* element_rare_data() const;
     PseudoElementData* pseudo_element_data();
     PseudoElementData const* pseudo_element_data() const;
-
-    Utf16FlyString make_html_uppercased_qualified_name() const;
 
     void exit_fullscreen_on_element_removal();
     void apply_computed_style_to_layout_node_if_needed(Layout::BegunRead const& read, CSS::RequiredInvalidationAfterStyleChange const&);

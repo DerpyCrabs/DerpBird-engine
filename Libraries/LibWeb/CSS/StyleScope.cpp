@@ -186,6 +186,8 @@ void StyleScope::remove_sheet(StyleSheetState& sheet, StyleEngineUpdate style_en
     sheet.remove_owning_document_or_shadow_root(node());
     bool did_remove = m_style_sheets.remove_first_matching([&](auto& entry) { return entry.ptr() == &sheet; });
     VERIFY(did_remove);
+    if (m_node->is_document())
+        document().fonts()->synchronize_css_connected_font_order();
     if (style_engine_update == StyleEngineUpdate::Record)
         record_stylesheet_detached(sheet, node());
 
@@ -407,6 +409,11 @@ void StyleScope::prepare_user_agent_rules(DOM::Document& document)
 void StyleScope::release_kept_data()
 {
     Parser::ValueParserFFI::rust_style_release_kept_data();
+}
+
+void StyleScope::release_shaped_texts()
+{
+    Parser::ValueParserFFI::rust_style_release_shaped_texts();
 }
 
 void StyleScope::for_each_user_agent_stylesheet(bool include_quirks_mode_stylesheet, bool include_mathml_and_svg_stylesheets, Function<void(CSS::StyleSheetState&, StyleSheetIdentifier const&)> const& callback)

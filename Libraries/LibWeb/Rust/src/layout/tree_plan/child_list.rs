@@ -53,11 +53,11 @@ impl PlannedBox<'_> {
         !parent.has_fact(box_fact::MATH_INSIDE) || self.has_fact(box_fact::ABSOLUTELY_POSITIONED)
     }
 
-    fn is_out_of_flow_table_internal_child_of_table_root(&self, parent: &PlannedBox<'_>) -> bool {
+    fn is_absolutely_positioned_table_internal_child_of_table_root(&self, parent: &PlannedBox<'_>) -> bool {
         parent.has_fact(box_fact::TABLE_INSIDE)
             && self.has_flag(NodeFlag::HasStyle)
             && !self.has_flag(NodeFlag::Anonymous)
-            && self.is_out_of_flow()
+            && self.has_fact(box_fact::ABSOLUTELY_POSITIONED)
             && !self.has_flag(NodeFlag::IsReplacedElement)
             && self.has_fact(box_fact::TABLE_NON_ROOT_BEFORE_BLOCKIFICATION)
     }
@@ -90,9 +90,13 @@ impl PlanTree {
         self.node(node).is_out_of_flow_child_of(&self.node(parent))
     }
 
-    fn is_out_of_flow_table_internal_child_of_table_root(&self, parent: NodeSlotId, child: NodeSlotId) -> bool {
+    fn is_absolutely_positioned_table_internal_child_of_table_root(
+        &self,
+        parent: NodeSlotId,
+        child: NodeSlotId,
+    ) -> bool {
         self.node(child)
-            .is_out_of_flow_table_internal_child_of_table_root(&self.node(parent))
+            .is_absolutely_positioned_table_internal_child_of_table_root(&self.node(parent))
     }
 
     /// Makes an anonymous block container under `parent`, before `before`, that takes its style from `parent`.
@@ -209,7 +213,7 @@ impl PlanTree {
         // Table-internal boxes may have been blockified before insertion, but table fixup still needs to see them as
         // direct table children instead of grouping them with neighboring table whitespace.
         let node_box = self.node(node);
-        if node_box.is_out_of_flow_table_internal_child_of_table_root(&new_parent_box) {
+        if node_box.is_absolutely_positioned_table_internal_child_of_table_root(&new_parent_box) {
             return new_parent;
         }
 
@@ -269,7 +273,7 @@ impl PlanTree {
             let mut child = self.node(new_parent).first_child();
             let mut keeps_children = false;
             while !child.is_invalid() && !keeps_children {
-                keeps_children = self.is_out_of_flow_table_internal_child_of_table_root(new_parent, child);
+                keeps_children = self.is_absolutely_positioned_table_internal_child_of_table_root(new_parent, child);
                 child = self.node(child).next_sibling();
             }
             let wrapper = if keeps_children {
@@ -283,7 +287,9 @@ impl PlanTree {
             let mut child = self.node(new_parent).first_child();
             while !child.is_invalid() {
                 let next = self.node(child).next_sibling();
-                if child != wrapper && !self.is_out_of_flow_table_internal_child_of_table_root(new_parent, child) {
+                if child != wrapper
+                    && !self.is_absolutely_positioned_table_internal_child_of_table_root(new_parent, child)
+                {
                     self.move_child(child, wrapper);
                 }
                 child = next;
@@ -356,7 +362,7 @@ impl PlanTree {
         &mut self,
         fieldset: NodeSlotId,
         legend: NodeSlotId,
-        is_flex: bool,
+        content_display_inside: u8,
     ) -> NodeSlotId {
         let first_child = self.node(fieldset).first_child();
         let before = if legend.is_invalid() {
@@ -368,11 +374,7 @@ impl PlanTree {
             }
             self.node(legend).next_sibling()
         };
-        let wrapper = self.push_contents_wrapper(if is_flex {
-            crate::css::css_enums::display_inside::FLEX
-        } else {
-            crate::css::css_enums::display_inside::FLOW_ROOT
-        });
+        let wrapper = self.push_contents_wrapper(content_display_inside);
         self.attach(fieldset, wrapper, before);
         self.derive_subtree_on_commit(wrapper);
         self.move_children(fieldset, wrapper, legend);
@@ -425,6 +427,12 @@ impl PlanTree {
             ChildPosition::Prepend => self.node(insertion_point).first_child(),
         };
         self.attach(insertion_point, node, before);
+        if is_inline_outside {
+            // NB: An absolutely positioned box that would be inline-level in flow is blockified, so attaching it
+            //     doesn't count it as an inline-level child. It is one all the same: a block-level sibling that
+            //     follows has to wrap it in an anonymous block, where a line gives it its static position.
+            *self.facts_mut(insertion_point) |= box_fact::HAS_INLINE_OR_IN_FLOW_CHILDREN;
+        }
 
         let point_box = self.node(insertion_point);
         let children_are_inline = if is_inline_outside {
@@ -834,7 +842,31 @@ mod tests {
     }
 
     #[test]
-    fn out_of_flow_table_internal_child_of_a_table_stays_out_of_the_wrapper() {
+    fn block_after_inline_level_absolutely_positioned_box_wraps_it_with_the_floats_before_it() {
+        let mut tree = PlanTree::default();
+        let parent = root(&mut tree, NodeKind::BlockContainer, block());
+        let float = element(&mut tree, NodeKind::BlockContainer, out_of_flow(block()));
+        assert_eq!(append(&mut tree, parent, float), parent);
+        let abspos = element(
+            &mut tree,
+            NodeKind::BlockContainer,
+            block() | box_fact::ABSOLUTELY_POSITIONED | box_fact::INLINE_OUTSIDE_BEFORE_BLOCKIFICATION,
+        );
+        assert_eq!(append(&mut tree, parent, abspos), parent);
+        assert!(tree.node(parent).has_flag(NodeFlag::ChildrenAreInline));
+        let child = element(&mut tree, NodeKind::BlockContainer, block());
+        assert_eq!(append(&mut tree, parent, child), parent);
+        let parent_children = children(&tree, parent);
+        assert_eq!(parent_children.len(), 2);
+        assert!(is_wrapper(&tree, parent_children[0]));
+        assert!(tree.node(parent_children[0]).has_flag(NodeFlag::ChildrenAreInline));
+        assert_eq!(children(&tree, parent_children[0]), [float, abspos]);
+        assert_eq!(parent_children[1], child);
+        assert!(!tree.node(parent).has_flag(NodeFlag::ChildrenAreInline));
+    }
+
+    #[test]
+    fn absolutely_positioned_table_internal_child_of_a_table_stays_out_of_the_wrapper() {
         let mut tree = PlanTree::default();
         let parent = root(
             &mut tree,
@@ -846,7 +878,7 @@ mod tests {
         let cell = element(
             &mut tree,
             NodeKind::BlockContainer,
-            block() | box_fact::FLOATING | box_fact::TABLE_NON_ROOT_BEFORE_BLOCKIFICATION,
+            block() | box_fact::ABSOLUTELY_POSITIONED | box_fact::TABLE_NON_ROOT_BEFORE_BLOCKIFICATION,
         );
         assert_eq!(append(&mut tree, parent, cell), parent);
         let second = text(&mut tree);
@@ -859,6 +891,33 @@ mod tests {
         assert!(is_wrapper(&tree, parent_children[1]));
         assert_eq!(children(&tree, parent_children[1]), [first, second]);
         assert_eq!(parent_children[2], child);
+    }
+
+    #[test]
+    fn floated_table_internal_child_of_a_table_joins_the_wrapper() {
+        let mut tree = PlanTree::default();
+        let parent = root(
+            &mut tree,
+            NodeKind::Box,
+            display(display_outside::BLOCK, display_inside::TABLE),
+        );
+        let first = text(&mut tree);
+        append(&mut tree, parent, first);
+        let row_group = element(
+            &mut tree,
+            NodeKind::BlockContainer,
+            block() | box_fact::FLOATING | box_fact::TABLE_NON_ROOT_BEFORE_BLOCKIFICATION,
+        );
+        append(&mut tree, parent, row_group);
+        let second = text(&mut tree);
+        append(&mut tree, parent, second);
+        let child = element(&mut tree, NodeKind::BlockContainer, block());
+        append(&mut tree, parent, child);
+        let parent_children = children(&tree, parent);
+        assert_eq!(parent_children.len(), 2);
+        assert!(is_wrapper(&tree, parent_children[0]));
+        assert_eq!(children(&tree, parent_children[0]), [first, row_group, second]);
+        assert_eq!(parent_children[1], child);
     }
 
     #[test]

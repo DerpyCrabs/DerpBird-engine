@@ -349,7 +349,6 @@ WebContentView::WebContentView(QWidget* window, Optional<u64> hub_view_id, WebCo
 #endif
 
     on_ready_to_paint = [this]() {
-        m_tab_preview_is_stale = true;
         if (m_screenshot_selection_overlay)
             m_screenshot_selection_overlay->page_did_paint();
 
@@ -361,7 +360,6 @@ WebContentView::WebContentView(QWidget* window, Optional<u64> hub_view_id, WebCo
             schedule_repaint();
 #endif
         }
-        emit ready_to_paint();
     };
 
     on_cursor_change = [this](auto cursor) {
@@ -799,6 +797,15 @@ static Web::UIEvents::KeyCode get_keycode_from_qt_key_event(QKeyEvent const& eve
         { Qt::Key_Z, Web::UIEvents::Key_Z },
     };
 
+#if defined(AK_OS_MACOS)
+    // Qt reports the Command key as Key_Control and the Control key as Key_Meta on macOS, just as it swaps their
+    // modifiers (see get_modifiers_from_qt_keyboard_modifiers()), so swap them back.
+    if (event.key() == Qt::Key_Control)
+        return Web::UIEvents::Key_LeftSuper;
+    if (event.key() == Qt::Key_Meta)
+        return Web::UIEvents::Key_LeftControl;
+#endif
+
     for (auto const& mapping : mappings) {
         if (event.key() == mapping.qt_key)
             return mapping.serenity_key;
@@ -893,6 +900,16 @@ void WebContentView::keyPressEvent(QKeyEvent* event)
         return;
     }
 #endif
+    if (m_compositor_layer_picker.has_value()) {
+        if (event->key() == Qt::Key_Escape) {
+            auto picker = m_compositor_layer_picker.release_value();
+            unsetCursor();
+            picker.on_cancel();
+        }
+        event->accept();
+        return;
+    }
+
     if (is_node_picker_active()) {
         if (event->key() == Qt::Key_Escape)
             node_picker_cancel();
@@ -913,7 +930,7 @@ void WebContentView::keyPressEvent(QKeyEvent* event)
 
 void WebContentView::keyReleaseEvent(QKeyEvent* event)
 {
-    if (is_node_picker_active()) {
+    if (m_compositor_layer_picker.has_value() || is_node_picker_active()) {
         event->accept();
         return;
     }
@@ -950,6 +967,11 @@ void WebContentView::leaveEvent(QEvent* event)
 
 void WebContentView::handle_pointer_leave()
 {
+    if (m_compositor_layer_picker.has_value()) {
+        m_compositor_layer_picker->on_leave();
+        return;
+    }
+
     if (is_node_picker_active()) {
         clear_node_picker();
         return;
@@ -967,6 +989,13 @@ void WebContentView::cancel_mouse_press()
 
 void WebContentView::mouseMoveEvent(QMouseEvent* event)
 {
+    if (m_compositor_layer_picker.has_value()) {
+        auto position = node_picker_position_for(*event);
+        m_compositor_layer_picker->on_hover({ position.x().value(), position.y().value() });
+        event->accept();
+        return;
+    }
+
     if (is_node_picker_active()) {
         node_picker_hover(node_picker_position_for(*event));
         event->accept();
@@ -982,6 +1011,18 @@ void WebContentView::mouseMoveEvent(QMouseEvent* event)
 
 void WebContentView::mousePressEvent(QMouseEvent* event)
 {
+    if (m_compositor_layer_picker.has_value()) {
+        if (event->button() == Qt::MouseButton::LeftButton) {
+            auto position = node_picker_position_for(*event);
+            auto picker = m_compositor_layer_picker.release_value();
+            unsetCursor();
+            m_swallows_mouse_release_after_compositor_layer_pick = true;
+            picker.on_pick({ position.x().value(), position.y().value() });
+        }
+        event->accept();
+        return;
+    }
+
     if (is_node_picker_active()) {
         if (event->button() == Qt::MouseButton::LeftButton) {
             auto position = node_picker_position_for(*event);
@@ -1012,7 +1053,13 @@ void WebContentView::mousePressEvent(QMouseEvent* event)
 
 void WebContentView::mouseReleaseEvent(QMouseEvent* event)
 {
-    if (is_node_picker_active()) {
+    if (m_swallows_mouse_release_after_compositor_layer_pick) {
+        m_swallows_mouse_release_after_compositor_layer_pick = false;
+        event->accept();
+        return;
+    }
+
+    if (m_compositor_layer_picker.has_value() || is_node_picker_active()) {
         event->accept();
         return;
     }
@@ -1360,20 +1407,14 @@ bool WebContentView::holds_displayed_frame() const
     return paintable.has_value() && paintable->shared_image_buffer;
 }
 
-void WebContentView::take_visible_snapshot(Optional<QSize> maximum_size, Function<void(QImage)> on_snapshot)
+void WebContentView::take_visible_snapshot(Function<void(QImage)> on_snapshot)
 {
     if (holds_displayed_frame() || !current_paintable().has_value()) {
-        auto snapshot = visible_snapshot();
-        if (maximum_size.has_value() && !snapshot.isNull() && (snapshot.width() > maximum_size->width() || snapshot.height() > maximum_size->height()))
-            snapshot = snapshot.scaled(*maximum_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        on_snapshot(AK::move(snapshot));
+        on_snapshot(visible_snapshot());
         return;
     }
 
-    Optional<Gfx::IntSize> maximum_bitmap_size;
-    if (maximum_size.has_value())
-        maximum_bitmap_size = Gfx::IntSize { maximum_size->width(), maximum_size->height() };
-    take_frame_snapshot(maximum_bitmap_size, [self = QPointer { this }, on_snapshot = AK::move(on_snapshot)](Optional<Gfx::ShareableBitmap> snapshot) {
+    take_frame_snapshot([self = QPointer { this }, on_snapshot = AK::move(on_snapshot)](Optional<Gfx::ShareableBitmap> snapshot) {
         if (!self)
             return;
         auto const* bitmap = snapshot.has_value() && snapshot->is_valid() ? snapshot->bitmap() : nullptr;
@@ -1397,49 +1438,6 @@ void WebContentView::remove_frame_notification_interest()
     VERIFY(m_frame_notification_interest > 0);
     if (--m_frame_notification_interest == 0)
         set_wants_frame_notifications(false);
-}
-
-// One request at a time, and only once a frame was presented since the last, as a page that animates presents a frame
-// each refresh.
-void WebContentView::refresh_tab_preview(QSize const& maximum_size)
-{
-    if (m_tab_preview_request_in_flight || (!m_tab_preview_is_stale && m_tab_preview_maximum_size == maximum_size))
-        return;
-    m_tab_preview_request_in_flight = true;
-    m_tab_preview_is_stale = false;
-    take_visible_snapshot(maximum_size, [this, maximum_size](QImage snapshot) {
-        m_tab_preview_request_in_flight = false;
-        m_tab_preview_maximum_size = maximum_size;
-        m_tab_preview = snapshot.isNull() ? QPixmap {} : QPixmap::fromImage(snapshot);
-        emit tab_preview_changed();
-    });
-}
-
-Optional<QPixmap> WebContentView::tab_preview_pixmap(QSize const& maximum_size)
-{
-    if (maximum_size.isEmpty())
-        return {};
-
-    if (!holds_displayed_frame() && current_paintable().has_value()) {
-        refresh_tab_preview(maximum_size);
-        if (m_tab_preview.isNull())
-            return {};
-        return m_tab_preview;
-    }
-
-    auto snapshot = visible_snapshot();
-    if (snapshot.isNull())
-        return {};
-
-    auto preview_size = snapshot.size().scaled(maximum_size, Qt::KeepAspectRatio);
-    if (preview_size.isEmpty())
-        return {};
-
-    auto preview = QPixmap::fromImage(snapshot).scaled(preview_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    if (preview.isNull())
-        return {};
-
-    return preview;
 }
 
 namespace {
@@ -1485,6 +1483,7 @@ public:
         setWidgetResizable(true);
         setBackgroundRole(QPalette::Window);
         viewport()->setBackgroundRole(QPalette::Window);
+        apply_interface_palette();
 
         // Qt scrolls opaque content by moving the pixels it painted before, which leaves stale text behind the
         // translucent fields of a review inside this native view. Transparent content is repainted instead, on top of
@@ -1513,6 +1512,13 @@ public:
     QWidget& content() { return *m_content; }
     QWidget& column() { return *m_column; }
 
+    virtual bool event(QEvent* event) override
+    {
+        if (event->type() == QEvent::PaletteChange)
+            apply_interface_palette();
+        return QScrollArea::event(event);
+    }
+
     // The column reaches from the top of the tab to its bottom rather than being centered in it.
     void set_fills_height()
     {
@@ -1531,10 +1537,23 @@ public:
     }
 
 private:
+    // The overlay is in the interface theme's colors, like the review it holds, whichever appearance Qt's palette has.
+    void apply_interface_palette()
+    {
+        // Setting the palette changes it, which would bring us back here.
+        if (m_is_applying_interface_palette)
+            return;
+        m_is_applying_interface_palette = true;
+        setPalette(QPalette {});
+        setPalette(Theme::interface_palette(palette()));
+        m_is_applying_interface_palette = false;
+    }
+
     QWidget* m_content { nullptr };
     QWidget* m_column { nullptr };
     QVBoxLayout* m_layout { nullptr };
     bool m_fills_height { false };
+    bool m_is_applying_interface_palette { false };
 };
 
 class CrashOverlayUrlLabel final : public QLabel {
@@ -1604,7 +1623,7 @@ void WebContentView::set_crash_overlay_visible(bool visible)
         heading_layout->setContentsMargins(0, 0, 0, 0);
         heading_layout->setSpacing(ReportReview::item_spacing);
 
-        auto* title = ReportReview::create_title(tr("This tab crashed"), heading);
+        m_crash_overlay_title = ReportReview::create_title({}, heading);
 
         m_crash_overlay_url = new CrashOverlayUrlLabel(heading);
 
@@ -1626,7 +1645,7 @@ void WebContentView::set_crash_overlay_visible(bool visible)
         m_crash_overlay_reload_shortcut->setContext(Qt::WidgetWithChildrenShortcut);
         QObject::connect(m_crash_overlay_reload_shortcut, &QShortcut::activated, m_crash_overlay_reload_button, &QPushButton::click);
 
-        heading_layout->addWidget(title);
+        heading_layout->addWidget(m_crash_overlay_title);
         heading_layout->addWidget(m_crash_overlay_url);
         heading_layout->addWidget(m_crash_overlay_message);
 
@@ -1658,7 +1677,13 @@ void WebContentView::set_crash_overlay_visible(bool visible)
     if (m_crash_report_container)
         m_crash_report_container->hide();
     m_crash_overlay_url->show();
-    m_crash_overlay_message->setText(crash_screen_message());
+    if (crash_overlay_is_for_memory_limit()) {
+        m_crash_overlay_title->setText(tr("This tab ran out of memory"));
+        m_crash_overlay_message->setText(tr("This page used too much memory, so it was stopped."));
+    } else {
+        m_crash_overlay_title->setText(tr("This tab crashed"));
+        m_crash_overlay_message->setText(crash_screen_message());
+    }
     m_crash_overlay_reload_button->show();
     m_crash_overlay_reload_shortcut->setEnabled(true);
 
@@ -1716,7 +1741,7 @@ void WebContentView::select_web_compat_report_screenshot(Function<void(QImage)> 
     if (m_screenshot_selection_overlay)
         return;
 
-    take_visible_snapshot({}, [this, on_selected = AK::move(on_selected), on_close = AK::move(on_close)](QImage frame) mutable {
+    take_visible_snapshot([this, on_selected = AK::move(on_selected), on_close = AK::move(on_close)](QImage frame) mutable {
         if (frame.isNull() || m_screenshot_selection_overlay) {
             if (on_close)
                 on_close();
@@ -1812,7 +1837,7 @@ ScreenshotSelectionOverlay& WebContentView::select_screenshot(QImage const& fram
         if (on_close)
             on_close();
     };
-    overlay->on_request_page_frame = [this](Function<void(QImage)> on_frame) { take_visible_snapshot({}, AK::move(on_frame)); };
+    overlay->on_request_page_frame = [this](Function<void(QImage)> on_frame) { take_visible_snapshot(AK::move(on_frame)); };
     overlay->on_page_visibility_change = [this] { schedule_repaint(); };
     return *overlay;
 }
@@ -1824,7 +1849,7 @@ void WebContentView::start_screenshot()
     if (m_screenshot_selection_overlay)
         return;
 
-    take_visible_snapshot({}, [this](QImage frame) {
+    take_visible_snapshot([this](QImage frame) {
         if (m_screenshot_selection_overlay)
             return;
         if (frame.isNull()) {
@@ -2466,6 +2491,41 @@ Optional<RemoteView::ScreenRects> WebContentView::screen_rects() const
     return screen_rects_from_qt();
 }
 
+// Qt has no zoom cursors, so draw a magnifier with a plus or a minus in its lens, with the hotspot at the lens's center.
+static QCursor make_zoom_cursor(bool zoom_in, qreal device_pixel_ratio)
+{
+    static constexpr int size = 24;
+    static constexpr QPointF lens_center { 9.5, 9.5 };
+    static constexpr qreal lens_radius = 6.5;
+
+    QPixmap pixmap { qRound(size * device_pixel_ratio), qRound(size * device_pixel_ratio) };
+    pixmap.setDevicePixelRatio(device_pixel_ratio);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter { &pixmap };
+    painter.setRenderHint(QPainter::Antialiasing);
+    auto draw_shape = [&](QColor const& color, qreal width) {
+        painter.setPen(QPen { color, width, Qt::SolidLine, Qt::RoundCap });
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(lens_center, lens_radius, lens_radius);
+        painter.setPen(QPen { color, width + 1.5, Qt::SolidLine, Qt::RoundCap });
+        painter.drawLine(QPointF { 14.5, 14.5 }, QPointF { 21, 21 });
+        painter.setPen(QPen { color, width, Qt::SolidLine, Qt::RoundCap });
+        painter.drawLine(QPointF { 6.5, 9.5 }, QPointF { 12.5, 9.5 });
+        if (zoom_in)
+            painter.drawLine(QPointF { 9.5, 6.5 }, QPointF { 9.5, 12.5 });
+    };
+    // NB: A white outline under the black shape keeps the cursor visible on dark and light backgrounds alike.
+    draw_shape(Qt::white, 3.5);
+    painter.setBrush(QColor { 255, 255, 255, 160 });
+    painter.setPen(Qt::NoPen);
+    painter.drawEllipse(lens_center, lens_radius - 1, lens_radius - 1);
+    draw_shape(Qt::black, 1.5);
+    painter.end();
+
+    return QCursor { pixmap, qRound(lens_center.x()), qRound(lens_center.y()) };
+}
+
 void WebContentView::update_cursor(Gfx::Cursor cursor)
 {
 #ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY
@@ -2528,9 +2588,14 @@ void WebContentView::update_cursor(Gfx::Cursor cursor)
         case Gfx::StandardCursor::Disallowed:
             setCursor(Qt::ForbiddenCursor);
             break;
+        case Gfx::StandardCursor::ZoomIn:
+            setCursor(make_zoom_cursor(true, devicePixelRatioF()));
+            break;
+        case Gfx::StandardCursor::ZoomOut:
+            setCursor(make_zoom_cursor(false, devicePixelRatioF()));
+            break;
         case Gfx::StandardCursor::Eyedropper:
-        case Gfx::StandardCursor::Zoom:
-            // FIXME: No corresponding Qt cursors, default to Arrow
+            // FIXME: No corresponding Qt cursor, default to Arrow
         default:
             setCursor(Qt::ArrowCursor);
             break;
@@ -2553,6 +2618,24 @@ void WebContentView::update_cursor(Gfx::Cursor cursor)
             }
             setCursor(QCursor { qpixmap, image_cursor.hotspot.x(), image_cursor.hotspot.y() });
         });
+}
+
+void WebContentView::start_compositor_layer_picker(CompositorLayerPicker picker)
+{
+    stop_compositor_layer_picker();
+    m_compositor_layer_picker = AK::move(picker);
+    setCursor(Qt::CrossCursor);
+    // The page takes the Escape key that cancels the picking.
+    window()->activateWindow();
+    setFocus();
+}
+
+void WebContentView::stop_compositor_layer_picker()
+{
+    if (!m_compositor_layer_picker.has_value())
+        return;
+    m_compositor_layer_picker.clear();
+    unsetCursor();
 }
 
 Web::DevicePixelPoint WebContentView::node_picker_position_for(QSinglePointEvent const& event) const

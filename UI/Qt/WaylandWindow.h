@@ -7,9 +7,13 @@
 #pragma once
 
 class QWidget;
+class QWindow;
+struct wl_surface;
 
 namespace Ladybird {
 
+// The surface of an existing native Wayland window. This does not create a platform window.
+wl_surface* wayland_surface_for_window(QWindow const&);
 void set_wayland_agent_window_identity(QWidget&);
 
 // Whether the Wayland compositor can move a window with the pointer while it is dragged. It never can off Wayland.

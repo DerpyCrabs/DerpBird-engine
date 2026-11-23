@@ -60,8 +60,18 @@ runs:
       id: 'build-parameters'
       shell: bash
       run: |
-        CMAKE_OPTIONS="-DENABLE_CI_BASELINE_CPU=ON"
+        CMAKE_OPTIONS="-DLADYBIRD_BASELINE_CPU_TARGET=ON"
         if ${{ inputs.os == 'Linux' }} ; then
+          if ${{ inputs.build_preset == 'Distribution' }} && [[ -r /etc/os-release ]]; then
+            # shellcheck source=/dev/null
+            . /etc/os-release
+
+            # Ubuntu 26.04 is the first release with Qt 6.10 or newer.
+            if [[ "${ID:-}" == 'ubuntu' && -n "${VERSION_ID:-}" ]] && dpkg --compare-versions "$VERSION_ID" lt 26; then
+              CMAKE_OPTIONS="$CMAKE_OPTIONS -DLADYBIRD_BUILD_QT=ON"
+            fi
+          fi
+
           # FIXME: https://github.com/WebAssembly/wabt/issues/2533
           #        wabt doesn't have binary releases for arm64 Linux
           if ${{ inputs.arch == 'arm64' }} ; then
@@ -145,7 +155,7 @@ runs:
         VCPKG_CACHE_MODE: ${{ github.ref == 'refs/heads/master' && inputs.vcpkg_cache_sas != '' && 'write' || '' }}
       run: |
         cmake --preset ${{ inputs.build_preset }} -B Build `
-          -DENABLE_CI_BASELINE_CPU=ON
+          -DLADYBIRD_BASELINE_CPU_TARGET=ON
 
     - name: Create Build Environment (Fuzzers)
       if: ${{ inputs.build_preset == 'Fuzzers' }}

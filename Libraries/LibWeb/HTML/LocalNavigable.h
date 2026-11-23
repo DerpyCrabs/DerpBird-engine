@@ -105,6 +105,7 @@ public:
     GC::Ptr<RemoteNavigable> provisional_for() const { return m_provisional_for; }
     void clear_provisional_for() { m_provisional_for = nullptr; }
     static GC::Ref<LocalNavigable> create_stand_in(Badge<Page>, RemoteNavigable&, SessionHistoryEntryDescriptor const& current_history_entry);
+    bool container_suppresses_viewport_scrolling() const;
     void set_root_container_state(ReplicatedContainerState);
     void set_parent_compositor_context(Optional<Web::CompositorContextId>);
 
@@ -248,6 +249,8 @@ public:
     CSSPixelRect viewport_rect() const { return { m_viewport_scroll_offset, m_viewport_size }; }
     CSSPixelSize viewport_size() const { return m_viewport_size; }
     void set_viewport_size(CSSPixelSize, InvalidateDisplayList = InvalidateDisplayList::No);
+    Gfx::IntSize viewport_size_in_device_pixels() const;
+    Gfx::IntRect present_viewport_rect() const;
 
     // A size the window takes as a rendering update is in flight waits for that update to end: the update flies for
     // the size it began with, and a new size would make the main thread wait for the flight and lay out again.
@@ -472,7 +475,6 @@ private:
     void commit_unrecorded_frame(Layout::BegunRead const&, DOM::Document&, Compositor::SealedPresentation);
     Compositor::SealedPresentation seal_presentation(Layout::BegunRead const&, DOM::Document&, PaintConfig const&, bool records_display_list);
     void finish_recording_in_flight(RecordingInFlight&, Layout::RustFFI::FfiRecordingLanding, bool presented_other_scroll_offsets);
-    Gfx::IntRect present_viewport_rect() const;
 
     Optional<CSSPixelPoint> to_local_root_viewport_position(CSSPixelPoint);
 
@@ -808,6 +810,7 @@ public:
     static GC::Ref<DocumentToCreate> create(GC::Ref<NavigationParams>, GC::Ref<LoadSteps>, Optional<URL::Origin> origin = {});
 
     URL::Origin origin() const;
+    bool replaces_response_origin() const { return m_replaces_response_origin; }
     URL::URL url() const;
     CrossProcessId id() const;
     EnvironmentId const& environment_id() const;
@@ -825,7 +828,7 @@ private:
     // Null once the document is created or discarded, so that what it was created from is released.
     GC::Ptr<NavigationParams> m_navigation_params;
     GC::Ptr<LoadSteps> m_load_steps;
-    Optional<URL::Origin> m_origin;
+    bool m_replaces_response_origin { false };
     // Creating the document moves the id out of the reserved environment.
     EnvironmentId m_environment_id;
 };

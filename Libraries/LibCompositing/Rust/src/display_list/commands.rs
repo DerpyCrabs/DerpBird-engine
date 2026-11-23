@@ -10,6 +10,7 @@ use crate::display_list_record_fields;
 use crate::ffi_bytes_fields;
 use crate::ffi_enum_bytes;
 use libgfx_rust::*;
+use libipc_rust::wire::{Decode, Encode};
 
 // The layout of records and runs on the tape, which only Rust reads.
 pub use super::tape::*;
@@ -93,6 +94,19 @@ impl DisplayListCommandType {
         )
     }
 
+    /// A top-level record of this command is the only record of its run: a canvas, video, nested context, caret or
+    /// scroll bar, which the compositor can give a layer of its own between the records around it.
+    pub const fn is_alone_in_its_run(self) -> bool {
+        matches!(
+            self,
+            Self::DrawCanvas
+                | Self::DrawVideoFrame
+                | Self::DrawCompositedContext
+                | Self::PaintCaret
+                | Self::PaintScrollBar
+        )
+    }
+
     /// A command of the stream of a 2D canvas, which the canvas replays against its own surface in recording order,
     /// under the state that the commands before it saved, transformed, clipped and restored. Such a command draws no
     /// known rect, and the display list of a page never holds one. Its name starts with "Canvas2D", which is how the
@@ -172,7 +186,7 @@ impl DisplayListCommandType {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
 #[repr(transparent)]
 pub struct SpatialNodeIndex(pub u32);
 
@@ -186,7 +200,7 @@ impl FfiBytes for SpatialNodeIndex {
 // Indices into the clip and effect trees. `u32::MAX` is the absent node.
 macro_rules! optional_node_index {
     ($name:ident) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
         #[repr(transparent)]
         pub struct $name(pub u32);
 
@@ -225,7 +239,7 @@ pub struct ContextRef {
 }
 ffi_bytes_fields!(ContextRef { spatial, clip, effect });
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode)]
 #[repr(u8)]
 pub enum ClipMode {
     #[default]
@@ -247,6 +261,7 @@ pub struct ReplayClip {
 pub struct ReplayLayer {
     pub opacity: f32,
     pub blend_mode: CompositingAndBlendingOperator,
+    pub can_draw_directly_for_lcd_text: bool,
     pub filter_bytes: *const u8,
     pub filter_bytes_size: usize,
     pub backdrop_filter_bytes: *const u8,
@@ -292,7 +307,7 @@ impl FfiBytes for FontResourceId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
 #[repr(transparent)]
 pub struct ImageFrameResourceId(pub u64);
 
@@ -303,7 +318,7 @@ impl FfiBytes for ImageFrameResourceId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
 #[repr(transparent)]
 pub struct VideoSinkHandle(pub u64);
 
@@ -325,7 +340,7 @@ impl FfiBytes for DisplayListResourceId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
 #[repr(transparent)]
 pub struct CanvasId(pub u64);
 
@@ -336,7 +351,7 @@ impl FfiBytes for CanvasId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
 #[repr(transparent)]
 pub struct CompositorContextId(pub u64);
 
@@ -347,7 +362,7 @@ impl FfiBytes for CompositorContextId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
 #[repr(transparent)]
 pub struct UniqueNodeId(pub i64);
 
@@ -1072,11 +1087,14 @@ display_list_record_fields!(PaintOuterBoxShadow {
 impl DisplayListCommand for PaintOuterBoxShadow {
     const COMMAND_TYPE: DisplayListCommandType = DisplayListCommandType::PaintOuterBoxShadow;
     fn bounding_rect(&self) -> Option<IntRect> {
-        let blur_margin = self.blur_radius * 2;
-        Some(
-            self.shadow_rect
-                .inflated_edges(blur_margin, blur_margin, blur_margin, blur_margin),
-        )
+        let blur_margin = i64::from(self.blur_radius) * 2;
+        let rect = self.shadow_rect;
+        Some(int_rect_of_edges_within_record_bounds_limit(
+            i64::from(rect.x) - blur_margin,
+            i64::from(rect.y) - blur_margin,
+            i64::from(rect.x) + i64::from(rect.width) + blur_margin,
+            i64::from(rect.y) + i64::from(rect.height) + blur_margin,
+        ))
     }
 }
 
@@ -1142,13 +1160,15 @@ impl DisplayListCommand for PaintPathBoxShadow {
         // NB: The player grows the shape by the outline of a miter-joined stroke, whose miters reach out to Skia's default
         //     miter limit of 4 times half the stroke width, so up to 4 times the spread at sharp corners.
         const MITER_LIMIT: f32 = 4.0;
-        let margin = (self.spread_distance.max(0.0) * MITER_LIMIT).ceil() as i32 + self.blur_radius * 2;
-        let mut shadow_rect = shape_rect.inflated_edges(margin, margin, margin, margin);
-        shadow_rect.x += self.offset.x.floor() as i32;
-        shadow_rect.y += self.offset.y.floor() as i32;
-        shadow_rect.width += 1;
-        shadow_rect.height += 1;
-        Some(shadow_rect)
+        let margin = (self.spread_distance.max(0.0) * MITER_LIMIT).ceil() as i64 + i64::from(self.blur_radius) * 2;
+        let left = i64::from(shape_rect.x) - margin + self.offset.x.floor() as i64;
+        let top = i64::from(shape_rect.y) - margin + self.offset.y.floor() as i64;
+        Some(int_rect_of_edges_within_record_bounds_limit(
+            left,
+            top,
+            left + i64::from(shape_rect.width) + 2 * margin + 1,
+            top + i64::from(shape_rect.height) + 2 * margin + 1,
+        ))
     }
 }
 
@@ -1247,6 +1267,30 @@ display_list_record_fields!(FillRoundedRectRing {
     left_width,
     color
 });
+
+impl FillRoundedRectRing {
+    /// The widths of the top, right, bottom and left edges, each cut to what the rect holds besides the edge across from
+    /// it.
+    pub fn widths_within_rect(&self) -> [i32; 4] {
+        let top = self.top_width.clamp(0, self.rect.height.max(0));
+        let bottom = self.bottom_width.clamp(0, (self.rect.height - top).max(0));
+        let left = self.left_width.clamp(0, self.rect.width.max(0));
+        let right = self.right_width.clamp(0, (self.rect.width - left).max(0));
+        [top, right, bottom, left]
+    }
+
+    /// The rect inside the inner edge of the ring as if its corners were square, which the ring leaves unfilled. None
+    /// where it lies past the coordinates a rect holds.
+    pub fn unfilled_inner_rect(&self) -> Option<IntRect> {
+        let [top, right, bottom, left] = self.widths_within_rect();
+        Some(IntRect::new(
+            self.rect.x.checked_add(left)?,
+            self.rect.y.checked_add(top)?,
+            self.rect.width - left - right,
+            self.rect.height - top - bottom,
+        ))
+    }
+}
 
 impl DisplayListCommand for FillRoundedRectRing {
     const COMMAND_TYPE: DisplayListCommandType = DisplayListCommandType::FillRoundedRectRing;
@@ -1379,7 +1423,15 @@ display_list_record_fields!(DrawLine {
 impl DisplayListCommand for DrawLine {
     const COMMAND_TYPE: DisplayListCommandType = DisplayListCommandType::DrawLine;
     fn bounding_rect(&self) -> Option<IntRect> {
-        Some(int_rect_from_two_points(self.from, self.to).inflated(self.thickness, self.thickness))
+        let thickness = i64::from(self.thickness);
+        let left = i64::from(self.from.x.min(self.to.x)) - thickness / 2;
+        let top = i64::from(self.from.y.min(self.to.y)) - thickness / 2;
+        Some(int_rect_of_edges_within_record_bounds_limit(
+            left,
+            top,
+            left + (i64::from(self.from.x) - i64::from(self.to.x)).abs() + thickness,
+            top + (i64::from(self.from.y) - i64::from(self.to.y)).abs() + thickness,
+        ))
     }
 }
 
@@ -1447,6 +1499,8 @@ pub struct PaintConicGradient {
     pub rect: IntRect,
     pub start_angle: f32,
     pub color_stops: DisplayListGradientColorStops,
+    pub first_stop_position: f32,
+    pub repeat_length: f32,
     pub interpolation_method: GradientInterpolationMethod,
     pub position: IntPoint,
     pub compositing_and_blending_operator: CompositingAndBlendingOperator,
@@ -1455,6 +1509,8 @@ display_list_record_fields!(PaintConicGradient {
     rect,
     start_angle,
     color_stops,
+    first_stop_position,
+    repeat_length,
     interpolation_method,
     position,
     compositing_and_blending_operator
@@ -1623,7 +1679,6 @@ impl DisplayListCommand for CompositorMainThreadWheelEventRegion {
 #[repr(C)]
 pub struct CompositorScrollbar {
     pub scroll_node_index: SpatialNodeIndex,
-    pub gutter_rect: IntRect,
     pub thumb_rect: IntRect,
     pub track_rect: IntRect,
     pub expanded_gutter_rect: IntRect,
@@ -1632,15 +1687,10 @@ pub struct CompositorScrollbar {
     pub expanded_scroll_size: f64,
     pub min_scroll_offset: f32,
     pub max_scroll_offset: f32,
-    pub thumb_color: Color,
-    pub thumb_outline_color: Color,
-    pub track_color: Color,
     pub vertical: bool,
-    pub is_painted_by_compositor: bool,
 }
 display_list_record_fields!(CompositorScrollbar {
     scroll_node_index,
-    gutter_rect,
     thumb_rect,
     track_rect,
     expanded_gutter_rect,
@@ -1649,11 +1699,7 @@ display_list_record_fields!(CompositorScrollbar {
     expanded_scroll_size,
     min_scroll_offset,
     max_scroll_offset,
-    thumb_color,
-    thumb_outline_color,
-    track_color,
-    vertical,
-    is_painted_by_compositor
+    vertical
 });
 
 impl DisplayListCommand for CompositorScrollbar {
@@ -1692,9 +1738,9 @@ impl DisplayListCommand for PaintScrollBar {
     const COMMAND_TYPE: DisplayListCommandType = DisplayListCommandType::PaintScrollBar;
     fn bounding_rect(&self) -> Option<IntRect> {
         Some(
-            self.track_rect
-                .united(self.thumb_rect)
-                .united(self.expanded_gutter_rect),
+            int_rect_within_record_bounds_limit(self.track_rect)
+                .united(int_rect_within_record_bounds_limit(self.thumb_rect))
+                .united(int_rect_within_record_bounds_limit(self.expanded_gutter_rect)),
         )
     }
 }
@@ -2045,8 +2091,35 @@ impl DisplayListCommand for Canvas2DPutImageFrame {
     const COMMAND_TYPE: DisplayListCommandType = DisplayListCommandType::Canvas2DPutImageFrame;
 }
 
-pub fn int_rect_from_two_points(a: IntPoint, b: IntPoint) -> IntRect {
-    IntRect::new(a.x.min(b.x), a.y.min(b.y), (a.x - b.x).abs(), (a.y - b.y).abs())
+/// How far from the origin the bounds of a record reach at most, so that the bounds of any two records unite into a rect
+/// whose edges fit.
+pub const RECORD_BOUNDS_LIMIT_IN_DEVICE_PIXELS: i64 = (1 << 30) - 1;
+
+/// The rect between the edges, cut to `RECORD_BOUNDS_LIMIT_IN_DEVICE_PIXELS` from the origin.
+pub fn int_rect_of_edges_within_record_bounds_limit(left: i64, top: i64, right: i64, bottom: i64) -> IntRect {
+    let limit = RECORD_BOUNDS_LIMIT_IN_DEVICE_PIXELS;
+    let [left, top, right, bottom] = [left, top, right, bottom].map(|edge| edge.clamp(-limit, limit) as i32);
+    IntRect::new(left, top, right - left, bottom - top)
+}
+
+/// `rect` cut to `RECORD_BOUNDS_LIMIT_IN_DEVICE_PIXELS` from the origin, whatever its edges.
+pub fn int_rect_within_record_bounds_limit(rect: IntRect) -> IntRect {
+    int_rect_of_edges_within_record_bounds_limit(
+        i64::from(rect.x),
+        i64::from(rect.y),
+        i64::from(rect.x) + i64::from(rect.width),
+        i64::from(rect.y) + i64::from(rect.height),
+    )
+}
+
+/// The smallest rect of whole pixels that holds `rect`, cut to `RECORD_BOUNDS_LIMIT_IN_DEVICE_PIXELS` from the origin.
+pub fn enclosing_int_rect_within_record_bounds_limit(rect: FloatRect) -> IntRect {
+    int_rect_of_edges_within_record_bounds_limit(
+        rect.x.floor() as i64,
+        rect.y.floor() as i64,
+        rect.right().ceil() as i64,
+        rect.bottom().ceil() as i64,
+    )
 }
 
 #[cfg(test)]

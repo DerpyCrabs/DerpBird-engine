@@ -3,16 +3,22 @@ set(SOURCES
     CodecParameters.cpp
     Codecs/AAC.cpp
     Codecs/AV1.cpp
+    Codecs/DolbyVision.cpp
     Codecs/H264.cpp
     Codecs/H265.cpp
+    Codecs/HDR10Plus.cpp
+    Codecs/HighDynamicRangeMetadataTracker.cpp
     Codecs/MPEG4Audio.cpp
+    Codecs/SupplementalEnhancementInformation.cpp
     Codecs/VP9.cpp
     Color/CodingIndependentCodePoints.cpp
+    Color/ColorMetadata.cpp
     DecoderCapabilities.cpp
     DecoderError.cpp
     FFmpeg/FFmpegFunctions.cpp
     FFmpeg/FFmpegHelpers.cpp
     FFmpeg/FFmpegVideoDecoder.cpp
+    FFmpeg/MallocTuning.cpp
     HardwareVideoDecoders.cpp
     NonReferenceFrameDetector.cpp
     VideoDecoderRegistry.cpp

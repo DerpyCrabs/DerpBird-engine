@@ -72,6 +72,7 @@
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLInsertion.h>
 #include <LibWeb/HTML/HTMLLegendElement.h>
+#include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/HTMLOptGroupElement.h>
 #include <LibWeb/HTML/HTMLOptionElement.h>
 #include <LibWeb/HTML/HTMLScriptElement.h>
@@ -1028,8 +1029,11 @@ static void run_post_connection_steps(Nodes const& nodes)
     for (auto& node : nodes) {
         // 1. For each shadow-including inclusive descendant inclusiveDescendant of node, in shadow-including tree
         //    order: append inclusiveDescendant to staticNodeList.
+        // OPTIMIZATION: The post-connection steps of a node whose class has none do nothing, so only nodes with some
+        //               are collected.
         node->for_each_shadow_including_inclusive_descendant([&static_node_list](Node& inclusive_descendant) {
-            static_node_list.append(inclusive_descendant);
+            if (inclusive_descendant.has_post_connection_steps())
+                static_node_list.append(inclusive_descendant);
             return TraversalDecision::Continue;
         });
     }
@@ -1436,7 +1440,9 @@ void Node::update_layout_tree_for_removal(Node& parent)
 }
 
 // The layout nodes a removal leaves for the parent's rebuild stop being the removed nodes' layout nodes once the style
-// engine retires their StyleNodeIDs, so anything the removal does to them has to happen before.
+// engine retires their StyleNodeIDs, so anything the removal does to them has to happen before. The detach pins the
+// style record of each box the rebuild still reads and frees the boxes of synthetic pseudo-elements, so a removal that
+// detaches has no style records left to pin itself.
 void Node::detach_remaining_layout_nodes_for_removal()
 {
     auto* arena = document().layout_node_arena_if_created();
@@ -1636,8 +1642,6 @@ void Node::remove(bool suppress_observers)
     auto old_flat_tree_parent = old_flat_tree_parent_for_focus_within(*this, *parent);
     bool const holds_a_propagating_state_source = CSS::Invalidation::holds_a_propagating_state_source(*this);
 
-    if (was_tracked_by_style_engine)
-        pin_bound_box_style_records_for_detachment(*this);
     if (was_tracked_by_style_engine) {
         // Layout goes first, while the removed nodes still have the StyleNodeIDs the style engine retires.
         update_layout_tree_for_removal(*parent);
@@ -2130,11 +2134,17 @@ WebIDL::ExceptionOr<void> Node::move_node(Node& new_parent, Node* child)
     old_parent->invalidate_html_collection_caches_in_ancestors(affects_elements);
     new_parent.invalidate_html_collection_caches_in_ancestors(affects_elements);
 
-    // NB: A move runs no children changed steps, which is where an <html> element publishes which child is the body.
+    // NB: A move runs no children changed steps, which is where an <html> element publishes which child is the body,
+    //     and where a media element keeps its resource selection pointer in place and resumes a selection that waits
+    //     for a new source.
     for (auto* parent : { old_parent, &new_parent }) {
         if (auto* html_element = as_if<HTML::HTMLHtmlElement>(*parent))
             html_element->publish_body_construction_facts();
     }
+    if (auto* media_element = as_if<HTML::HTMLMediaElement>(*old_parent))
+        media_element->child_moved_out(*this, old_previous_sibling);
+    if (auto* media_element = as_if<HTML::HTMLMediaElement>(new_parent))
+        media_element->child_moved_in();
 
     old_parent->bump_dom_tree_version();
     new_parent.bump_dom_tree_version();
@@ -2335,10 +2345,6 @@ bool Node::recompute_editable_subtree_flag()
     bool new_value;
     if (is_document()) {
         new_value = as<Document>(*this).design_mode_enabled_state();
-    } else if (is<HTML::HTMLSelectElement>(*this) || is<HTML::HTMLOptGroupElement>(*this) || is<HTML::HTMLOptionElement>(*this)) {
-        // INTEROP: Browsers do not let editing modify the content of select, optgroup and option elements, even if
-        //          they are in an editing host or have a contenteditable attribute. Their descendants are not editable.
-        new_value = false;
     } else if (auto const* html_element = as_if<HTML::HTMLElement>(*this)) {
         auto state = html_element->content_editable_state();
         if (state == HTML::ContentEditableState::True || state == HTML::ContentEditableState::PlaintextOnly)
@@ -2347,6 +2353,11 @@ bool Node::recompute_editable_subtree_flag()
             new_value = false;
         else
             new_value = parent() && parent()->m_in_editable_subtree;
+
+        // INTEROP: Browsers do not let editing modify the content of select, optgroup and option elements, even if
+        //          they are in an editing host or have a contenteditable attribute. Their descendants are not editable.
+        if (new_value && (is<HTML::HTMLSelectElement>(*this) || is<HTML::HTMLOptGroupElement>(*this) || is<HTML::HTMLOptionElement>(*this)))
+            new_value = false;
     } else {
         new_value = parent() && parent()->m_in_editable_subtree;
     }
@@ -3026,8 +3037,6 @@ void Node::remove_all_children(bool suppress_observers)
         auto old_flat_tree_parent = old_flat_tree_parent_for_focus_within(*child, *this);
         bool const child_holds_a_propagating_state_source = a_child_holds_a_propagating_state_source && CSS::Invalidation::holds_a_propagating_state_source(*child);
 
-        if (was_tracked_by_style_engine)
-            pin_bound_box_style_records_for_detachment(*child);
         if (was_tracked_by_style_engine) {
             child->update_layout_tree_for_removal(*this);
             child->detach_remaining_layout_nodes_for_removal();

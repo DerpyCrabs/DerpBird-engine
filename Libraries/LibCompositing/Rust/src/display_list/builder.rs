@@ -7,6 +7,7 @@
 use super::chunks::{Chunk, ChunkId, DisplayListChunk, chunk_id, chunks_of};
 use super::commands::*;
 use crate::display_list::ffi_bytes::FfiBytes;
+use crate::display_list::placement::enclosing_int_rect_within_extent_limit;
 use libgfx_rust::path::Path;
 use libgfx_rust::{AffineTransform, CornerRadii, FloatRect, IntRect, WindingRule, enclosing_int_rect};
 use std::rc::Rc;
@@ -154,12 +155,14 @@ fn record_bounding_rect(
     inline_transform: Option<AffineTransform>,
     rects_of_inline_clips_confining_the_command: impl IntoIterator<Item = FloatRect>,
 ) -> Option<IntRect> {
-    let mut bounding_rect = command_bounding_rect;
+    let mut bounding_rect = command_bounding_rect.map(int_rect_within_record_bounds_limit);
     if let (Some(transform), Some(rect)) = (inline_transform, bounding_rect) {
-        bounding_rect = Some(enclosing_int_rect(transform.map_rect(rect.to_float())));
+        bounding_rect = Some(enclosing_int_rect_within_extent_limit(
+            transform.map_rect(rect.to_float()),
+        ));
     }
     for clip_rect in rects_of_inline_clips_confining_the_command {
-        let restriction = enclosing_int_rect(clip_rect);
+        let restriction = enclosing_int_rect_within_record_bounds_limit(clip_rect);
         bounding_rect = Some(match bounding_rect {
             Some(rect) => rect.intersected(restriction),
             None => restriction,
@@ -174,6 +177,27 @@ pub fn bounding_rect_computed_from_payload(header: &DisplayListCommandHeader, pa
         inline_transform_of(header, payload),
         inline_clips_of(header, payload).filter_map(|clip| rect_of_inline_clip_confining_its_command(&clip)),
     )
+}
+
+/// Whether a record whose bounds meet `rect` can paint within it. A ring paints nothing where `rect` lies inside its
+/// inner edge, as the focus ring of a field does nowhere over the field's caret.
+pub fn record_can_paint_within(header: &DisplayListCommandHeader, payload: &[u8], rect: IntRect) -> bool {
+    if header.command_type != DisplayListCommandType::FillRoundedRectRing || header.has_inline_transform {
+        return true;
+    }
+    let Some(inner) = read_command::<FillRoundedRectRing>(payload).unfilled_inner_rect() else {
+        return true;
+    };
+    // The rounded corners of the inner edge reach into it no farther than the largest radius, so a rect clear of
+    // those corners lies inside the inner rect made that much narrower or that much shorter.
+    let radii = read_command::<FillRoundedRectRing>(payload).corner_radii;
+    let corner = [radii.top_left, radii.top_right, radii.bottom_right, radii.bottom_left]
+        .iter()
+        .map(|radius| radius.horizontal_radius.max(radius.vertical_radius).max(0))
+        .max()
+        .unwrap_or(0);
+    !inner.shrunken(0, corner, 0, corner).contains_rect(rect)
+        && !inner.shrunken(corner, 0, corner, 0).contains_rect(rect)
 }
 
 // A finished tape together with the run table summarizing it and the chunks it is cut into.
@@ -257,6 +281,7 @@ pub struct DisplayListBuilder {
     chunks: Vec<DisplayListChunk>,
     open_group_depth: usize,
     open_group_context: Option<ContextRef>,
+    last_record_is_alone_in_its_run: bool,
 }
 
 impl DisplayListBuilder {
@@ -321,11 +346,13 @@ impl DisplayListBuilder {
         offset: usize,
         size: usize,
     ) {
-        // Every run so far belongs to a chunk that has ended.
-        if self
+        let every_run_so_far_belongs_to_a_chunk_that_has_ended = self
             .chunks
             .last()
-            .is_some_and(|chunk| chunk.run_end as usize == self.runs.len())
+            .is_some_and(|chunk| chunk.run_end as usize == self.runs.len());
+        let record_is_alone_in_its_run = command_type.is_alone_in_its_run();
+        if every_run_so_far_belongs_to_a_chunk_that_has_ended
+            || (!self.runs.is_empty() && (record_is_alone_in_its_run || self.last_record_is_alone_in_its_run))
         {
             self.runs.push(DisplayListCommandRun {
                 offset: u32::try_from(offset).expect("display list exceeds u32"),
@@ -334,6 +361,7 @@ impl DisplayListBuilder {
             });
         }
         note_command(&mut self.runs, command_type, bounding_rect, context, offset, size);
+        self.last_record_is_alone_in_its_run = record_is_alone_in_its_run;
     }
 
     pub fn byte_size(&self) -> usize {
@@ -887,6 +915,25 @@ mod tests {
             &header,
             &builder.bytes()[payload_start..payload_start + header.payload_size as usize],
         )
+    }
+
+    // A list from another process can record a command through an inline transform that maps it past what an
+    // `IntRect` holds.
+    #[test]
+    fn a_bounding_rect_mapped_through_an_inline_transform_is_kept_within_the_extent_limit() {
+        let mut builder = DisplayListBuilder::new();
+        let scale = 1e9;
+        let maps_fill_far_past_every_edge = AffineTransform::new(scale, 0.0, 0.0, scale, -50.0 * scale, -50.0 * scale);
+        builder.append_with_inline_state(
+            &fill_rect(0, 0, 100, 100),
+            &[],
+            context(0, None),
+            &[],
+            Some(maps_fill_far_past_every_edge),
+        );
+        let bounding_rect = bounding_rect_of_record_at(&builder, 0).expect("the fill has a bounding rect");
+        assert!(bounding_rect.contains_rect(IntRect::new(0, 0, 800, 600)));
+        assert!(crate::display_list::placement::extent_limit_rect().contains_rect(bounding_rect.to_float()));
     }
 
     #[test]

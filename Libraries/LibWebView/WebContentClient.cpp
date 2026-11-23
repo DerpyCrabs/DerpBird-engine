@@ -22,7 +22,6 @@
 #include <LibWebCommon/HTML/BrowsingContext.h>
 #include <LibWebCommon/Page/InputEvent.h>
 #include <LibWebCommon/WebDriver/Error.h>
-#include <LibWebCommon/WebView/SiteIsolation.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/AudioServerControlClient.h>
 #include <LibWebView/BlobURLStore.h>
@@ -92,8 +91,11 @@ void WebContentClient::note_hosted_document(CanonicalDocument const& document)
             m_origin_of_hosted_tabs = origin;
             m_hosted_tabs_are_origin_keyed = document.relevant_global_object().agent().agent_cluster_is_origin_keyed();
         }
-        if (has_hosted_only_tabs_like(document))
+        if (has_hosted_only_tabs_of_the_site_of(document)) {
+            if (origin != *m_origin_of_hosted_tabs)
+                m_has_hosted_tabs_of_more_than_one_origin_of_a_site = true;
             return;
+        }
     } else if (!document.is_top_level() && m_origin_of_hosted_tabs.has_value()) {
         // NB: A data: URL iframe is hosted in the process of the document that made it, and holds only what that
         //     document already had.
@@ -109,15 +111,37 @@ void WebContentClient::note_hosted_document(CanonicalDocument const& document)
     m_origin_of_hosted_tabs.clear();
 }
 
+static bool tabs_of_a_site_share_processes()
+{
+    return Application::the().tab_processes() == TabProcesses::PerSite;
+}
+
 bool WebContentClient::has_hosted_only_tabs_like(CanonicalDocument const& document) const
 {
-    return m_origin_of_hosted_tabs == document.origin()
+    if (tabs_of_a_site_share_processes())
+        return has_hosted_only_tabs_of_the_site_of(document);
+    return !m_has_hosted_tabs_of_more_than_one_origin_of_a_site && m_origin_of_hosted_tabs == document.origin()
         && m_hosted_tabs_are_origin_keyed == document.relevant_global_object().agent().agent_cluster_is_origin_keyed();
 }
 
 bool WebContentClient::has_hosted_only_tabs_unlike(CanonicalDocument const& document) const
 {
+    // NB: The user may want no tabs to share a process, which makes every other tab unlike the tabs of a process.
+    if (Application::the().tab_processes() == TabProcesses::PerTab)
+        return m_origin_of_hosted_tabs.has_value();
+    if (tabs_of_a_site_share_processes())
+        return m_origin_of_hosted_tabs.has_value() && !has_hosted_only_tabs_of_the_site_of(document);
     return m_origin_of_hosted_tabs.has_value() && !has_hosted_only_tabs_like(document);
+}
+
+// NB: An origin-keyed tab keeps apart from the other origins of its site, so its site is just its origin.
+bool WebContentClient::has_hosted_only_tabs_of_the_site_of(CanonicalDocument const& document) const
+{
+    if (!m_origin_of_hosted_tabs.has_value() || m_hosted_tabs_are_origin_keyed != document.relevant_global_object().agent().agent_cluster_is_origin_keyed())
+        return false;
+    if (m_hosted_tabs_are_origin_keyed)
+        return *m_origin_of_hosted_tabs == document.origin();
+    return m_origin_of_hosted_tabs->is_same_site(document.origin());
 }
 
 bool WebContentClient::hosts_an_environment_with_storage_key(Web::StorageAPI::StorageKey const& storage_key)
@@ -360,6 +384,70 @@ void WebContentClient::die()
     did_lose_process();
 }
 
+// A tab the user left is likely to stay in the background for long, and its process keeps much that only makes it
+// faster: compiled code, decoded images, caches. Once every tab of a process was hidden for this long, the process is
+// asked to let go of all that. The wait keeps a user who switches back and forth between tabs from paying for it.
+static constexpr auto time_hidden_before_releasing_memory = AK::Duration::from_seconds(10);
+
+bool WebContentClient::all_tabs_are_hidden() const
+{
+    // NB: A process without pages has no tabs to speak of, and little to release.
+    bool has_open_page = false;
+    for (auto const& [page_id, page] : m_pages) {
+        if (!page->is_open() || !page->has_traversable())
+            continue;
+        if (page->traversable().system_visibility_state() != Web::HTML::VisibilityState::Hidden)
+            return false;
+        has_open_page = true;
+    }
+    return has_open_page;
+}
+
+void WebContentClient::did_change_visibility_of_a_tab()
+{
+    if (!all_tabs_are_hidden()) {
+        if (m_release_memory_of_hidden_tabs_timer)
+            m_release_memory_of_hidden_tabs_timer->stop();
+        return;
+    }
+    if (!m_release_memory_of_hidden_tabs_timer) {
+        m_release_memory_of_hidden_tabs_timer = Core::Timer::create_single_shot(time_hidden_before_releasing_memory, [this] {
+            release_memory_of_hidden_tabs();
+        });
+    }
+    // NB: A timer that already runs keeps its time, so that more of these calls while the tabs stay hidden do not
+    //     put the release off.
+    if (!m_release_memory_of_hidden_tabs_timer->is_active())
+        m_release_memory_of_hidden_tabs_timer->start();
+}
+
+void WebContentClient::release_memory_of_hidden_tabs()
+{
+    if (!is_open() || !all_tabs_are_hidden())
+        return;
+    // NB: What the process lets go of, it has to make again when it needs it, which a tab that plays or records sound
+    //     in the background could not do without the user hearing it. A page that only hosts a frame of a tab counts
+    //     too, as the sound of the tab may come from that frame. The process is asked once the sound has stopped.
+    for (auto const& [page_id, page] : m_pages) {
+        if (!page->is_open() || !page->has_traversable())
+            continue;
+        auto view = page->traversable().view();
+        if (!view.has_value())
+            continue;
+        auto plays_or_records_sound = view->is_playing_audio() || view->is_capturing_audio();
+        // NB: A view that another view owns has no tab of its own, and its capture shows on its owner.
+        if (auto owner_view_id = view->owner_view_id(); owner_view_id.has_value()) {
+            if (auto owner = ViewImplementation::find_view_by_id(*owner_view_id); owner.has_value())
+                plays_or_records_sound |= owner->is_playing_audio() || owner->is_capturing_audio();
+        }
+        if (plays_or_records_sound) {
+            m_release_memory_of_hidden_tabs_timer->restart();
+            return;
+        }
+    }
+    async_release_memory();
+}
+
 void WebContentClient::did_misbehave(StringView message_name, StringView reason)
 {
     m_rejected_ipc = true;
@@ -572,6 +660,8 @@ WebContentPage& WebContentClient::open_page(Web::PageId page_id, CanonicalTraver
 {
     auto page = adopt_ref(*new WebContentPage(*this, page_id, traversable));
     m_pages.set(page_id, page);
+    // NB: A tab that starts hidden, or that moves to this process while hidden, never tells of a change.
+    did_change_visibility_of_a_tab();
     return page;
 }
 
@@ -690,6 +780,7 @@ void WebContentClient::replay_compositor_view_state_after_reconnect(Badge<Applic
         if (!m_compositor_contexts.contains(context_id))
             continue;
         auto& view = page->view();
+        Application::the().update_compositor_context_scales_frames_to_fit(context_id, view.scales_frames_to_fit());
         view.recreate_remote_layer_after_compositor_reconnect({});
         Application::the().update_compositor_viewport(context_id, view.viewport_size().to_type<int>(), view.device_pixel_ratio());
         Application::the().update_compositor_display_metadata(context_id, view.display_id(), view.maximum_frames_per_second());
@@ -754,7 +845,11 @@ void WebContentClient::did_lose_process()
         return;
 
     // The views are told deferred, and looked up by ID, in case they are destroyed before then.
-    auto crash_reason = m_rejected_ipc ? ViewImplementation::WebContentCrashReason::RejectedIPC : ViewImplementation::WebContentCrashReason::ProcessCrash;
+    auto crash_reason = ViewImplementation::WebContentCrashReason::ProcessCrash;
+    if (m_rejected_ipc)
+        crash_reason = ViewImplementation::WebContentCrashReason::RejectedIPC;
+    else if (m_exceeded_memory_limit)
+        crash_reason = ViewImplementation::WebContentCrashReason::ExceededMemoryLimit;
     for (auto const& lost : lost_pages) {
         if (!lost.view_id.has_value())
             continue;
@@ -765,7 +860,7 @@ void WebContentClient::did_lose_process()
             if (!view.has_value())
                 return;
             if (shows_crash_screen)
-                view->handle_web_content_process_crash();
+                view->handle_web_content_process_crash(crash_reason);
             if (view->on_web_content_crashed)
                 view->on_web_content_crashed(crash_reason);
         });
@@ -839,7 +934,38 @@ bool WebContentClient::renderers_may_synthesize_input_for_testing()
 
 bool WebContentClient::may_read_local_files() const
 {
-    return m_has_hosted_local_file_content;
+    return !m_local_file_roots.is_empty();
+}
+
+ErrorOr<void> WebContentClient::add_local_file_root(LocalFileRoot root)
+{
+    if (m_local_file_roots.contains_slow(root))
+        return {};
+    // NB: Site isolation places local file content only in a process of its root, so a second root here would merge
+    //     what two folders' pages may read. It's refused rather than added.
+    if (!m_local_file_roots.is_empty() && Application::the().tab_processes() != TabProcesses::PerTabWithoutSiteIsolation)
+        return Error::from_string_literal("A process may read local files under one root only");
+    m_local_file_roots.append(move(root));
+    return {};
+}
+
+LocalFileAccess WebContentClient::local_file_access() const
+{
+    if (m_local_file_roots.is_empty())
+        return {};
+    return m_local_file_roots;
+}
+
+LocalFileAccess WebContentClient::local_file_access_of_process_hosting(Web::HTML::EnvironmentId const& environment_id)
+{
+    LocalFileAccess local_file_access;
+    for_each_client([&](WebContentClient& client) {
+        if (!client.hosted_environment(environment_id).has_value())
+            return IterationDecision::Continue;
+        local_file_access = client.local_file_access();
+        return IterationDecision::Break;
+    });
+    return local_file_access;
 }
 
 Messages::WebContentClient::DidRequestAllCookiesWebdriverResponse WebContentClient::did_request_all_cookies_webdriver(URL::URL url, Optional<HTTP::Cookie::PartitionContext> partition_context)
@@ -1102,7 +1228,7 @@ Messages::WebContentClient::DidLoseRequestServerConnectionResponse WebContentCli
 
 Messages::WebContentClient::RequestMediaServerConnectionResponse WebContentClient::request_media_server_connection()
 {
-    auto connection = connect_new_media_server_client(m_media_server_client, child_id(), [weak_self = make_weak_ptr<WebContentClient>()]() -> ErrorOr<IPC::TransportHandle> {
+    auto connection = connect_new_media_server_client(m_media_server_client, child_id(), is_private(), [weak_self = make_weak_ptr<WebContentClient>()]() -> ErrorOr<IPC::TransportHandle> {
         auto self = weak_self.strong_ref();
         if (!self)
             return Error::from_string_literal("The WebContent process is gone");
@@ -1151,7 +1277,7 @@ ErrorOr<IPC::TransportHandle> WebContentClient::connect_audio_server_client()
 ErrorOr<void> WebContentClient::ensure_audio_server_controller()
 {
     auto* previous_controller = m_audio_server_client.ptr();
-    TRY(ensure_audio_server_is_running(m_audio_server_client, child_id()));
+    TRY(ensure_audio_server_is_running(m_audio_server_client, child_id(), is_private()));
     if (m_audio_server_client.ptr() == previous_controller)
         return {};
     // A server that isn't told everything gets no clients; the next attempt starts over with another.
@@ -1367,7 +1493,7 @@ void WebContentClient::report_audio_capture_for_testing(Web::PageId labelled_pag
 
 ErrorOr<void> WebContentClient::tell_audio_server_of_capture_permission()
 {
-    auto response = m_audio_server_client->send_sync_but_allow_failure<Messages::AudioServerControl::SetCapturePermission>(m_audio_tab_id, m_audio_capture_permitted);
+    auto response = send_sync_to_helper<Messages::AudioServerControl::SetCapturePermission>(*m_audio_server_client, m_audio_tab_id, m_audio_capture_permitted);
     if (!response)
         return Error::from_string_literal("Failed to tell the AudioServer of the capture permission");
     return {};
@@ -1428,7 +1554,7 @@ void WebContentClient::forget_audio_playback(Web::PageId page_id)
 
 ErrorOr<void> WebContentClient::tell_audio_server_of_playback_authorization(Audio::PlaybackGroupId group)
 {
-    auto response = m_audio_server_client->send_sync_but_allow_failure<Messages::AudioServerControl::AuthorizePlaybackGroup>(m_audio_tab_id, group);
+    auto response = send_sync_to_helper<Messages::AudioServerControl::AuthorizePlaybackGroup>(*m_audio_server_client, m_audio_tab_id, group);
     if (!response)
         return Error::from_string_literal("Failed to tell the AudioServer of a playback authorization");
     return {};

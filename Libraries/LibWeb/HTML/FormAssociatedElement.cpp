@@ -396,10 +396,14 @@ void FormAssociatedElement::reset_form_owner()
     //         However, this is not specified as algorithmic steps, so we have to do this ourselves.
     //         Spec issue: https://github.com/whatwg/html/issues/12169
     // 3. Set element's form owner to null.
-    set_form(nullptr);
+    // OPTIMIZATION: An element with no form owner has nothing to unset.
+    if (old_form)
+        set_form(nullptr);
 
     // 4. If element is listed, has a form content attribute, and is connected, then:
-    if (is_listed() && html_element.is_connected() && html_element.has_attribute(HTML::AttributeNames::form)) {
+    // OPTIMIZATION: The subtree attribute name filter rules out the attribute for most elements without a lookup.
+    auto might_have_form_attribute = (html_element.subtree_name_filter() & DOM::Element::name_filter_bit(HTML::AttributeNames::form)) != 0;
+    if (might_have_form_attribute && is_listed() && html_element.is_connected() && html_element.has_attribute(HTML::AttributeNames::form)) {
         // 1. If the first element in element's tree, in tree order, to have an ID that is identical to element's form content attribute's value, is a form element, then associate the element with that form element.
         auto form_value = html_element.attribute(HTML::AttributeNames::form);
         html_element.root().for_each_in_inclusive_subtree_of_type<HTMLElement>([this, &form_value](auto& element) {
@@ -1322,6 +1326,7 @@ void FormAssociatedTextControlElement::handle_insert(Utf16FlyString const& input
     auto history = html_element.document().editing_history();
     history->begin_recording(html_element, category);
     auto old_value = relevant_value();
+    auto old_text_node_data = text_node->data();
     auto clamped_start = min(selection_start, old_value.length_in_code_units());
     auto clamped_end = min(selection_end, old_value.length_in_code_units());
     auto removed_data = Utf16String::from_utf16(old_value.substring_view(clamped_start, clamped_end - clamped_start));
@@ -1347,6 +1352,10 @@ void FormAssociatedTextControlElement::handle_insert(Utf16FlyString const& input
     if (first_is_one_of(input_type, UIEvents::InputTypes::insertText, UIEvents::InputTypes::insertCompositionText, UIEvents::InputTypes::insertFromPaste, UIEvents::InputTypes::insertReplacementText))
         data_for_input_event = Utf16String::from_utf16(data_for_insertion);
 
+    // NB: Typing into a control that is at its maximum length changes nothing. A listener for the input event may undo
+    //     the edit, so this checks before it runs.
+    if (!html_element.document().had_user_edits() && text_node->data() != old_text_node_data)
+        html_element.document().did_make_user_edit();
     did_edit_text_node(input_type, data_for_input_event, old_value);
     html_element.document().spell_check_controller().did_user_edit(html_element);
     html_element.document().writing_suggestion_controller().did_user_edit(html_element);
@@ -1422,6 +1431,7 @@ void FormAssociatedTextControlElement::handle_delete(Utf16FlyString const& input
     auto history = html_element.document().editing_history();
     history->begin_recording(html_element, category);
     auto old_value = relevant_value();
+    auto old_text_node_data = text_node->data();
     auto clamped_start = min(selection_start, old_value.length_in_code_units());
     auto clamped_end = min(selection_end, old_value.length_in_code_units());
     auto removed_data = Utf16String::from_utf16(old_value.substring_view(clamped_start, clamped_end - clamped_start));
@@ -1437,6 +1447,10 @@ void FormAssociatedTextControlElement::handle_delete(Utf16FlyString const& input
     }
     history->end_recording();
 
+    // NB: Deleting at the start or end of a control changes nothing. A listener for the input event may undo the edit,
+    //     so this checks before it runs.
+    if (!html_element.document().had_user_edits() && text_node->data() != old_text_node_data)
+        html_element.document().did_make_user_edit();
     did_edit_text_node(input_type, {}, old_value);
     html_element.document().spell_check_controller().did_user_edit(html_element);
     html_element.document().writing_suggestion_controller().did_user_edit(html_element);

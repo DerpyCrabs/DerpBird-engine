@@ -45,6 +45,7 @@
 #include <LibWeb/Loader/LoaderConfig.h>
 #include <LibWeb/Loader/ResourceLoader.h>
 #include <LibWeb/MixedContent/AbstractOperations.h>
+#include <LibWeb/Page/Page.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/UpgradeInsecureRequests/AbstractOperations.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
@@ -271,6 +272,7 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
     if (!request_client)
         return Error::from_string_literal("RequestServer is currently unavailable");
 
+    auto originating_page_id = page.has_top_level_traversable() ? page.client().id().value() : 0;
     auto source = request->client_snapshot()->content_blocker_source_url;
     auto top_level = request->client_snapshot()->top_level_creation_url;
     bool blocking = page.content_blocking_enabled_for_url(top_level);
@@ -281,7 +283,7 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
             return Error::from_string_literal("WebSocket blocked by content filter");
         }
     }
-    m_websocket = request_client->websocket_connect(connection_url, move(network_isolation_key), origin_string, protocol_byte_strings, {}, additional_headers, request->same_site_context(), blocking ? (2 | (ContentBlocker::the().has_ip_address_filters() ? 8 : 0)) : 0);
+    m_websocket = request_client->websocket_connect(connection_url, move(network_isolation_key), origin_string, protocol_byte_strings, {}, additional_headers, originating_page_id, request->same_site_context(), blocking ? (2 | (ContentBlocker::the().has_ip_address_filters() ? 8 : 0)) : 0);
     m_websocket->canonical_url_policy = [page = GC::Weak<Page> { &page }, source, top_level, connection_url](Vector<URL::URL> const& aliases, Vector<String> const& addresses) {
         if (!page) return false;
         if (!page->content_blocking_enabled_for_url(top_level)) return true;
@@ -314,6 +316,9 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
     });
     m_websocket->on_message = GC::weak_callback(*this, [](auto& self, auto message) {
         self.on_message(move(message.data), message.is_text);
+    });
+    m_websocket->on_message_bytes_transmitted = GC::weak_callback(*this, [](auto& self, u64 byte_count) {
+        self.on_message_bytes_transmitted(byte_count);
     });
     m_websocket->on_close = GC::weak_callback(*this, [](auto& self, auto code, auto reason, bool was_clean) {
         self.on_close(code, Utf16String::from_utf8(StringView { reason.bytes() }), was_clean);
@@ -434,8 +439,19 @@ u64 WebSocket::buffered_amount() const
 {
     // The bufferedAmount getter steps are to return the number of bytes of application data (UTF-8 text and binary
     // data) that have been queued using send() but that, as of the last time the event loop reached step 1, had not
-    // yet been transmitted to the network.
+    // yet been transmitted to the network. (This thus includes any text sent during the execution of the current task,
+    // regardless of whether the user agent is able to transmit text in the background in parallel with script
+    // execution.) This does not include framing overhead incurred by the protocol, or buffering done by the operating
+    // system or network hardware.
     return m_buffered_amount;
+}
+
+void WebSocket::on_message_bytes_transmitted(u64 byte_count)
+{
+    // Applied in a task of its own, so that bufferedAmount never changes while a task runs.
+    HTML::queue_a_task(HTML::Task::Source::WebSocket, nullptr, nullptr, GC::create_function(GC::Heap::the(), GC::captures(GC::Ref { *this }, byte_count), [](auto& self, auto& byte_count) {
+        self->m_buffered_amount -= min(byte_count, self->m_buffered_amount);
+    }));
 }
 
 // https://websockets.spec.whatwg.org/#dom-websocket-send
@@ -484,14 +500,6 @@ WebIDL::ExceptionOr<void> WebSocket::send(WebSocketSendData const& data)
     //       agent must flag the WebSocket as full and then close the WebSocket connection.
 
     m_buffered_amount += message_size;
-
-    // NB: A sent message is handed to the network process right away, so it counts as transmitted to the network once
-    //     the event loop has moved on from the current task.
-    if (is_open && message_size > 0) {
-        HTML::queue_a_task(HTML::Task::Source::WebSocket, nullptr, nullptr, GC::create_function(GC::Heap::the(), GC::captures(GC::Ref { *this }, message_size), [](auto& self, auto& message_size) {
-            self->m_buffered_amount -= message_size;
-        }));
-    }
 
     return {};
 }
@@ -553,7 +561,7 @@ void WebSocket::on_message(ByteBuffer message, bool is_text)
         HTML::MessageEventInit event_init;
         event_init.data = data_for_event;
 
-        self.dispatch_event(HTML::MessageEvent::create(realm.global_object(), HTML::EventNames::message, event_init, self.m_url.origin()));
+        self.dispatch_event(HTML::create_message_event(realm, HTML::EventNames::message, event_init, self.m_url.origin()));
     }));
 }
 

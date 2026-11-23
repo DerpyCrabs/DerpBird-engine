@@ -100,6 +100,7 @@ View::View(InitialState initial_state)
     , m_system_theme(move(initial_state.system_theme))
     , m_screen_rects(move(initial_state.screen_rects))
     , m_websites_prefer_dark(initial_state.websites_prefer_dark)
+    , m_is_tab(initial_state.is_tab)
 {
     m_blocking_log_timer = Core::Timer::create_single_shot(AK::Duration::from_milliseconds(100), [this] { push_blocking_log_to_ui(); });
     on_blocking_log_change = [this](bool reset) {
@@ -111,6 +112,7 @@ View::View(InitialState initial_state)
     m_maximum_frames_per_second = initial_state.maximum_frames_per_second;
     m_display_id = initial_state.display_id;
     m_screen_shows_high_dynamic_range = initial_state.screen_shows_high_dynamic_range;
+    set_scales_frames_to_fit(initial_state.scales_frames_to_fit);
     m_backing_stores = make<BackingStoresInUI>(*this);
     forward_callbacks_to_ui(initial_state.is_tab);
     if (auto* derpbird = DerpBird::the()) derpbird->install_view_callbacks(*this);
@@ -184,6 +186,13 @@ void View::did_get_permission_answer(u64 answer_id, Web::Permissions::PromptOutc
 {
     if (auto on_answer = m_pending_permission_answers.take(answer_id); on_answer.has_value())
         (*on_answer)(outcome);
+}
+
+// NB: The UI may keep the tab, such as when the user sees it after all. It then stays as it is.
+void View::did_request_discard()
+{
+    if (auto* ui = ConnectionFromUI::the())
+        ui->async_view_discard(view_id());
 }
 
 void View::forward_callbacks_to_ui(bool is_tab)
@@ -274,32 +283,39 @@ void View::forward_callbacks_to_ui(bool is_tab)
     // through their own callbacks; serializing here stalls frames under mouse load.
     on_finish_handling_key_event = [this](Web::KeyEvent const& event) {
         // NB: Input that the Hub came up with itself, such as WebDriver's, is nothing the UI knows about.
-        if (!event.browser_data)
+        auto input_id = ConnectionFromUI::input_id_of(event.browser_data.ptr());
+        if (!input_id.has_value())
             return;
         auto input_id = ConnectionFromUI::input_id_of(*event.browser_data);
         if (!input_id.has_value()) return;
         if (auto* ui = ConnectionFromUI::the()) {
+            push_state_to_ui();
             ui->async_view_finish_handling_key_event(view_id(), *input_id, event.clone_without_browser_data());
         }
     };
 
     on_finish_handling_mouse_event = [this](Web::MouseEvent const& event, Web::EventResult result) {
-        if (!event.browser_data)
+        // NB: Input that the Hub came up with itself, such as WebDriver's, is nothing the UI knows about.
+        auto input_id = ConnectionFromUI::input_id_of(event.browser_data.ptr());
+        if (!input_id.has_value())
             return;
         auto input_id = ConnectionFromUI::input_id_of(*event.browser_data);
         if (!input_id.has_value()) return;
         if (auto* ui = ConnectionFromUI::the()) {
+            push_state_to_ui();
             ui->async_view_finish_handling_mouse_event(view_id(), *input_id, event.clone_without_browser_data(), result);
         }
     };
 
     on_finish_handling_drag_event = [this](Web::DragEvent const& event) {
         // NB: Input that the Hub came up with itself, such as WebDriver's, is nothing the UI knows about.
-        if (!event.browser_data)
+        auto input_id = ConnectionFromUI::input_id_of(event.browser_data.ptr());
+        if (!input_id.has_value())
             return;
         auto input_id = ConnectionFromUI::input_id_of(*event.browser_data);
         if (!input_id.has_value()) return;
         if (auto* ui = ConnectionFromUI::the()) {
+            push_state_to_ui();
             ui->async_view_finish_handling_drag_event(view_id(), *input_id, event.clone_without_browser_data());
         }
     };
@@ -638,6 +654,11 @@ void View::forward_callbacks_to_ui(bool is_tab)
             ui->async_view_performance_stats(view_id(), arguments...);
         }
     };
+
+    on_compositor_layers_change = [this](auto const&... arguments) {
+        if (auto* ui = ConnectionFromUI::the())
+            ui->async_view_compositor_layers_change(view_id(), arguments...);
+    };
 }
 
 ViewState View::current_state() const
@@ -680,6 +701,7 @@ ViewState View::current_state() const
     state.crash_report_name = crash_report_name();
     state.crash_report_website = crash_report_website();
     state.crash_overlay_failed_url = crash_overlay_failed_url();
+    state.crash_overlay_is_for_memory_limit = crash_overlay_is_for_memory_limit();
     state.host_for_settings = current_host_for_settings();
     state.can_report_website_issue = can_report_website_issue();
     state.can_undo = can_undo();

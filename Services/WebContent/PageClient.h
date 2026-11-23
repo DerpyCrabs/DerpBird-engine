@@ -72,6 +72,7 @@ public:
 
     WebDriverConnection& ensure_webdriver_session();
     void run_webdriver_command(u64 command_id, Optional<Web::HTML::CrossProcessId> navigable_id, String const& name, JsonValue payload, Vector<String> arguments);
+    void request_file_for_webdriver(u64 command_id, Web::FileRequest);
     void webdriver_did_set_current_browsing_context(u64 command_id, Web::HTML::CrossProcessId navigable_id);
     void did_handle_webdriver_mouse_event(u64 request_id);
     bool prepare_webdriver_input_command(u64, Optional<Web::HTML::CrossProcessId>, JsonValue&);
@@ -132,6 +133,7 @@ public:
     void select_dropdown_closed(Optional<u32> const& selected_item_id);
 
     void set_has_devtools_client(bool);
+    static void update_keeps_long_stack_traces();
     bool has_devtools_client() const { return m_has_devtools_client; }
     virtual bool has_active_devtools_client() const override { return has_devtools_client(); }
     void start_sending_console_output(bool messages, bool errors);
@@ -338,6 +340,7 @@ private:
     virtual NewWebViewResult page_did_request_new_web_view(Web::HTML::ActivateTab, Web::HTML::WebViewHints, Web::HTML::CrossProcessId current_navigable_id, Utf16String const& name, Web::HTML::TokenizedFeature::NoOpener no_opener, Optional<URL::URL> current_document_base_url) override;
     virtual void page_did_close() override;
     virtual void page_did_change_needs_beforeunload_check(bool needs_beforeunload_check) override;
+    virtual void page_did_change_had_user_edits(bool had_user_edits) override;
     virtual void page_did_consume_user_activation(Web::HTML::UserActivationConsumption) override;
     virtual void page_did_notify_about_user_activation(Web::HTML::CrossProcessId document_id) override;
     virtual void page_did_update_session_history_entry_navigation_api_state(Web::HTML::CrossProcessId navigable_id, Web::HTML::SessionHistoryEntryIdentity const& entry_identity, Web::HTML::StorageSerializationRecord const& navigation_api_state) override;

@@ -30,6 +30,7 @@
 #include <LibGC/Weak.h>
 #include <LibGC/WeakHashSet.h>
 #include <LibGfx/Point.h>
+#include <LibHTTP/Cache/CacheMode.h>
 #include <LibJS/Forward.h>
 #include <LibURL/Origin.h>
 #include <LibURL/URL.h>
@@ -208,6 +209,7 @@ enum class InvalidateLayoutTreeReason {
     X(EventHandlerShowContextMenu, false)           \
     X(EventHandlerTargetNodeAtPosition, false)      \
     X(FontFaceSetReady, false)                      \
+    X(HTMLEmbedElement, false)                      \
     X(HTMLElementGetTheTextSteps, false)            \
     X(HTMLElementOffsetHeight, true)                \
     X(HTMLElementOffsetLeft, true)                  \
@@ -667,6 +669,8 @@ public:
     void update_style_and_layout_once(Layout::BegunRead const&, UpdateLayoutReason, ThrottledAnimationSamplingScope);
     void update_layout_if_needed_for_node(Node const&, UpdateLayoutReason);
     [[nodiscard]] bool layout_is_up_to_date() const;
+    // Whether anything the document's style depends on may have moved since its last style update.
+    [[nodiscard]] bool has_style_work(Layout::BegunRead const&) const;
     [[nodiscard]] bool layout_is_known_stale() const;
     void clear_devtools_layout_inspection_data();
     void sample_animation_effects_needing_style_update();
@@ -956,10 +960,16 @@ public:
     bool browsing_context_group_has_multiple_contexts() const;
     bool browsing_context_group_has_remote_contexts() const { return m_browsing_context_group_has_remote_contexts; }
 
-    // AD-HOC: Whether this document is still loading after a navigation that bypassed the HTTP cache: a reload that
-    //         bypasses it, or a child navigable's navigation while its container document loaded that way. Until it
-    //         has completely loaded, the requests it makes without a cache mode of their own bypass the cache too.
-    bool is_loading_bypassing_cache() const { return m_navigation_bypassed_cache && !is_completely_loaded(); }
+    // AD-HOC: The cache mode of the navigation that created this document, if that was a navigation that bypassed the
+    //         HTTP cache ("reload") or one that used it without revalidation ("force-cache"): a reload that bypasses
+    //         the cache, a history traversal, or a child navigable's navigation while its container document loaded
+    //         that way. Until the document has completely loaded, the requests it makes without a cache mode of their
+    //         own use this cache mode too. Otherwise, this is "default".
+    HTTP::CacheMode cache_mode_while_loading() const { return is_completely_loaded() ? HTTP::CacheMode::Default : m_navigation_cache_mode; }
+
+    // Reports the state of the containers of this document's child navigables to the UI process, which forwards it to
+    // the processes that host child navigables whose documents are in another process.
+    void report_container_state_of_child_navigables();
 
     GC::Ptr<Element> current_script() const { return m_current_script; }
     Variant<GC::Ref<HTML::HTMLScriptElement>, GC::Ref<SVG::SVGScriptElement>, Empty> current_script_for_bindings() const;
@@ -1025,7 +1035,7 @@ public:
     void update_the_visibility_state(HTML::VisibilityState);
 
     void run_the_resize_steps();
-    void run_the_scroll_steps();
+    void run_the_scroll_steps(double frame_timestamp);
 
     u32 increment_video_frame_request_callback_identifier() { return ++m_video_frame_request_callback_identifier; }
     void run_the_video_frame_request_callbacks(double now);
@@ -1258,6 +1268,11 @@ public:
         Yes,
     };
     WebIDL::ExceptionOr<bool> exec_command(Utf16FlyString const& command, bool show_ui, TrustedTypes::TrustedHTMLOrString const& value);
+
+    // Whether the user changed the value of a text control or the content of an editing host in this document, which
+    // they would lose if the document were unloaded without asking them.
+    bool had_user_edits() const { return m_had_user_edits; }
+    void did_make_user_edit();
     WebIDL::ExceptionOr<bool> exec_command_internal(Utf16FlyString const& command, bool show_ui, Utf16View value, DispatchInputEvent, Optional<Utf16FlyString> const& user_input_type = {}, GC::Ptr<StaticRange> deletion_range = nullptr, GC::Ptr<DocumentFragment> pasted_fragment = nullptr);
     WebIDL::ExceptionOr<bool> query_command_enabled(Utf16FlyString const& command);
     WebIDL::ExceptionOr<bool> query_command_indeterm(Utf16FlyString const& command);
@@ -1382,6 +1397,11 @@ public:
     void start_intersection_observing_a_lazy_loading_element(Element&);
     void stop_intersection_observing_a_lazy_loading_element(Element&);
     void process_lazy_load_intersection_observer_entries(ReadonlySpan<GC::Ref<IntersectionObserver::IntersectionObserverEntry>>);
+
+    void start_observing_video_viewport_intersection(HTML::HTMLVideoElement&);
+    void stop_observing_video_viewport_intersection(HTML::HTMLVideoElement&);
+    // Whether the last update of intersection observations found the video near enough to the viewport to be shown.
+    bool video_intersects_viewport(HTML::HTMLVideoElement const&) const;
 
     void shared_declarative_refresh_steps(Utf16View input, GC::Ptr<HTML::HTMLMetaElement const> meta_element = nullptr);
 
@@ -1613,6 +1633,9 @@ public:
     [[nodiscard]] bool is_at_style_stabilization_bound(Layout::BegunRead const& read) const;
     // How many times an element's animated custom properties moved in this style stabilization epoch, counting this one.
     [[nodiscard]] u64 note_animated_custom_properties_moved_in_stabilization_epoch(CSS::StyleNodeID);
+    // Whether the dependents of a size container whose box moved are computed again, as they are for its first few
+    // moves in a style stabilization epoch.
+    [[nodiscard]] bool note_size_container_moved_in_stabilization_epoch(CSS::StyleNodeID);
     void end_style_stabilization_epoch();
     void note_style_stabilization_has_style_reactions()
     {
@@ -1886,6 +1909,8 @@ protected:
     void initialize_document();
 
 private:
+    bool script_edits_for_the_user() const;
+
     bool update_is_fully_active() const;
     bool compute_is_fully_active() const;
 
@@ -2122,6 +2147,7 @@ private:
 
     HashMap<CSS::StyleNodeID, u64> m_animated_custom_property_changes_in_stabilization_epoch;
     u64 m_animated_custom_property_moves_in_stabilization_epoch { 0 };
+    HashMap<CSS::StyleNodeID, u64> m_size_container_moves_in_stabilization_epoch;
     bool m_created_for_appropriate_template_contents { false };
     GC::Ptr<Document> m_associated_inert_template_document;
     GC::Ptr<Document> m_appropriate_template_contents_owner_document;
@@ -2153,7 +2179,7 @@ private:
     // Each Document has a text directive user activation, which is a boolean, initially false.
     bool m_text_directive_user_activation { false };
     bool m_browsing_context_group_has_remote_contexts { false };
-    bool m_navigation_bypassed_cache { false };
+    HTTP::CacheMode m_navigation_cache_mode { HTTP::CacheMode::Default };
     GC::Ptr<Element> m_current_script;
 
     u32 m_ignore_destructive_writes_counter { 0 };
@@ -2391,6 +2417,8 @@ private:
     // Each Document has a lazy load intersection observer, initially set to null but can be set to an IntersectionObserver instance.
     GC::Ptr<IntersectionObserver::IntersectionObserver> m_lazy_load_intersection_observer;
 
+    GC::Ptr<IntersectionObserver::IntersectionObserver> m_video_viewport_intersection_observer;
+
     Vector<GC::Weak<ResizeObserver::ResizeObserver>> m_resize_observers;
 
     ShadowRoot::DocumentSlotAssignmentList m_shadow_roots_needing_slot_assignment;
@@ -2587,6 +2615,8 @@ private:
     GC::Ptr<Editing::EditingHistory> m_editing_history;
 
     bool m_inside_exec_command { false };
+    bool m_inside_script_edit_on_its_own { false };
+    bool m_had_user_edits { false };
     bool m_inside_clipboard_exec_command { false };
     bool m_running_editing_command_action { false };
     bool m_preserve_selection_offsets_during_identical_character_data_replacement { false };

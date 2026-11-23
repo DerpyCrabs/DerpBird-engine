@@ -90,6 +90,19 @@ static NonnullRefPtr<Gfx::Font> load_text_font(float point_size)
     return adopt_ref(*new Gfx::Font(typeface, point_size, point_size, {}, {}));
 }
 
+#ifdef AK_OS_LINUX
+TEST_CASE(linux_system_font_metrics_enclose_the_legacy_ascent_and_descent)
+{
+    auto file = MUST(Core::MappedFile::map(TEST_INPUT("fonts/text.ttf"sv)));
+    auto typeface = MUST(Gfx::Typeface::try_load_from_temporary_memory(file->bytes()));
+    typeface->set_system_font_identifier({ 1, 1 });
+    auto font = typeface->font(12);
+
+    EXPECT_EQ(font->pixel_metrics().ascent, 16.0f);
+    EXPECT_EQ(font->pixel_metrics().descent, 4.0f);
+}
+#endif
+
 TEST_CASE(pending_font_only_hides_its_unicode_range)
 {
     auto font = load_text_font(16);
@@ -390,6 +403,20 @@ TEST_CASE(font_collection_preserves_each_face_style)
         EXPECT_NE(font->glyph_id_for_code_point('a'), 0u);
     }
     EXPECT(Gfx::Typeface::try_load_from_temporary_memory(file->bytes(), 3).is_error());
+}
+
+TEST_CASE(face_with_a_symbol_cmap_subtable_is_a_symbol_font)
+{
+    auto file = MUST(Core::MappedFile::map(TEST_INPUT("fonts/symbol-face.ttc"sv)));
+    auto symbol_face = MUST(Gfx::Typeface::try_load_from_temporary_memory(file->bytes(), 0));
+    auto text_face = MUST(Gfx::Typeface::try_load_from_temporary_memory(file->bytes(), 1));
+    EXPECT_EQ(symbol_face->family(), "Symbol Face Test"sv);
+    EXPECT_EQ(text_face->family(), "Symbol Face Test"sv);
+    EXPECT(symbol_face->description().is_symbol_font());
+    EXPECT(!text_face->description().is_symbol_font());
+
+    // The symbol face still maps a letter through its Unicode subtable.
+    EXPECT_NE(symbol_face->font(12)->glyph_id_for_code_point('a'), 0u);
 }
 
 // The answer depends on the installed font set alone, so every thread must reach the same one and

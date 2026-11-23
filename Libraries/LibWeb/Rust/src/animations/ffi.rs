@@ -717,6 +717,17 @@ pub extern "C" fn animations_animation_effect(animation: &AnimationCell) -> *con
     })
 }
 
+/// https://www.w3.org/TR/web-animations-1/#animation-timeline
+/// The record of the timeline of `animation`, or null where it has none. The pointer stays valid while the animation
+/// keeps that timeline.
+#[unsafe(no_mangle)]
+pub extern "C" fn animations_animation_timeline(animation: &AnimationCell) -> *const TimelineCell {
+    animation
+        .borrow()
+        .timeline()
+        .map_or(std::ptr::null(), |timeline| &raw const **timeline)
+}
+
 /// https://www.w3.org/TR/web-animations-1/#play-states
 #[unsafe(no_mangle)]
 pub extern "C" fn animations_animation_play_state(animation: &AnimationCell) -> AnimationPlayState {
@@ -2033,9 +2044,7 @@ pub unsafe extern "C" fn animations_document_animations_run_transition_step(
             {
                 return false;
             }
-            procedures::run(animation, |procedures| Ok(procedures.is_relevant()))
-                .expect("reading relevance does not throw")
-                .0
+            procedures::query(animation, |procedures| procedures.is_relevant())
         })
         .cloned()
         .collect();
@@ -2592,6 +2601,12 @@ pub extern "C" fn animations_weak_animation_set_get(set: &WeakAnimationSet, inde
     set.get(index).map_or(std::ptr::null(), AnimationHandle::into_raw)
 }
 
+/// Whether `set` holds `animation`.
+#[unsafe(no_mangle)]
+pub extern "C" fn animations_weak_animation_set_contains(set: &WeakAnimationSet, animation: &AnimationCell) -> bool {
+    set.contains(animation)
+}
+
 /// New empty lists of the animations of an element, which the element owns.
 #[unsafe(no_mangle)]
 pub extern "C" fn animations_element_animations_create() -> *mut ElementAnimations {
@@ -2870,13 +2885,46 @@ pub unsafe extern "C" fn animations_element_animations_cancel_css_animations_and
     perform: HostEffectPerformer,
 ) {
     // SAFETY: Guaranteed by the caller, and the borrow of the lists ends before the host performs anything.
-    let taken =
-        unsafe { &mut *animations }.take_css_animations_and_transitions(unsafe { style_engine_target(host, node) });
-    for animation in &taken {
+    let taken = unsafe { &mut *animations }
+        .take_css_animations_and_transitions(None, unsafe { style_engine_target(host, node) });
+    cancel_taken_animations(&taken, keep_alive, in_execution_context, context, perform);
+}
+
+/// As [`animations_element_animations_cancel_css_animations_and_transitions`], of the owner at `slot` alone: a
+/// pseudo-element that is no longer rendered, while its element is.
+///
+/// # Safety
+/// As for [`animations_element_animations_cancel_css_animations_and_transitions`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn animations_element_animations_cancel_css_animations_and_transitions_of_owner(
+    animations: *mut ElementAnimations,
+    slot: AnimationOwnerSlot,
+    host: *const DocumentHost,
+    node: u32,
+    keep_alive: FfiKeepAlive,
+    in_execution_context: FfiInExecutionContext,
+    context: *mut c_void,
+    perform: HostEffectPerformer,
+) {
+    // SAFETY: Guaranteed by the caller, and the borrow of the lists ends before the host performs anything.
+    let taken = unsafe { &mut *animations }
+        .take_css_animations_and_transitions(Some(slot), unsafe { style_engine_target(host, node) });
+    cancel_taken_animations(&taken, keep_alive, in_execution_context, context, perform);
+}
+
+/// Cancels the CSS animations and transitions taken from their owners, each kept alive by the host for the call.
+fn cancel_taken_animations(
+    taken: &[AnimationHandle],
+    keep_alive: FfiKeepAlive,
+    in_execution_context: FfiInExecutionContext,
+    context: *mut c_void,
+    perform: HostEffectPerformer,
+) {
+    for animation in taken {
         // SAFETY: The host keeps alive an animation it is handed for as long as this call lasts.
         unsafe { keep_alive(context, animation) };
     }
-    for animation in &taken {
+    for animation in taken {
         cancel_animation(animation, Invalidate::No, in_execution_context, context, perform);
     }
 }
@@ -3183,4 +3231,20 @@ pub extern "C" fn animations_timeline_read(timeline: &TimelineCell) -> FfiTimeli
 #[unsafe(no_mangle)]
 pub extern "C" fn animations_timeline_associated_animations(timeline: &TimelineCell) -> *mut WeakAnimationSet {
     timeline.associated_animations().as_ptr()
+}
+
+/// The animations associated with `timeline` that an update of its current time may change, which lives as long as the
+/// timeline. The others have finished on a monotonically increasing timeline and have no pending task.
+#[unsafe(no_mangle)]
+pub extern "C" fn animations_timeline_animations_needing_update(timeline: &TimelineCell) -> *mut WeakAnimationSet {
+    timeline.animations_needing_update().as_ptr()
+}
+
+/// The animations associated with the elements of a document whose animations are `animations`, which lives as long as
+/// the document.
+#[unsafe(no_mangle)]
+pub extern "C" fn animations_document_associated_animations(
+    animations: &mut DocumentAnimations,
+) -> *mut WeakAnimationSet {
+    animations.set_mut(DocumentAnimationSetKind::Associated)
 }

@@ -65,6 +65,7 @@ public:
     virtual void die() override;
 
     void request_file(Web::PageId page_id, Web::FileRequest);
+    void request_file_for_webdriver(Web::PageId page_id, u64 command_id, Web::FileRequest);
 
     virtual void acknowledge_derpbird_web_requests(Web::PageId, Web::HTML::CrossProcessId, String, u64, bool) override;
     virtual void set_derpbird_web_requests(Web::PageId, JsonValue) override;
@@ -106,6 +107,7 @@ private:
     Optional<PageClient const&> page(Web::PageId index, SourceLocation = SourceLocation::current()) const;
 
     virtual void set_font_service(IPC::TransportHandle, IPC::File catalog, u64 catalog_size, u64 generation) override;
+    virtual void release_memory() override;
     virtual void initialize(Web::PageId initial_page_id, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::CrossProcessIdAllocator cross_process_id_allocator, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::CrossProcessId initial_document_id, Web::HTML::VisibilityState system_visibility_state) override;
     virtual void create_representing_page(Web::PageId page_id, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables) override;
     virtual void create_embedded_page(Web::PageId page_id, Vector<Web::HTML::RemoteNavigableDescriptor> remote_navigables, Web::HTML::CrossProcessId root_navigable_id, Web::HTML::SessionHistoryEntryDescriptor initial_history_entry, Web::HTML::VisibilityState system_visibility_state) override;
@@ -249,6 +251,7 @@ private:
 
     virtual void set_listen_for_dom_mutations(Web::PageId page_id, bool) override;
     virtual void set_has_devtools_client(Web::PageId page_id, bool has_devtools_client) override;
+    virtual void save_session_history_entry_states(Web::PageId page_id) override;
     virtual void start_sending_console_output(Web::PageId page_id, bool messages, bool errors) override;
     virtual void get_dom_node_inner_html(Web::PageId page_id, Web::UniqueNodeID node_id) override;
     virtual void get_dom_node_outer_html(Web::PageId page_id, Web::UniqueNodeID node_id) override;
@@ -342,6 +345,7 @@ private:
     virtual void take_dom_node_screenshot(Web::PageId page_id, Web::UniqueNodeID node_id) override;
 
     virtual void request_internal_page_info(Web::PageId page_id, WebView::PageInfoType) override;
+    virtual void describe_owners_of_visual_context_nodes(Web::PageId page_id, Vector<u32> spatial_node_indices, Vector<u32> effect_node_indices) override;
 
     virtual void get_selected_text(Web::PageId page_id, u64 request_id) override;
     virtual void generate_text_fragment_url(Web::PageId page_id, u64 request_id, u64 generation_id) override;

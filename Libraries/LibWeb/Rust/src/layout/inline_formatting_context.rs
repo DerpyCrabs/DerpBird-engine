@@ -14,18 +14,9 @@ fn truncate_line_at_glyph_boundary(
     line_direction: u8,
 ) -> Option<(usize, CssPixels)> {
     let index = line.fragments.iter().position(|fragment| {
-        !fragment.is_fully_truncated
-            && (fragment.has_text_overflow_ellipsis
-                || fragment.inline_offset + fragment.inline_length > available_inline_size)
+        !fragment.is_fully_truncated && fragment.inline_offset + fragment.inline_length > available_inline_size
     })?;
     let fragment = &mut line.fragments[index];
-    if fragment.has_text_overflow_ellipsis {
-        if index == 0 {
-            return Some((index, fragment.inline_offset));
-        }
-        fragment.glyphs.as_mut().unwrap().glyphs.pop();
-        fragment.has_text_overflow_ellipsis = false;
-    }
     let available = available_inline_size - fragment.inline_offset;
     let Some(glyphs) = fragment.glyphs.as_mut().filter(|_| available > CssPixels::default()) else {
         return (index > 0).then_some((index, fragment.inline_offset));
@@ -70,7 +61,172 @@ fn truncate_line_at_glyph_boundary(
     Some((index + 1, fragment.inline_offset + inline_size))
 }
 
-fn apply_text_overflow_to_line(line: &mut line_box::LineBoxData) {
+/// The ellipsis that text-overflow: ellipsis draws, shaped in the font its block container's style gives it.
+struct TextOverflowEllipsis {
+    glyphs: libgfx_rust::text_layout::GlyphBuffer,
+    font: libgfx_rust::font::FontHandle,
+    width: f32,
+    length_in_code_units: usize,
+}
+
+impl TextOverflowEllipsis {
+    fn of_block(context: &InlineFormattingContext<'_>) -> Self {
+        // https://drafts.csswg.org/css-overflow-4/#ellipsing-details
+        // "The ellipsis is styled and baseline-aligned according to the block."
+        let style = context.style(context.containing_block);
+        let font_list = style.frozen_font_list();
+        let first_available_font = style
+            .font()
+            .first_available_font()
+            .expect("layout read a font group that never received a frozen font list");
+        let presentation = libgfx_rust::font::emoji_presentation_for_code_point(ELLIPSIS_CODE_POINT, None, None);
+        // NB: Where the block's first available font has no glyph for U+2026 HORIZONTAL ELLIPSIS, three periods stand
+        //     for it, rather than an ellipsis from whatever font the cascade falls back to.
+        const ELLIPSIS: [u16; 1] = [ELLIPSIS_CODE_POINT as u16];
+        const THREE_PERIODS: [u16; 3] = [b'.' as u16; 3];
+        // NB: The cascade can hand back the first font for a code point that no font in it has, so the first font
+        //     also has to have the glyph.
+        let text: &[u16] = if first_available_font.contains_glyph(ELLIPSIS_CODE_POINT)
+            && font_list.font_for_code_point(ELLIPSIS_CODE_POINT, presentation) == *first_available_font
+        {
+            &ELLIPSIS
+        } else {
+            &THREE_PERIODS
+        };
+        // NB: The periods come from whichever font of the block has a period for them, which needn't be its first
+        //     available font: That one can be a font whose unicode-range leaves the period out.
+        let code_point = u32::from(text[0]);
+        let font = font_list.font_for_code_point(
+            code_point,
+            libgfx_rust::font::emoji_presentation_for_code_point(code_point, None, None),
+        );
+        let shaped = libgfx_rust::text_layout::shape_text(
+            &font,
+            text,
+            libgfx_rust::text_layout::TextType::Common,
+            0.0,
+            style.letter_spacing().to_double() as f32,
+            style.word_spacing().to_double() as f32,
+        );
+        Self {
+            width: shaped.width(),
+            glyphs: shaped.into_glyphs(),
+            font,
+            length_in_code_units: text.len(),
+        }
+    }
+
+    fn inline_size(&self) -> CssPixels {
+        CssPixels::nearest_value_for_f32(self.width)
+    }
+
+    /// The fragment that draws the ellipsis at `inline_offset` on `line`, next to the text of `layout_node` that it
+    /// stands for, from `start`.
+    fn into_fragment(
+        self,
+        context: &InlineFormattingContext<'_>,
+        line: &line_box::LineBoxData,
+        layout_node: Node,
+        start: usize,
+        inline_offset: CssPixels,
+    ) -> line_box_fragment::LineBoxFragmentData {
+        let style_source = context.containing_block;
+        let style = context.style(style_source);
+        let inline_size = self.inline_size();
+        let mut fragment = line_box_fragment::LineBoxFragmentData::new(
+            layout_node,
+            start,
+            self.length_in_code_units,
+            inline_offset,
+            CssPixels::default(),
+            inline_size,
+            line_builder::content_area_block_size(style),
+            CssPixels::default(),
+            line.direction,
+            line.writing_mode,
+            Some(line_box_fragment::GlyphData {
+                glyphs: self.glyphs,
+                font: self.font,
+                text_type: line_box_fragment::GLYPH_TEXT_TYPE_COMMON,
+                width: self.width,
+                is_upright: false,
+                derived_placements_end: None,
+            }),
+            line_box_fragment::FragmentBuildFacts {
+                style_source,
+                is_atomic_inline: false,
+                white_space_collapse: style.white_space_collapse(),
+                text_utf16: std::ptr::null(),
+                text_length_in_code_units: 0,
+            },
+        );
+        fragment.is_text_overflow_ellipsis = true;
+        // NB: Placing a line aligns its fragments, so on a line that's placed already, the ellipsis sits on the line's
+        //     baseline by itself. The fragments of a placed line are offset from the start of the formatting context,
+        //     and its baseline from the start of the line.
+        if line.uses_last_line_alignment.is_some() {
+            let ascent = CssPixels::nearest_value_for_f32(style.font_ascent());
+            fragment.baseline = ascent;
+            fragment.block_offset = line.block_start + line.baseline - ascent;
+        }
+        fragment
+    }
+}
+
+/// The glyphs of `glyphs` whose clusters lie wholly within what `keeps` accepts, as the start and end of each cluster
+/// along the inline axis, with the cluster's extent. A cluster such as a base character and its combining marks is
+/// kept or dropped as a whole.
+fn glyphs_of_clusters_kept(
+    glyphs: &libgfx_rust::text_layout::GlyphBuffer,
+    keeps: impl Fn(f32, f32) -> bool,
+) -> (libgfx_rust::text_layout::GlyphBuffer, Option<(f32, f32)>) {
+    let mut cluster_extents = HashMap::<u32, (f32, f32)>::default();
+    for placed in glyphs.placed() {
+        let extent = cluster_extents
+            .entry(placed.cluster_start)
+            .or_insert((placed.x, placed.x + placed.glyph.advance));
+        extent.0 = extent.0.min(placed.x);
+        extent.1 = extent.1.max(placed.x + placed.glyph.advance);
+    }
+    let mut kept = libgfx_rust::text_layout::GlyphBuffer::default();
+    let mut kept_extent = None::<(f32, f32)>;
+    for placed in glyphs.placed() {
+        let (start, end) = cluster_extents[&placed.cluster_start];
+        if !keeps(start, end) {
+            continue;
+        }
+        kept_extent = Some(kept_extent.map_or((start, end), |(kept_start, kept_end)| {
+            (kept_start.min(start), kept_end.max(end))
+        }));
+        kept.push_placed(placed);
+    }
+    (kept, kept_extent)
+}
+
+/// The cluster of `glyphs` that's farthest toward the line's start edge: its left end, or its right end where
+/// `from_right` is set. Its start and end along the inline axis.
+fn start_edge_cluster(glyphs: &libgfx_rust::text_layout::GlyphBuffer, from_right: bool) -> Option<(f32, f32)> {
+    let mut extent = None::<(f32, f32)>;
+    for placed in glyphs.placed() {
+        let (start, end) = (placed.x, placed.x + placed.glyph.advance);
+        let is_farther = extent.is_none_or(
+            |(kept_start, kept_end)| {
+                if from_right { end > kept_end } else { start < kept_start }
+            },
+        );
+        if is_farther {
+            extent = Some((start, end));
+        }
+    }
+    extent
+}
+
+// https://drafts.csswg.org/css-overflow-4/#text-overflow
+// "implementations must hide characters and atomic inline-level elements at the applicable edge(s) of the line as
+// necessary to fit the ellipsis/string, and place the ellipsis/string immediately adjacent to the applicable edge(s)
+// of the remaining inline content. The first character or atomic inline-level element on a line must be clipped
+// rather than ellipsed."
+fn apply_text_overflow_to_line(line: &mut line_box::LineBoxData, context: &InlineFormattingContext<'_>) {
     if !matches!(line.original_available_inline_size, AvailableSize::Definite(_)) {
         return;
     }
@@ -78,61 +234,274 @@ fn apply_text_overflow_to_line(line: &mut line_box::LineBoxData) {
     if line.inline_length <= available_inline_size || line.fragments.is_empty() {
         return;
     }
+    let ellipsis = TextOverflowEllipsis::of_block(context);
+    // NB: The end edge of a right-to-left line is its left end. Its fragments are laid out from the left, in logical
+    //     order, and placing the line aligns its right end with the right edge of the line box, past its indent. So
+    //     on a line that's placed already, what overflows is left of where the line box starts; on one that isn't,
+    //     it's whatever is more than the available inline size, less the indent, away from its right end. A line
+    //     whose items are ordered right to left is mirrored as it's placed, so until then, its end is on its right
+    //     like that of any other line.
+    let is_placed = line.uses_last_line_alignment.is_some();
+    if line.direction == direction::RTL && (is_placed || !context.atomic_items_are_right_to_left) {
+        let (left_edge, shift) = if is_placed {
+            (line.placed_inline_start, CssPixels::default())
+        } else {
+            let overflow = line.inline_length - available_inline_size;
+            (overflow + line.indent, overflow)
+        };
+        apply_text_overflow_at_left_edge(line, context, ellipsis, left_edge, shift, available_inline_size);
+    } else {
+        let right_edge = if is_placed {
+            line.placed_inline_start + available_inline_size
+        } else {
+            available_inline_size
+        };
+        apply_text_overflow_at_right_edge(line, context, ellipsis, right_edge, available_inline_size);
+    }
+}
 
+/// Where a fragment's border box starts and ends on its line: The fragment of an atomic inline is its content box.
+fn border_box_inline_extent(fragment: &line_box_fragment::LineBoxFragmentData) -> (CssPixels, CssPixels) {
+    let start = fragment.inline_offset;
+    let end = start + fragment.inline_length;
+    match fragment.box_cells.filter(|_| fragment.is_atomic_inline) {
+        Some(cells) => (
+            start - cells.border_left - cells.padding_left,
+            end + cells.padding_right + cells.border_right,
+        ),
+        None => (start, end),
+    }
+}
+
+/// Hides a fragment that text-overflow elides, and the box of an atomic inline with it, since that box paints itself.
+fn hide_fragment_for_text_overflow(
+    fragment: &mut line_box_fragment::LineBoxFragmentData,
+    context: &InlineFormattingContext<'_>,
+) {
+    fragment.is_fully_truncated = true;
+    fragment.is_hidden_by_text_overflow = true;
+    if fragment.is_atomic_inline {
+        context.hide_atomic_inline(fragment.layout_node);
+    }
+}
+
+// https://drafts.csswg.org/css-overflow-4/#text-overflow
+// "For the ellipsis and string values, implementations must hide characters and atomic inline-level elements at the
+// applicable edge(s) of the line as necessary to fit the ellipsis/string, and place the ellipsis/string immediately
+// adjacent to the applicable edge(s) of the remaining inline content. The first character or atomic inline-level
+// element on a line must be clipped rather than ellipsed."
+fn apply_text_overflow_at_right_edge(
+    line: &mut line_box::LineBoxData,
+    context: &InlineFormattingContext<'_>,
+    ellipsis: TextOverflowEllipsis,
+    right_edge: CssPixels,
+    available_inline_size: CssPixels,
+) {
+    // NB: Content can only reach as far as leaves room for the ellipsis before the edge.
+    let content_right_limit = right_edge - ellipsis.inline_size();
     let mut line_has_visible_content = false;
     for index in 0..line.fragments.len() {
         let fragment_start = line.fragments[index].inline_offset;
-        if fragment_start + line.fragments[index].inline_length <= available_inline_size {
+        if border_box_inline_extent(&line.fragments[index]).1 <= content_right_limit {
             line_has_visible_content = true;
             continue;
         }
         let Some(glyph_data) = &line.fragments[index].glyphs else {
-            continue;
-        };
-        let font = glyph_data.font.clone();
-        let ellipsis_inline_size = font.glyph_width(ELLIPSIS_CODE_POINT);
-        let available_in_fragment = (available_inline_size - fragment_start).raw_value() as f32 / 64.0;
-        let max_text_inline_size = available_in_fragment - ellipsis_inline_size;
-
-        let glyphs = &line.fragments[index].glyphs.as_ref().unwrap().glyphs;
-        let mut keep_count = 0usize;
-        let mut last_kept_end = 0.0f32;
-        let mut glyph_block_offset = 0.0f32;
-        for placed in glyphs.placed() {
-            let glyph_end = placed.x + placed.glyph.advance;
-            if glyph_end > max_text_inline_size && (keep_count > 0 || line_has_visible_content) {
-                break;
+            if !line.fragments[index].is_atomic_inline {
+                continue;
             }
-            keep_count += 1;
-            last_kept_end = glyph_end;
-            glyph_block_offset = placed.y;
+            // NB: An atomic inline is hidden as a whole, unless it's the first content on the line, and the ellipsis
+            //     then follows the content before it.
+            let keeps_atomic_inline = !line_has_visible_content;
+            let original_inline_length = line.fragments[index].inline_length;
+            let ellipsis_offset = if keeps_atomic_inline {
+                border_box_inline_extent(&line.fragments[index]).1
+            } else {
+                line.fragments[..index]
+                    .iter()
+                    .filter(|fragment| !fragment.is_fully_truncated)
+                    .map(|fragment| border_box_inline_extent(fragment).1)
+                    .max()
+                    .unwrap_or_else(|| border_box_inline_extent(&line.fragments[index]).0)
+                    .min(content_right_limit)
+            };
+            line.text_overflow_elision = Some(line_box::TextOverflowElision {
+                inline_length: line.inline_length,
+                ellipsis_fragment_start: fragment_start,
+                ellipsis_fragment_inline_length: original_inline_length,
+                ellipsis_fragment_inline_length_lost_on_left: None,
+            });
+            let first_hidden = if keeps_atomic_inline { index + 1 } else { index };
+            for hidden in &mut line.fragments[first_hidden..] {
+                hide_fragment_for_text_overflow(hidden, context);
+            }
+            line.fragments[index].has_text_overflow_ellipsis = true;
+            let layout_node = line.fragments[index].layout_node;
+            let ellipsis_fragment = ellipsis.into_fragment(context, line, layout_node, 0, ellipsis_offset);
+            line.fragments.insert(index + 1, ellipsis_fragment);
+            line.inline_length = available_inline_size;
+            line.clamp_static_position_markers_to_inline_length();
+            break;
+        };
+        let max_text_end = (content_right_limit - fragment_start).to_double() as f32;
+        let (mut kept, mut kept_extent) = glyphs_of_clusters_kept(&glyph_data.glyphs, |_, end| end <= max_text_end);
+        let keeps_first_character = kept_extent.is_none() && !line_has_visible_content;
+        if keeps_first_character {
+            let first = start_edge_cluster(&glyph_data.glyphs, false);
+            (kept, kept_extent) = glyphs_of_clusters_kept(&glyph_data.glyphs, |start, _| {
+                first.is_some_and(|(first_start, _)| start == first_start)
+            });
         }
-
-        let glyph_data = line.fragments[index].glyphs.as_mut().unwrap();
-        glyph_data.glyphs.truncate(keep_count);
-        glyph_data.glyphs.push_placed(libgfx_rust::text_layout::PlacedGlyph {
-            glyph: libgfx_rust::text_layout::DrawGlyph::new(
-                ellipsis_inline_size,
-                font.glyph_id_for_code_point(ELLIPSIS_CODE_POINT),
-                1,
-                true,
-            ),
-            x: last_kept_end,
-            y: glyph_block_offset,
-            cluster_start: 0,
-            is_rtl: false,
-        });
-        let ellipsis_fragment_inline_length = line.fragments[index].inline_length;
-        line.fragments[index].inline_length = CssPixels::nearest_value_for_f32(last_kept_end + ellipsis_inline_size);
-        line.fragments[index].has_text_overflow_ellipsis = true;
+        let kept_end = kept_extent.map_or(0.0, |(_, end)| end);
+        let original_inline_length = line.fragments[index].inline_length;
+        let fragment = &mut line.fragments[index];
+        let glyph_data = fragment.glyphs.as_mut().unwrap();
+        glyph_data.glyphs = kept;
+        glyph_data.width = kept_end;
+        glyph_data.derived_placements_end = None;
+        fragment.inline_length = CssPixels::nearest_value_for_f32(kept_end);
+        fragment.has_text_overflow_ellipsis = true;
+        let (layout_node, ellipsis_start) = (fragment.layout_node, fragment.start + fragment.length_in_code_units);
+        let ellipsis_offset = if keeps_first_character {
+            fragment_start + fragment.inline_length
+        } else {
+            (fragment_start + fragment.inline_length).min(content_right_limit)
+        };
         line.text_overflow_elision = Some(line_box::TextOverflowElision {
             inline_length: line.inline_length,
             ellipsis_fragment_start: fragment_start,
-            ellipsis_fragment_inline_length,
+            ellipsis_fragment_inline_length: original_inline_length,
+            ellipsis_fragment_inline_length_lost_on_left: None,
         });
         for later in &mut line.fragments[index + 1..] {
-            later.is_fully_truncated = true;
+            hide_fragment_for_text_overflow(later, context);
         }
+        let ellipsis_fragment = ellipsis.into_fragment(context, line, layout_node, ellipsis_start, ellipsis_offset);
+        line.fragments.insert(index + 1, ellipsis_fragment);
+        line.inline_length = available_inline_size;
+        line.clamp_static_position_markers_to_inline_length();
+        break;
+    }
+}
+
+/// `left_edge` is where what's left of the line starts, and `shift` is how far its fragments then move left, so that
+/// placing the line leaves them there.
+fn apply_text_overflow_at_left_edge(
+    line: &mut line_box::LineBoxData,
+    context: &InlineFormattingContext<'_>,
+    ellipsis: TextOverflowEllipsis,
+    left_edge: CssPixels,
+    shift: CssPixels,
+    available_inline_size: CssPixels,
+) {
+    let ellipsis_inline_size = ellipsis.inline_size();
+    // NB: Content can only start as far left as leaves room for the ellipsis after the edge.
+    let content_left_limit = left_edge + ellipsis_inline_size;
+    let mut line_has_visible_content = false;
+    for index in (0..line.fragments.len()).rev() {
+        let fragment_start = line.fragments[index].inline_offset;
+        if border_box_inline_extent(&line.fragments[index]).0 >= content_left_limit {
+            line_has_visible_content = true;
+            continue;
+        }
+        let Some(glyph_data) = &line.fragments[index].glyphs else {
+            if !line.fragments[index].is_atomic_inline {
+                continue;
+            }
+            // NB: An atomic inline is hidden as a whole, unless it's the first content on the line, and the ellipsis
+            //     then precedes the content after it.
+            let keeps_atomic_inline = !line_has_visible_content;
+            let ellipsis_offset = if keeps_atomic_inline {
+                border_box_inline_extent(&line.fragments[index]).0 - ellipsis_inline_size
+            } else {
+                line.fragments[index + 1..]
+                    .iter()
+                    .filter(|fragment| !fragment.is_fully_truncated)
+                    .map(|fragment| border_box_inline_extent(fragment).0)
+                    .min()
+                    .unwrap_or_else(|| border_box_inline_extent(&line.fragments[index]).1)
+                    .max(content_left_limit)
+                    - ellipsis_inline_size
+            };
+            let original_inline_length = line.fragments[index].inline_length;
+            let elided_inline_length = line.inline_length;
+            let last_hidden = if keeps_atomic_inline { index } else { index + 1 };
+            for hidden in &mut line.fragments[..last_hidden] {
+                hide_fragment_for_text_overflow(hidden, context);
+            }
+            line.fragments[index].has_text_overflow_ellipsis = true;
+            let layout_node = line.fragments[index].layout_node;
+            let ellipsis_fragment = ellipsis.into_fragment(context, line, layout_node, 0, ellipsis_offset);
+            line.fragments.insert(index, ellipsis_fragment);
+            if shift != CssPixels::default() {
+                for fragment in &mut line.fragments {
+                    fragment.inline_offset -= shift;
+                }
+                for marker in &mut line.static_position_markers {
+                    marker.inline_offset -= shift;
+                }
+            }
+            line.text_overflow_elision = Some(line_box::TextOverflowElision {
+                inline_length: elided_inline_length,
+                ellipsis_fragment_start: line.fragments[index + 1].inline_offset,
+                ellipsis_fragment_inline_length: original_inline_length,
+                ellipsis_fragment_inline_length_lost_on_left: Some(CssPixels::default()),
+            });
+            line.inline_length = available_inline_size;
+            line.clamp_static_position_markers_to_inline_length();
+            break;
+        };
+        let min_text_start = (content_left_limit - fragment_start).to_double() as f32;
+        let (mut kept, mut kept_extent) =
+            glyphs_of_clusters_kept(&glyph_data.glyphs, |start, _| start >= min_text_start);
+        let keeps_first_character = kept_extent.is_none() && !line_has_visible_content;
+        if keeps_first_character {
+            let first = start_edge_cluster(&glyph_data.glyphs, true);
+            (kept, kept_extent) = glyphs_of_clusters_kept(&glyph_data.glyphs, |_, end| {
+                first.is_some_and(|(_, first_end)| end == first_end)
+            });
+        }
+        let original_inline_length = line.fragments[index].inline_length;
+        let kept_start = kept_extent.map_or(original_inline_length.to_double() as f32, |(start, _)| start);
+        let kept_start_px = CssPixels::nearest_value_for_f32(kept_start);
+        let fragment = &mut line.fragments[index];
+        kept.update_positions(|_, x, _| *x -= kept_start);
+        let glyph_data = fragment.glyphs.as_mut().unwrap();
+        glyph_data.glyphs = kept;
+        glyph_data.width -= kept_start;
+        glyph_data.derived_placements_end = None;
+        fragment.inline_offset += kept_start_px;
+        fragment.inline_length -= kept_start_px;
+        fragment.has_text_overflow_ellipsis = true;
+        let (layout_node, ellipsis_start) = (fragment.layout_node, fragment.start + fragment.length_in_code_units);
+        let ellipsis_offset = if keeps_first_character {
+            fragment.inline_offset - ellipsis_inline_size
+        } else {
+            (fragment.inline_offset - ellipsis_inline_size).max(left_edge)
+        };
+        let elided_inline_length = line.inline_length;
+        for earlier in &mut line.fragments[..index] {
+            hide_fragment_for_text_overflow(earlier, context);
+        }
+        let ellipsis_fragment = ellipsis.into_fragment(context, line, layout_node, ellipsis_start, ellipsis_offset);
+        line.fragments.insert(index, ellipsis_fragment);
+        if shift != CssPixels::default() {
+            for fragment in &mut line.fragments {
+                fragment.inline_offset -= shift;
+            }
+            for marker in &mut line.static_position_markers {
+                marker.inline_offset -= shift;
+            }
+        }
+        // NB: As for a line whose right end is elided, the line box starts at the cut fragment's offset less this one,
+        //     wherever placing the line moves them.
+        let cut_fragment = &line.fragments[index + 1];
+        line.text_overflow_elision = Some(line_box::TextOverflowElision {
+            inline_length: elided_inline_length,
+            ellipsis_fragment_start: cut_fragment.inline_offset,
+            ellipsis_fragment_inline_length: original_inline_length,
+            ellipsis_fragment_inline_length_lost_on_left: Some(kept_start_px),
+        });
         line.inline_length = available_inline_size;
         line.clamp_static_position_markers_to_inline_length();
         break;
@@ -149,12 +518,14 @@ fn apply_block_ellipsis(
     ellipsis_text: &[u16],
 ) {
     let (style_source, style) = (context.containing_block, context.style(context.containing_block));
-    let first_code_point = char::decode_utf16(ellipsis_text.iter().copied())
-        .next()
-        .map_or(char::REPLACEMENT_CHARACTER, |result| {
-            result.unwrap_or(char::REPLACEMENT_CHARACTER)
-        }) as u32;
-    let presentation = libgfx_rust::font::emoji_presentation_for_code_point(first_code_point, None);
+    // NB: The code points after the first can make it the start of an emoji sequence.
+    let mut code_points = char::decode_utf16(ellipsis_text.iter().copied())
+        .map(|result| result.unwrap_or(char::REPLACEMENT_CHARACTER) as u32);
+    let first_code_point = code_points.next().unwrap_or(char::REPLACEMENT_CHARACTER as u32);
+    let next_code_point = code_points.next();
+    let code_point_after_next = code_points.next();
+    let presentation =
+        libgfx_rust::font::emoji_presentation_for_code_point(first_code_point, next_code_point, code_point_after_next);
     let font = style
         .frozen_font_list()
         .font_for_code_point(first_code_point, presentation);
@@ -173,12 +544,15 @@ fn apply_block_ellipsis(
         _ => line.inline_length + ellipsis_inline_size,
     };
     line.inline_length_before_block_ellipsis = Some(line.inline_length);
+    // NB: The block overflow ellipsis takes the place of any text-overflow ellipsis on the line, and the fragment that
+    //     text-overflow cut keeps what of its text still fits.
+    line.fragments.retain(|fragment| !fragment.is_text_overflow_ellipsis);
+    for fragment in &mut line.fragments {
+        fragment.has_text_overflow_ellipsis = false;
+    }
     line.trim_trailing_whitespace_before_block_ellipsis();
     let available_for_content = (available_inline_size - ellipsis_inline_size).max(CssPixels::default());
-    let has_text_overflow_ellipsis = line
-        .visible_fragments()
-        .any(|fragment| fragment.has_text_overflow_ellipsis);
-    let content_fits = line.inline_length <= available_for_content && !has_text_overflow_ellipsis;
+    let content_fits = line.inline_length <= available_for_content;
     let opportunity = if content_fits {
         None
     } else {
@@ -219,7 +593,7 @@ fn apply_block_ellipsis(
         (line.fragments.len(), line.inline_length)
     } else if let Some((fragment_count, inline_offset, length, inline_size, reshaped_glyphs)) = opportunity {
         let last_retained_fragment = &mut line.fragments[fragment_count - 1];
-        if last_retained_fragment.length_in_code_units > length || last_retained_fragment.has_text_overflow_ellipsis {
+        if last_retained_fragment.length_in_code_units > length {
             let mut retained_code_units = 0usize;
             if let Some(glyphs) = reshaped_glyphs {
                 last_retained_fragment.glyphs = Some(glyphs);
@@ -238,7 +612,6 @@ fn apply_block_ellipsis(
             last_retained_fragment.length_in_code_units = length;
             last_retained_fragment.inline_length = inline_size;
             last_retained_fragment.trailing_whitespace = Default::default();
-            last_retained_fragment.has_text_overflow_ellipsis = false;
         }
         (fragment_count, inline_offset)
     } else {
@@ -276,8 +649,9 @@ fn apply_block_ellipsis(
     };
     for fragment in &mut line.fragments[first_displaced_fragment..] {
         fragment.is_fully_truncated = true;
+        fragment.is_hidden_by_text_overflow = false;
         if fragment.is_atomic_inline {
-            context.hide_atomic_inline_for_line_clamp(fragment.layout_node);
+            context.hide_atomic_inline(fragment.layout_node);
         }
     }
     line.static_position_markers
@@ -555,6 +929,12 @@ pub(crate) fn compute(
             if fragment.is_fully_truncated || fragment.is_block_ellipsis {
                 continue;
             }
+            // NB: The text-overflow ellipsis is committed like any other fragment, so it takes an index, but it
+            //     belongs to no inline box.
+            if fragment.is_text_overflow_ellipsis {
+                committed_fragment_index += 1;
+                continue;
+            }
             let fragment_index = committed_fragment_index;
             committed_fragment_index += 1;
             let interrupting = line.has_block_level_box;
@@ -752,6 +1132,12 @@ pub(crate) fn compute(
         //     stand in for it only where it has no other lines.
         let mut corners_from_block_lines = FirstAndLastContentLineCorners::default();
 
+        // NB: A box with content on some line, in this fragment or another, has its edges where that content is, so
+        //     only an empty box is on the line that holds its strut alone, for its background, borders, and outline
+        //     to be painted there and its border box to be hit there. Elsewhere, such a line holds a placeholder piece.
+        let holds_content = lines.iter().any(|line| line.first_fragment_index.is_some())
+            || context.inline_boxes_continued_from_previous_fragment.contains(&node)
+            || context.inline_boxes_continued_in_next_fragment.borrow().contains(&node);
         for line in lines {
             let inline_box_anchor = || {
                 let line_data = context.line_data();
@@ -824,7 +1210,8 @@ pub(crate) fn compute(
             let border_block_start = content_block_start - border_padding_block_low;
             let border_block_length = content_block_length + border_padding_block_low + border_padding_block_high;
             // NB: A placeholder piece holds the content box of its inline box.
-            let rect = if line.is_strut {
+            let is_placeholder = line.is_strut && holds_content;
+            let rect = if is_placeholder {
                 FfiCssPixelRect {
                     x: contributions_inline_start,
                     y: content_block_start,
@@ -850,7 +1237,7 @@ pub(crate) fn compute(
                     baseline: inline_box_baseline,
                     accumulated_vertical_shift: inline_box_vertical_shift,
                     present_edges: edge_bits(has_low_edge, has_high_edge),
-                    is_geometry_only_placeholder: line.is_strut,
+                    is_geometry_only_placeholder: is_placeholder,
                 },
                 depth,
                 discovery_index: node_index,
@@ -1259,7 +1646,8 @@ impl<'context> InlineFormattingContext<'context> {
         self.block_axis_float_clearance.set(clearance);
     }
 
-    fn hide_atomic_inline_for_line_clamp(&self, node: Node) {
+    /// Hides an atomic inline that a line clamp or text-overflow left out of its line.
+    fn hide_atomic_inline(&self, node: Node) {
         self.discard_unplaced_atomic_inline(node);
         self.hide_placed_atomic_inline_for_line_clamp(node);
     }
@@ -1308,7 +1696,7 @@ impl<'context> InlineFormattingContext<'context> {
         ) {
             line.trim_trailing_whitespace();
             if self.text_overflow_applies() {
-                apply_text_overflow_to_line(line);
+                apply_text_overflow_to_line(line, self);
             }
             let ellipsis_text = match self.style(self.containing_block).block_ellipsis() {
                 crate::css::style_value::StyleValueData::Keyword { keyword: code } if *code == keyword::NO_ELLIPSIS => {
@@ -1642,7 +2030,8 @@ impl<'context> InlineFormattingContext<'context> {
 
     fn clear_floating_boxes(&self, node: Node) -> bool {
         self.parent
-            .clear_floating_boxes(node, Some(self), self.containing_block_position_in_bfc_root)
+            .clear_floating_boxes(node, Some(self), None, self.containing_block_position_in_bfc_root)
+            .is_some()
     }
 
     fn reset_parent_margin_state(&self) {
@@ -1695,6 +2084,7 @@ impl<'context> InlineFormattingContext<'context> {
                 text_overflow_elision: None,
                 block_level_box: None,
                 uses_last_line_alignment: None,
+                placed_inline_start: CssPixels::default(),
             };
             fragment_start = fragment_end;
             let line_item_start = item_index;
@@ -1755,17 +2145,11 @@ impl<'context> InlineFormattingContext<'context> {
         prepared: &prepared_inline_content::PreparedInlineContent,
     ) -> sizing_context::ContentInlineSizes {
         let containing_style = self.style(self.containing_block);
-        let container_wraps = containing_style.text_wrap_mode() == text_wrap_mode::WRAP;
         let text_indentation =
             TextIndentation::of(containing_style, self.input.containing_block_constraints.inline_basis());
-        let mut max_content_lines = ContentSizingLines::new(
-            LinesWithoutLineBoxes::indented_by(false, text_indentation),
-            container_wraps,
-        );
-        let mut min_content_lines = ContentSizingLines::new(
-            LinesWithoutLineBoxes::indented_by(true, text_indentation),
-            container_wraps,
-        );
+        let mut max_content_lines =
+            ContentSizingLines::new(LinesWithoutLineBoxes::indented_by(false, text_indentation));
+        let mut min_content_lines = ContentSizingLines::new(LinesWithoutLineBoxes::indented_by(true, text_indentation));
         for index in 0..items.len() {
             max_content_lines.append(self, items, prepared, index);
             min_content_lines.append(self, items, prepared, index);
@@ -1791,6 +2175,7 @@ impl<'context> InlineFormattingContext<'context> {
         }
     }
 
+    #[inline]
     #[allow(clippy::too_many_arguments)]
     fn text_item_wrap_opportunity(
         &self,
@@ -2033,9 +2418,6 @@ impl<'context> InlineFormattingContext<'context> {
             );
         }
         let style = self.style(self.parent_node(item.node));
-        let text_content = self.pass.text_content(item.node);
-        let letter_spacing = style.letter_spacing().to_double() as f32;
-        let word_spacing = style.word_spacing().to_double() as f32;
         loop {
             // NB: Splitting one text item can create several lines. Observe the clamp point before creating more,
             //     preserving the first clamped line while laying out legacy scrollable overflow.
@@ -2071,6 +2453,9 @@ impl<'context> InlineFormattingContext<'context> {
                 line_builder.break_line(line_builder::ForcedBreak::No, None, None);
                 continue;
             }
+            let text_content = self.pass.text_content(item.node);
+            let letter_spacing = style.letter_spacing().to_double() as f32;
+            let word_spacing = style.word_spacing().to_double() as f32;
             let split_item = self.split_for_overflow_break_before_hyphen(
                 item,
                 prepared,
@@ -2420,8 +2805,6 @@ impl<'context> InlineFormattingContext<'context> {
         let mut items_after_clamp_point = Vec::new();
         let mut stopped_at_line_limit = false;
         let mut needs_float_fitting = !float_fit_trial;
-        // https://quirks.spec.whatwg.org/#the-line-height-calculation-quirk
-        let takes_struts_of_inline_boxes_without_text = !self.facts(self.containing_block).document_in_quirks_mode();
         loop {
             if float_fit_trial && line_builder.float_refit().is_some() {
                 break;
@@ -2458,17 +2841,25 @@ impl<'context> InlineFormattingContext<'context> {
                 if item.is_collapsible_whitespace
                     || (item.type_ == inline_level_iterator::ItemType::Text && item.is_ascii_whitespace(self))
                 {
+                    // NB: Preserved white space stays on the line, hanging off its end if it has to, so a box after
+                    //     it comes after it on the line too.
+                    let preserved_whitespace_inline_size = if item.is_collapsible_whitespace {
+                        CssPixels::default()
+                    } else {
+                        inline_level_iterator::inline_extent([&item])
+                    };
                     for empty_box in iterator.empty_inline_boxes_after_last_item() {
                         line_builder.add_strut_of_empty_inline_box(
                             empty_box.node,
-                            pending_leading_edges + empty_box.leading_edges,
+                            pending_leading_edges + preserved_whitespace_inline_size + empty_box.leading_edges,
                         );
                     }
                 }
             }
             // NB: The inline boxes around whitespace are on this line whether the whitespace stays there, collapses,
-            //     or ends up hanging off the end of the line.
-            if item.is_collapsible_whitespace && takes_struts_of_inline_boxes_without_text {
+            //     or ends up hanging off the end of the line. Under the line-height quirk, the line builder takes
+            //     their line height away unless they have a border or padding at their start or end.
+            if item.is_collapsible_whitespace {
                 line_builder.add_struts_of_inline_boxes_around(
                     item.node,
                     pending_leading_edges + item.margin_start + item.border_start + item.padding_start,
@@ -2594,9 +2985,22 @@ impl<'context> InlineFormattingContext<'context> {
                             placed_child.with_in_flow_box_insets(insets)
                         });
                     }
-                    if self.style(self.containing_block).text_wrap_mode() == text_wrap_mode::WRAP {
-                        let minimum = item.margin_start + item.border_box_inline_size() + item.margin_end;
-                        line_builder.break_if_needed(minimum);
+                    if item.can_break_before
+                        || (line_builder.current_line_is_empty()
+                            && self.style(self.containing_block).text_wrap_mode() == text_wrap_mode::WRAP)
+                    {
+                        // NB: The box goes on the line with whatever can't be broken from it after it, such as a box in
+                        //     the same nowrap inline box. A box by itself needs only its advance, which a negative end
+                        //     margin reduces.
+                        let box_inline_size = item.margin_start + item.border_box_inline_size() + item.margin_end;
+                        let needed_inline_size = if iterator.next_line_content_continues_run(self) {
+                            iterator
+                                .unbreakable_run_inline_size(self, &item, false)
+                                .max(box_inline_size)
+                        } else {
+                            box_inline_size
+                        };
+                        line_builder.break_if_needed(needed_inline_size);
                         line_builder.note_soft_wrap_opportunity();
                     }
                     if self.stops_at_line_clamp_point(line_builder, &mut state_at_clamp_point) {
@@ -2612,9 +3016,7 @@ impl<'context> InlineFormattingContext<'context> {
                     // https://drafts.csswg.org/css2/#anonymous-block-level
                     // NB: The inline boxes around the block-level box are broken around it, so they're on the line
                     //     before it and on the line after it.
-                    if takes_struts_of_inline_boxes_without_text {
-                        line_builder.add_struts_of_inline_boxes_around(item.node, CssPixels::default());
-                    }
+                    line_builder.add_struts_of_inline_boxes_around(item.node, CssPixels::default());
                     line_builder.finish_current_line_before_block_level_box();
                     if float_fit_trial {
                         break;
@@ -2644,9 +3046,7 @@ impl<'context> InlineFormattingContext<'context> {
                     self.margins_collapse_through_interrupting_blocks
                         .borrow_mut()
                         .insert(item.node, collapses_through);
-                    if takes_struts_of_inline_boxes_without_text {
-                        line_builder.add_struts_of_inline_boxes_around(item.node, CssPixels::default());
-                    }
+                    line_builder.add_struts_of_inline_boxes_around(item.node, CssPixels::default());
                 }
                 inline_level_iterator::ItemType::AbsolutelyPositionedElement => {
                     if !self.facts(item.node).is_box() {
@@ -2702,13 +3102,28 @@ impl<'context> InlineFormattingContext<'context> {
                             can_break_after_previous_overflow_item,
                         );
                         let overflow_break_allowed = !is_whitespace && self.overflow_break_applies_to_style(style);
+                        let has_soft_wraps = item.has_soft_wraps(iterator.prepared_content());
                         match opportunity {
                             TextItemWrapOpportunity::BeforeWhitespaceSequence(sequence_inline_size) => {
+                                // https://drafts.csswg.org/css-text-3/#white-space-phase-2
+                                // "If 'white-space' is set to 'pre-wrap', the UA must (unconditionally) hang this
+                                // sequence, unless the sequence is followed by a forced line break"
+                                if !item.is_collapsible_whitespace {
+                                    line_builder.set_hanging_whitespace_inline_size(
+                                        inline_level_iterator::inline_extent([&item]),
+                                    );
+                                }
+                                // NB: The white space ends the line it breaks, and so do the inline boxes that end with it.
+                                line_builder.set_end_edges_of_whitespace_at_break(
+                                    item.margin_end + item.border_end + item.padding_end,
+                                );
                                 let broke_line = if iterator.next_non_whitespace_text_allows_overflow_break(self) {
                                     line_builder.break_if_needed_before_overflow_breakable_item(sequence_inline_size)
                                 } else {
                                     line_builder.break_if_needed(sequence_inline_size)
                                 };
+                                line_builder.set_hanging_whitespace_inline_size(CssPixels::default());
+                                line_builder.set_end_edges_of_whitespace_at_break(CssPixels::default());
                                 if broke_line {
                                     line_builder.set_trailing_whitespace_on_previous_line(&item);
                                     let next_line_start = fragmentation::LinePosition {
@@ -2728,9 +3143,7 @@ impl<'context> InlineFormattingContext<'context> {
                                 let measure_rest_of_run = !is_whitespace
                                     && !run_fits_after_previous_whitespace
                                     && line_builder.can_break_before_next_item();
-                                let unbreakable_run_inline_size = if measure_rest_of_run
-                                    || item.has_soft_wraps(iterator.prepared_content())
-                                {
+                                let unbreakable_run_inline_size = if measure_rest_of_run || has_soft_wraps {
                                     let stop_at_overflow_breakable_text = opportunity
                                         == TextItemWrapOpportunity::AfterOverflowBreakableText
                                         || line_builder.current_line_is_empty();
@@ -2748,7 +3161,7 @@ impl<'context> InlineFormattingContext<'context> {
                             }
                             TextItemWrapOpportunity::None => {}
                         }
-                        if overflow_break_allowed || item.has_soft_wraps(iterator.prepared_content()) {
+                        if overflow_break_allowed || has_soft_wraps {
                             if self.break_overflowing_text_item(
                                 line_builder,
                                 iterator,
@@ -3104,7 +3517,7 @@ impl<'context> InlineFormattingContext<'context> {
             let remaining_items = iterator.items().iter().map(|item| (item.type_, item.node));
             for (item_type, node) in items_after_clamp_point.into_iter().chain(remaining_items) {
                 if item_type == inline_level_iterator::ItemType::Element {
-                    self.hide_atomic_inline_for_line_clamp(node);
+                    self.hide_atomic_inline(node);
                 } else if item_type == inline_level_iterator::ItemType::AbsolutelyPositionedElement
                     && self.facts(node).is_box()
                     && self.line_data().line_boxes.iter().any(|line| {
@@ -3137,7 +3550,8 @@ impl<'context> InlineFormattingContext<'context> {
                     .inline_length_before_block_ellipsis
                     .is_none()
                 {
-                    apply_text_overflow_to_line(&mut self.line_data_mut().line_boxes[line_index]);
+                    let mut line_data = self.line_data_mut();
+                    apply_text_overflow_to_line(&mut line_data.line_boxes[line_index], self);
                 }
             }
         }
@@ -3382,7 +3796,22 @@ impl<'context> InlineFormattingContext<'context> {
             }
             None => inline_level_iterator::InlineLevelIterator::new(self),
         };
+        let uses_token_ink_metrics = self.facts(self.containing_block).display().is_math_inside()
+            && matches!(
+                self.pass.arena().math_layout_kind(self.containing_block),
+                math_formatting_context::MathLayoutKind::Token
+                    | math_formatting_context::MathLayoutKind::Mtext
+                    | math_formatting_context::MathLayoutKind::Mo
+            )
+            && self
+                .pass
+                .children(self.containing_block)
+                .all(|child| self.facts(child).is_text_node())
+            && iterator.contains_only_unbreakable_text(self);
         self.generate_line_boxes(iterator);
+        if uses_token_ink_metrics && let [line] = self.line_data.get_mut().line_boxes.as_mut_slice() {
+            math_formatting_context::size_token_line_to_ink(line);
+        }
         if self.run.fragments.is_some() {
             self.fold_inline_ancestor_relative_insets_into_line_data();
             self.register_inline_anchor_candidates();
@@ -3899,8 +4328,8 @@ impl LinesWithoutLineBoxes {
         }
     }
 
-    pub(super) fn append_atomic_inline(&mut self, border_box_inline_size: CssPixels, container_wraps: bool) {
-        if container_wraps && self.breaks_before_next_fragment() {
+    pub(super) fn append_atomic_inline(&mut self, border_box_inline_size: CssPixels, can_break_before: bool) {
+        if can_break_before && self.breaks_before_next_fragment() {
             self.finish();
         }
         self.append(border_box_inline_size, false, CssPixels::default());
@@ -4015,7 +4444,6 @@ impl LinesWithoutLineBoxes {
 
 struct ContentSizingLines {
     lines: LinesWithoutLineBoxes,
-    container_wraps: bool,
     pending_start_margin: CssPixels,
     pending_start_border: CssPixels,
     pending_start_padding: CssPixels,
@@ -4023,10 +4451,9 @@ struct ContentSizingLines {
 }
 
 impl ContentSizingLines {
-    fn new(lines: LinesWithoutLineBoxes, container_wraps: bool) -> Self {
+    fn new(lines: LinesWithoutLineBoxes) -> Self {
         Self {
             lines,
-            container_wraps,
             pending_start_margin: CssPixels::default(),
             pending_start_border: CssPixels::default(),
             pending_start_padding: CssPixels::default(),
@@ -4114,7 +4541,7 @@ impl ContentSizingLines {
             }
             inline_level_iterator::ItemType::Element => {
                 self.lines
-                    .append_atomic_inline(border_box_inline_size, self.container_wraps);
+                    .append_atomic_inline(border_box_inline_size, item.can_break_before);
             }
             // An absolutely positioned box only takes a static position, which comes after the pending inline edges.
             inline_level_iterator::ItemType::AbsolutelyPositionedElement => {
@@ -4146,7 +4573,7 @@ impl ContentSizingLines {
                 };
                 // NB: Min-content breaks at every soft wrap opportunity, so content that ends in a soft hyphen ends
                 //     its line in a hyphen wherever the content after it can start a line. And min-content breaks
-                //     before every atomic inline in a container that wraps, as append_atomic_inline() does.
+                //     before every atomic inline that a line can break before, as append_atomic_inline() does.
                 let next_content = remaining_items.iter().find(|next| {
                     !matches!(
                         next.type_,
@@ -4156,8 +4583,9 @@ impl ContentSizingLines {
                     )
                 });
                 let breaks_after_item = next_content.is_some_and(|next| match next.type_ {
-                    inline_level_iterator::ItemType::Text => next.can_break_before,
-                    inline_level_iterator::ItemType::Element => self.container_wraps,
+                    inline_level_iterator::ItemType::Text | inline_level_iterator::ItemType::Element => {
+                        next.can_break_before
+                    }
                     _ => false,
                 });
                 if style.text_wrap_mode() == text_wrap_mode::WRAP {
@@ -4371,7 +4799,11 @@ pub(crate) fn elided_content_rect(line: &line_box::LineBoxData) -> Option<FfiCss
     } else {
         line_box_inline_start
     };
-    let content_inline_shift = content_inline_start - line_box_inline_start;
+    let content_inline_shift = if elision.ellipsis_fragment_inline_length_lost_on_left.is_some() {
+        CssPixels::default()
+    } else {
+        content_inline_start - line_box_inline_start
+    };
     let to_rect = |inline_start, block_start, inline_size, block_size, relpos_delta: FfiCssPixelPoint| {
         let (x, y) = geometry::to_physical(line.writing_mode, inline_start, block_start);
         let (width, height) = geometry::to_physical(line.writing_mode, inline_size, block_size);
@@ -4391,14 +4823,19 @@ pub(crate) fn elided_content_rect(line: &line_box::LineBoxData) -> Option<FfiCss
     );
     // NB: Like the fragments that were not elided, each elided fragment's content moves with its own relative
     //     positioning, so unite the elided content of each one where it would be without the ellipsis.
-    for (index, elided) in line.fragments.iter().enumerate().skip(ellipsis_index) {
-        let inline_size = if index == ellipsis_index {
-            elision.ellipsis_fragment_inline_length
+    for (index, elided) in line.fragments.iter().enumerate().filter(|(index, fragment)| {
+        !fragment.is_text_overflow_ellipsis && (*index == ellipsis_index || fragment.is_fully_truncated)
+    }) {
+        let (inline_start, inline_size) = if index == ellipsis_index {
+            (
+                elided.inline_offset - elision.ellipsis_fragment_inline_length_lost_on_left.unwrap_or_default(),
+                elision.ellipsis_fragment_inline_length,
+            )
         } else {
-            elided.inline_length
+            (elided.inline_offset, elided.inline_length)
         };
         rect.unite(to_rect(
-            elided.inline_offset + content_inline_shift,
+            inline_start + content_inline_shift,
             elided.block_offset,
             inline_size,
             elided.block_length,

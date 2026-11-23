@@ -23,6 +23,7 @@
 #include <core/SkPictureRecorder.h>
 #include <core/SkRRect.h>
 #include <core/SkSurface.h>
+#include <core/SkSurfaceProps.h>
 #include <core/SkTextBlob.h>
 #include <effects/SkDashPathEffect.h>
 #include <effects/SkGradient.h>
@@ -51,6 +52,9 @@ using namespace Compositing;
 
 struct DisplayListPlayerSkia::RasterState {
     AK_ALLOC_WITH_KMALLOC;
+
+    int base_save_count { 0 };
+    SkRect opaque_text_background { SkRect::MakeEmpty() };
 
     struct TileRaster {
         RustFFI::TileRaster tile;
@@ -124,11 +128,12 @@ struct DisplayListPlayerSkia::PainterCallbacks {
             .end_tile_raster = [](void* context) { PainterCallbacks::player(context).end_tile_raster(); },
             .begin_vector_image = [](void* context, RustFFI::VectorImagePlacement const* placement, bool requires_direct_replay) { return PainterCallbacks::player(context).begin_vector_image(*placement, requires_direct_replay); },
             .end_vector_image = [](void* context) { PainterCallbacks::player(context).end_vector_image(); },
+            .draw_surface = [](void* context, RustFFI::SurfaceDraw const* draw) { PainterCallbacks::player(context).draw_surface(*draw); },
         };
     }
 };
 
-RustFFI::FfiRasterPainter DisplayListPlayerSkia::begin_painting(Gfx::PaintingSurface& surface, DrawnFonts const& fonts, DrawnImageFrames const* image_frames, DisplayListRasterCache& raster_cache, OwnedCanvasSurfaces const* canvas_surfaces, CurrentVideoFrame current_video_frame)
+RustFFI::FfiRasterPainter DisplayListPlayerSkia::begin_painting(Gfx::PaintingSurface& surface, DrawnFonts const& fonts, DrawnImageFrames const* image_frames, DisplayListRasterCache& raster_cache, OwnedCanvasSurfaces const* canvas_surfaces, CurrentVideoFrame current_video_frame, bool allows_lcd_text)
 {
     VERIFY(m_surfaces.is_empty());
     m_surfaces.append(surface);
@@ -136,6 +141,8 @@ RustFFI::FfiRasterPainter DisplayListPlayerSkia::begin_painting(Gfx::PaintingSur
     m_image_frames = image_frames;
     m_raster_cache = &raster_cache;
     m_canvas_surfaces = canvas_surfaces;
+    m_allows_lcd_text = allows_lcd_text;
+    m_raster_state->base_save_count = surface.canvas().getSaveCount();
     m_current_video_frame = move(current_video_frame);
     return PainterCallbacks::for_player(*this);
 }
@@ -151,6 +158,8 @@ void DisplayListPlayerSkia::end_painting()
     m_image_frames = nullptr;
     m_raster_cache = nullptr;
     m_canvas_surfaces = nullptr;
+    m_allows_lcd_text = false;
+    m_raster_state->opaque_text_background = SkRect::MakeEmpty();
     m_current_video_frame = nullptr;
 }
 
@@ -325,7 +334,20 @@ void DisplayListPlayerSkia::play_command(DrawGlyphRun const& command)
     if (glyphs.is_empty())
         return;
 
-    auto blob = raster_cache().text_blob(font(command.font_id), command.font_id, command.scale, glyphs, command.font_smoothing);
+    auto& canvas = surface().canvas();
+    auto const& opaque_background = m_raster_state->opaque_text_background;
+    bool uses_lcd_text = !opaque_background.isEmpty()
+        && m_surfaces.size() == 1
+        && command.stroke_width == 0
+        && command.orientation == Gfx::Orientation::Horizontal
+        && canvas.getTopProps().pixelGeometry() != kUnknown_SkPixelGeometry
+        && canvas.getLocalToDeviceAs3x3().isTranslate();
+    if (uses_lcd_text) {
+        auto bounds = to_skia_rect(command.glyph_bounding_rect);
+        bounds.outset(2, 2);
+        uses_lcd_text = opaque_background.contains(canvas.getLocalToDeviceAs3x3().mapRect(bounds));
+    }
+    auto blob = raster_cache().text_blob(font(command.font_id), command.font_id, command.scale, glyphs, command.font_smoothing, uses_lcd_text);
     if (!blob)
         return;
 
@@ -337,7 +359,7 @@ void DisplayListPlayerSkia::play_command(DrawGlyphRun const& command)
         paint.setStrokeMiter(4);
         paint.setAntiAlias(true);
     }
-    draw_glyph_run(surface().canvas(), *blob, command.rect, command.translation, command.orientation, paint);
+    draw_glyph_run(canvas, *blob, command.rect, command.translation, command.orientation, paint);
 }
 
 static void apply_compositing_and_blending_operator(SkPaint& paint, Gfx::CompositingAndBlendingOperator compositing_and_blending_operator)
@@ -353,7 +375,23 @@ void DisplayListPlayerSkia::fill_rect(RustFFI::ResolvedFillRect const& fill)
     paint.setAntiAlias(true);
     paint.setColor(to_skia_color(fill.color));
     apply_compositing_and_blending_operator(paint, fill.compositing_and_blending_operator);
-    canvas.drawRect(to_skia_rect(fill.rect), paint);
+    auto rect = to_skia_rect(fill.rect);
+    canvas.drawRect(rect, paint);
+
+    if (m_allows_lcd_text
+        && fill.color.alpha() == 255
+        && fill.compositing_and_blending_operator == Gfx::CompositingAndBlendingOperator::Normal
+        && m_surfaces.size() == 1
+        && canvas.getSaveCount() == m_raster_state->base_save_count
+        && canvas.getTopProps().pixelGeometry() != kUnknown_SkPixelGeometry
+        && canvas.getLocalToDeviceAs3x3().isTranslate()) {
+        // This fill passed through only the compositor's damage clip, which also clips the text.
+        // Store the fill's bounds independent of that clip so partial repaints use the same edging.
+        auto opaque_bounds = SkRect::Make(canvas.getLocalToDeviceAs3x3().mapRect(rect).roundIn());
+        auto& opaque_background = m_raster_state->opaque_text_background;
+        if (opaque_background.isEmpty() || opaque_bounds.contains(opaque_background))
+            opaque_background = opaque_bounds;
+    }
 }
 
 void DisplayListPlayerSkia::play_command(PaintCaret const& command)
@@ -377,6 +415,19 @@ void DisplayListPlayerSkia::draw_composited_context(RustFFI::CompositedContextDr
     SkPaint paint;
     paint.setAntiAlias(true);
     canvas.drawImageRect(image.get(), src_rect, dst_rect, to_skia_sampling_options(command.scaling_mode), &paint, SkCanvas::kStrict_SrcRectConstraint);
+}
+
+// Default sampling lands a tile's pixels unchanged where both rects have one size, as when the compositor copies them
+// outside the replay.
+void DisplayListPlayerSkia::draw_surface(RustFFI::SurfaceDraw const& draw)
+{
+    auto image = static_cast<Gfx::PaintingSurface*>(draw.surface)->sk_image_snapshot<sk_sp<SkImage>>();
+    if (!image)
+        return;
+    SkPaint paint;
+    paint.setBlendMode(SkBlendMode::kSrcOver);
+    auto sampling = draw.filtered ? SkSamplingOptions { SkFilterMode::kLinear } : SkSamplingOptions {};
+    surface().canvas().drawImageRect(image.get(), to_skia_rect(draw.source_rect), to_skia_rect(draw.target_rect), sampling, &paint, SkCanvas::kStrict_SrcRectConstraint);
 }
 
 void DisplayListPlayerSkia::play_command(DrawCanvas const& command)
@@ -430,9 +481,10 @@ sk_sp<SkColorFilter> force_dark_image_color_filter()
     // be an exit-time destructor. The filter takes no uniforms, so one instance serves every draw.
     static auto* filter = [] {
         auto result = SkRuntimeEffect::MakeForColorFilter(SkString(R"(
-            const float LIGHTNESS_LIFT = 1.20;
+            const float LIGHTNESS_LIFT = 1.2264;
             const float GRAY_BRIGHTNESS_THRESHOLD = 32.0 / 255.0;
-            const float GRAY_ADJUSTED_BRIGHTNESS = 18.0 / 255.0;
+            const float GRAY_BAND_FLOOR = 18.0 / 255.0;
+            const float3 DARK_SURFACE = float3(28.0, 28.0, 30.0) / 255.0;
 
             float3 to_linear(float3 c) {
                 return mix(c / 12.92, pow((c + 0.055) / 1.055, float3(2.4)), step(float3(0.04045), c));
@@ -479,8 +531,8 @@ sk_sp<SkColorFilter> force_dark_image_color_filter()
                 // Grays landing in the band snap to one dark surface color, rather than a spread of near-blacks.
                 float epsilon = 1.0 / 255.0;
                 if (abs(inverted.r - inverted.g) <= epsilon && abs(inverted.r - inverted.b) <= epsilon
-                    && inverted.r < GRAY_BRIGHTNESS_THRESHOLD && inverted.r > GRAY_ADJUSTED_BRIGHTNESS) {
-                    inverted = float3(GRAY_ADJUSTED_BRIGHTNESS);
+                    && inverted.r < GRAY_BRIGHTNESS_THRESHOLD && inverted.r > GRAY_BAND_FLOOR) {
+                    inverted = DARK_SURFACE;
                 }
 
                 return half4(half3(inverted) * color.a, color.a);
@@ -1348,7 +1400,10 @@ void DisplayListPlayerSkia::play_command(PaintConicGradient const& command)
     auto color_space = SkColorSpace::MakeSRGB();
     auto interpolation = to_skia_interpolation(command.interpolation_method);
     SkGradient gradient { SkGradient::Colors { { colors.data(), colors.size() }, { color_stop_positions.data(), color_stop_positions.size() }, SkTileMode::kRepeat, color_space }, interpolation };
-    auto shader = SkShaders::SweepGradient(to_skia_point(center), 0, 360, gradient, &matrix);
+    // The stops' positions run from the first stop's fraction of a turn across as many turns as the gradient's span.
+    auto start_degrees = command.first_stop_position * 360;
+    auto end_degrees = (command.first_stop_position + command.repeat_length) * 360;
+    auto shader = SkShaders::SweepGradient(to_skia_point(center), start_degrees, end_degrees, gradient, &matrix);
 
     SkPaint paint;
     paint.setDither(true);
@@ -1567,6 +1622,11 @@ void DisplayListPlayerSkia::push_transform(Gfx::AffineTransform const& transform
 void DisplayListPlayerSkia::push_layer(ReplayLayer const& layer)
 {
     auto& canvas = surface().canvas();
+    if (layer.can_draw_directly_for_lcd_text && m_surfaces.size() == 1 && !m_raster_state->opaque_text_background.isEmpty()) {
+        canvas.save();
+        return;
+    }
+
     SkPaint paint;
     bool paint_has_effects = false;
 
@@ -1588,7 +1648,7 @@ void DisplayListPlayerSkia::push_layer(ReplayLayer const& layer)
     if (!layer.backdrop_filter_bytes_size) {
         if (layer.content_bounds.has_value()) {
             auto content_bounds = to_skia_rect(*layer.content_bounds);
-            canvas.saveLayer(&content_bounds, &paint);
+            canvas.saveLayer(content_bounds, &paint);
         } else {
             canvas.saveLayer(nullptr, &paint);
         }

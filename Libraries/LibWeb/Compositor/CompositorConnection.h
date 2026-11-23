@@ -13,10 +13,8 @@
 #include <AK/Optional.h>
 #include <Compositor/CompositorWebContentClientEndpoint.h>
 #include <Compositor/CompositorWebContentServerEndpoint.h>
-#include <LibCompositing/DisplayList/Canvas2DCommandStream.h>
 #include <LibCompositing/DisplayList/DisplayListResources.h>
 #include <LibCompositing/Types.h>
-#include <LibCompositing/WebGL/Types.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/Point.h>
 #include <LibGfx/Rect.h>
@@ -34,6 +32,7 @@ namespace Web::Layout::RustFFI {
 
 struct DocumentHost;
 struct FfiImageRasterization;
+enum class RasterizationOutcome : u8;
 
 }
 
@@ -70,11 +69,14 @@ public:
     void add_video_sink(Media::VideoSinkHandle, NonnullRefPtr<Compositing::VideoFramePresentationPage>);
     void remove_video_sink(Media::VideoSinkHandle);
     void release_video_frame_hold(Media::VideoSinkHandle, u64 generation);
-    void set_video_sink_ticking(Media::VideoSinkHandle, bool should_tick);
-    Optional<Compositing::CanvasId> create_canvas_2d_context(Gfx::IntSize, bool alpha, bool will_read_frequently, Gfx::ColorSpace const&);
-    void update_canvas_2d_stream(Compositing::Canvas2DCommandStream&);
-    void destroy_canvas_context(Compositing::CanvasId);
-    Gfx::ShareableBitmap get_canvas_pixels(Compositing::CanvasId, Gfx::IntRect, Gfx::AlphaType = Gfx::AlphaType::Premultiplied, Gfx::ColorSpace const& = {});
+    // Waits for the compositor to say that the sink's frame follows its clock, until the deadline if there is one.
+    void bring_video_sink_up_to_date(Media::VideoSinkHandle, Optional<MonotonicTime> deadline);
+    RefPtr<IPC::ThreadSafeMessagePoster> poster_while_compositor_is_reachable();
+    bool post_canvas_2d_stream_batch_fonts_and_image_frames(ReadonlySpan<Gfx::Font const*>, ReadonlySpan<Gfx::DecodedImageFrame const*>);
+    void did_fail_to_post_canvas_2d_message();
+    bool register_image_frames(ReadonlySpan<Gfx::DecodedImageFrame const*>);
+    bool can_send_message_to_compositor() const;
+    u64 serial() const { return m_serial; }
     Optional<Web::Compositor::PlaceholderCanvasLink> allocate_placeholder_canvas();
     void release_placeholder_canvas(Compositing::CanvasId);
     void commit_placeholder_canvas(Web::Compositor::PlaceholderCanvasLink, Optional<Compositing::CanvasId> source_canvas_id, Gfx::IntSize, bool origin_clean);
@@ -104,17 +106,6 @@ public:
     // compositor has their frames, or once it is lost.
     void prepare_remote_descendants_for_screenshot(Web::CompositorContextId, Function<void()>&& callback);
 
-    Optional<Compositing::CanvasId> create_webgl_context(Compositing::WebGL::WebGLVersion, Gfx::IntSize, bool depth, bool stencil, bool antialias, Vector<String>& out_supported_extensions);
-    void set_webgl_command_buffer(Compositing::CanvasId, Core::AnonymousBuffer const&);
-    void send_webgl_commands_from_shared_buffer(Compositing::CanvasId, u64 offset, u64 size_in_bytes, u64 flush_sequence_number, Vector<Compositing::WebGL::ImageSourceFrame> const& frames);
-    bool drain_webgl_command_buffer(Compositing::CanvasId);
-    void send_webgl_commands(Compositing::CanvasId, ReadonlyBytes, Vector<Compositing::WebGL::ImageSourceFrame> const& frames);
-    void present_webgl_canvas(Compositing::CanvasId, bool preserve_drawing_buffer);
-    void clear_webgl_drawing_buffer(Compositing::CanvasId);
-    ByteBuffer webgl_sync_call(Compositing::CanvasId, ByteBuffer request);
-    Compositing::WebGL::ReadPixelsResult read_webgl_pixels(Compositing::CanvasId, Compositing::WebGL::GLint x, Compositing::WebGL::GLint y, Compositing::WebGL::GLsizei width, Compositing::WebGL::GLsizei height, Compositing::WebGL::GLenum format, Compositing::WebGL::GLenum type, Compositing::WebGL::GLsizei buf_size, Core::AnonymousBuffer const& pixels);
-    bool read_webgl_buffer_sub_data(Compositing::CanvasId, Compositing::WebGL::GLenum target, Compositing::WebGL::GLintptr offset, Compositing::WebGL::GLintptr size, Core::AnonymousBuffer const& data);
-
     void ensure_video_presentation_channel();
     void ensure_image_decoder_channel();
     // Takes up the render clock channel the Browser made between this process and the Compositor, which delivers
@@ -143,8 +134,8 @@ private:
     virtual void rendering_opportunity(Web::CompositorContextId, i64 frame_time_nanoseconds, double frame_interval_milliseconds) override;
     virtual void async_scroll_updates(Web::CompositorContextId, Compositing::PendingAsyncScrollUpdates) override;
     virtual void animated_content_moved_under_pointer(Web::CompositorContextId, i64 frame_time_nanoseconds) override;
-    virtual void did_rasterize_display_list(u64 token, bool success) override;
-    bool wait_for_rasterization(u64 token);
+    bool did_rasterize(Layout::RustFFI::RasterizationOutcome);
+    virtual void video_sink_is_up_to_date(u64 token) override;
     virtual void did_complete_screenshot(Compositing::ScreenshotRequestId) override;
     virtual void did_fail_screenshot(Compositing::ScreenshotRequestId) override;
     virtual void paint_contexts_for_screenshot(u64 preparation_id, Vector<Web::CompositorContextId>) override;
@@ -153,14 +144,11 @@ private:
     virtual void placeholder_canvas_committed(Compositing::CanvasId, Gfx::IntSize, bool origin_clean) override;
     virtual void overlay_scrollbar_visibilities_changed(Vector<Web::OverlayScrollbarVisibility>) override;
 
-    bool can_send_message_to_compositor() const;
     void merge_async_scroll_updates(Web::CompositorContextId, Compositing::PendingAsyncScrollUpdates);
     Optional<PendingScreenshot> take_screenshot(Compositing::ScreenshotRequestId);
 
     // Posts to the transport from any thread: the Paint thread presents through it, and Rust posts what it encodes.
     NonnullRefPtr<IPC::ThreadSafeMessagePoster> m_poster;
-    u64 m_next_reserved_canvas_id { 0 };
-    u64 m_reserved_canvas_ids_remaining { 0 };
 
     HashMap<Compositing::ScreenshotRequestId, PendingScreenshot> m_screenshots;
     HashMap<u64, Function<void()>> m_remote_descendant_preparations;
@@ -169,6 +157,8 @@ private:
     HashMap<Web::CompositorContextId, Compositing::PendingAsyncScrollUpdates> m_pending_async_scroll_updates;
     u64 m_next_screenshot_request_id { 1 };
     Atomic<u64> m_next_rasterization_token { 1 };
+    u64 m_serial { 0 };
+    u64 m_next_video_sink_up_to_date_token { 1 };
     bool m_has_lost_compositor { false };
     // The media server whose presentation channel the Compositor holds; a replacement server needs a new channel.
     Optional<u64> m_video_presentation_channel_media_client_generation;

@@ -34,6 +34,16 @@ void Application::create_platform_arguments(Core::ArgsParser& args_parser)
 {
     args_parser.add_option(m_encoded_ui_info, "What the UI tells the Hub to start with", "ui-info", 0, "hex");
     args_parser.add_option(m_ui_mach_server_name, "Mach server to get the connection to the UI from", "ui-mach-server", 0, "name");
+    // NB: main() reads this itself, before the arguments are parsed.
+    args_parser.add_option(m_ui_pid, "Process of the UI, which the Hub ends with", "ui-pid", 0, "pid");
+}
+
+Optional<pid_t> Application::ui_process_id() const
+{
+    auto pid = m_ui_pid.to_number<pid_t>();
+    if (!pid.has_value() || *pid <= 0)
+        return {};
+    return pid;
 }
 
 Hub::UIInfo const* Application::ui_info() const
@@ -68,9 +78,15 @@ bool Application::ui_has_translator() const
 void Application::set_ui_info(Hub::UIInfo info)
 {
     auto scrollbar_track_press_jumps_changed = !m_ui_info.has_value() || m_ui_info->scrollbar_track_press_jumps != info.scrollbar_track_press_jumps;
+    auto prefers_reduced_motion_changed = !m_ui_info.has_value() || m_ui_info->prefers_reduced_motion != info.prefers_reduced_motion;
+    auto prefers_more_contrast_changed = !m_ui_info.has_value() || m_ui_info->prefers_more_contrast != info.prefers_more_contrast;
     m_ui_info = move(info);
     if (scrollbar_track_press_jumps_changed)
         platform_scrollbar_track_press_behavior_changed();
+    if (prefers_reduced_motion_changed)
+        platform_motion_preference_changed();
+    if (prefers_more_contrast_changed)
+        platform_contrast_preference_changed();
 }
 
 View& Application::create_view(View::InitialState initial_state, Optional<WebView::CanonicalTraversable&> traversable)
@@ -238,6 +254,7 @@ void Application::display_error_dialog(StringView error_message) const
         WebView::Application::display_error_dialog(error_message);
 }
 
+#if defined(LADYBIRD_HAS_UPDATE_CHECK)
 void Application::display_update_check_result(WebView::UpdateCheckResult const& result, WebView::UpdateCheckTrigger trigger)
 {
     auto* ui = ConnectionFromUI::the();
@@ -252,6 +269,7 @@ void Application::display_update_check_result(WebView::UpdateCheckResult const& 
     }
     ui->async_app_display_update_check_result(result.kind, move(version), install_method, trigger);
 }
+#endif
 
 void Application::set_clipboard_text(String text, ClipboardType type)
 {
@@ -352,6 +370,13 @@ Core::EventLoop& Application::create_platform_event_loop()
     return event_loop;
 }
 
+NonnullOwnPtr<WebView::DefaultBrowser> Application::create_default_browser()
+{
+    if (ui_info())
+        return make<DefaultBrowserInUI>();
+    return WebView::Application::create_default_browser();
+}
+
 NonnullOwnPtr<WebView::MicrophoneAuthorizer> Application::create_microphone_authorizer()
 {
     // NB: The UI tells of no authorization where the system has no say over the microphone.
@@ -386,6 +411,12 @@ void Application::on_devtools_disabled() const
     WebView::Application::on_devtools_disabled();
     if (auto* ui = ConnectionFromUI::the())
         ui->async_app_did_disable_devtools();
+}
+
+void Application::on_compositor_gpu_painting_changed() const
+{
+    if (auto* ui = ConnectionFromUI::the())
+        ui->async_app_gpu_painting_changed(compositor_gpu_painting_enabled());
 }
 
 void Application::create_platform_actions()
@@ -441,6 +472,7 @@ OwnPtr<WebView::PictureInPictureWindow> Application::create_picture_in_picture_w
     auto initial_state = owner_view.initial_state_for_related_view();
     initial_state.owner_view_id = owner_view.view_id();
     initial_state.is_tab = false;
+    initial_state.scales_frames_to_fit = true;
     auto screen_size = owner_view.screen_size();
     auto& view = create_view(move(initial_state), traversable);
     return make<PictureInPictureWindowInUI>(view, owner_view.view_id(), video_size, WebView::PictureInPictureWindow::initial_size(video_size, screen_size));
@@ -574,6 +606,24 @@ bool Application::platform_scrollbar_track_press_jumps() const
     if (auto const* info = ui_info())
         return info->scrollbar_track_press_jumps;
     return WebView::Application::platform_scrollbar_track_press_jumps();
+}
+
+bool Application::platform_prefers_reduced_motion() const
+{
+    if (m_host)
+        return m_host->platform_prefers_reduced_motion();
+    if (auto const* info = ui_info())
+        return info->prefers_reduced_motion;
+    return WebView::Application::platform_prefers_reduced_motion();
+}
+
+bool Application::platform_prefers_more_contrast() const
+{
+    if (m_host)
+        return m_host->platform_prefers_more_contrast();
+    if (auto const* info = ui_info())
+        return info->prefers_more_contrast;
+    return WebView::Application::platform_prefers_more_contrast();
 }
 
 Vector<String> Application::platform_preferred_languages() const

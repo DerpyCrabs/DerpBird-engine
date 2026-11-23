@@ -20,11 +20,12 @@ use crate::frame_inputs::FrameInputs;
 use crate::host::{ContextTimer, Host, PendingFrame, PresentationId, WebContentClientId};
 use crate::input_event::is_keyboard_scroll_key;
 use crate::keyboard_scroll_controller::{KeyRelease, KeyStep, KeyboardScrollController};
-use crate::overlays::{ContextOverlays, UIOverlays};
+use crate::overlays::{ContextOverlays, UIOverlays, UIOverlaysChange};
 use crate::scroll_fling_controller::ScrollFlingController;
 use crate::scroll_snap_controller::{ScrollSnapController, SnapScrollStart, StepDecision};
 use crate::scrollbar_controller::{Drag, ScrollbarController};
 use crate::wheel_gesture_routing::{ResolvedLatch, WheelGestureIdAllocator, WheelGestureRouting};
+use libcompositing_rust::display_list::layers::UnvalidatedLayerPlan;
 use libcompositing_rust::ipc_types::{
     Compositing_AsyncScrollOperationTracking as AsyncScrollOperationTracking,
     Compositing_ContextVisibility as ContextVisibility, Compositing_RequestedRelativeScroll as RequestedRelativeScroll,
@@ -35,7 +36,7 @@ use libcompositing_rust::scrolling::smooth_scroll_animation::SmoothScrollAnimati
 use libcompositing_rust::scrolling::wheel_gesture_identity::TouchpadGestureEnd;
 use libcompositing_rust::scrolling::*;
 use libcompositing_rust::time::{Duration, MonotonicTime};
-use libgfx_rust::{FloatPoint, IntRect, IntSize, Orientation, enclosing_int_rect};
+use libgfx_rust::{FloatPoint, IntRect, IntSize, Orientation};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -43,7 +44,7 @@ use std::rc::Rc;
 pub struct AsyncScrollEnqueueResult {
     pub accepted: bool,
     pub operation_id: Option<AsyncScrollOperationID>,
-    // Why the compositor took or turned away a wheel step, and the scroller it routed the step to.
+    /// Why the compositor took or turned away a wheel step, and the scroller it routed the step to.
     pub routing_decision: Option<InputRoutingDecision>,
     pub routed_scroller: Option<AsyncScrollNodeStableID>,
 }
@@ -66,15 +67,15 @@ impl AsyncScrollResult {
     }
 }
 
-// A wheel step that goes to a context nested in this one: the first step of a gesture over the content of the
-// nested context, or a step of a gesture latched to a context nested here.
+/// A wheel step that goes to a context nested in this one: the first step of a gesture over the content of the
+/// nested context, or a step of a gesture latched to a context nested here.
 pub struct NestedContextWheelStep {
     pub context_id: CompositorContextId,
-    // Where the first step lands in the content of the nested context.
+    /// Where the first step lands in the content of the nested context.
     pub hit: Option<NestedContextHit>,
 }
 
-// An operation that a wheel step asked to follow, whose end the scroll updates of the context report.
+/// An operation that a wheel step asked to follow, whose end the scroll updates of the context report.
 pub struct TrackedScrollOperation {
     pub context_id: CompositorContextId,
     pub operation_id: AsyncScrollOperationID,
@@ -85,18 +86,18 @@ pub struct ContextUpdateResult {
     pub accepted: bool,
     pub frame_to_present: Option<PendingFrame>,
     pub should_request_rendering_update: bool,
-    // Whether a key event found nothing to scroll by the compositor's scroll range, which may lag behind the page's.
+    /// Whether a key event found nothing to scroll by the compositor's scroll range, which may lag behind the page's.
     pub key_found_nothing_to_scroll: bool,
     pub scrollbar_dragged_by_compositor: Option<ScrollbarDraggedByCompositor>,
-    // Why a wheel or mouse event was taken or turned away, and the scroller it was routed to.
+    /// Why a wheel or mouse event was taken or turned away, and the scroller it was routed to.
     pub routing_decision: Option<InputRoutingDecision>,
     pub routed_scroller: Option<AsyncScrollNodeStableID>,
-    // How the first step of a wheel gesture went by a nested context, ahead of `routing_decision`.
+    /// How the first step of a wheel gesture went by a nested context, ahead of `routing_decision`.
     pub nested_context_hand_off: Option<InputRoutingDecision>,
-    // Set instead of everything else for a wheel step that a nested context is to take.
+    /// Set instead of everything else for a wheel step that a nested context is to take.
     pub nested_context_wheel_step: Option<NestedContextWheelStep>,
-    // Set, with at most the frame of the scrollbar the pointer left here, for a mouse event that the nested context
-    // under the pointer is to take.
+    /// Set, with at most the frame of the scrollbar the pointer left here, for a mouse event that the nested context
+    /// under the pointer is to take.
     pub nested_context_mouse_hit: Option<NestedContextHit>,
     pub tracked_scroll_operation: Option<TrackedScrollOperation>,
 }
@@ -110,43 +111,43 @@ impl ContextUpdateResult {
     }
 }
 
-// A step of a wheel gesture at a position in this context's device pixels. The delta is in CSS pixels, with the axes
-// already swapped for Shift.
+/// A step of a wheel gesture at a position in this context's device pixels. The delta is in CSS pixels, with the axes
+/// already swapped for Shift.
 pub struct WheelStep {
     pub position: FloatPoint,
     pub delta_in_css_pixels: FloatPoint,
     pub wheel_delta_precision: WheelDeltaPrecision,
     pub scroll_gesture_phase: ScrollGesturePhase,
-    // The gesture the step is in, which the latch a context takes for the step is for. A context nested in another
-    // one takes it for the gesture of the containing context.
+    /// The gesture the step is in, which the latch a context takes for the step is for. A context nested in another
+    /// one takes it for the gesture of the containing context.
     pub gesture_id: Option<u64>,
     pub operation_tracking: AsyncScrollOperationTracking,
 }
 
-// What the wheel event listeners of the page that dispatches a gesture's wheel events let through without waiting
-// for the page. That page may be the page of a context nested in this one.
+/// What the wheel event listeners of the page that dispatches a gesture's wheel events let through without waiting
+/// for the page. That page may be the page of a context nested in this one.
 #[derive(Default)]
 pub struct WheelEventListenerGate {
-    // The page dispatched a step of the gesture and did not cancel it, and the listeners are as they were then.
+    /// The page dispatched a step of the gesture and did not cancel it, and the listeners are as they were then.
     pub page_let_the_gesture_through: bool,
-    // Why the listeners hold the steps of a latched gesture back for the page, if they do.
+    /// Why the listeners hold the steps of a latched gesture back for the page, if they do.
     pub reason_to_hold_latched_steps_back: Option<InputRoutingDecision>,
 }
 
-// What may hold a step back for the page before this context scrolls by it.
+/// What may hold a step back for the page before this context scrolls by it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WheelStepAdmission {
-    // The wheel event listeners of this context's page see the step, which waits for the page if they may cancel it.
+    /// The wheel event listeners of this context's page see the step, which waits for the page if they may cancel it.
     ByThisPage,
-    // A context nested in this one passed the step on. Only the page of that context sees the step.
+    /// A context nested in this one passed the step on. Only the page of that context sees the step.
     PassedOnByNestedContext,
-    // The page let the gesture through. Nothing holds the step back, and a step that finds nothing to scroll is done
-    // with all the same, so that the page is not asked about the gesture again.
+    /// The page let the gesture through. Nothing holds the step back, and a step that finds nothing to scroll is done
+    /// with all the same, so that the page is not asked about the gesture again.
     LetThroughByThePage,
 }
 
-// Where the first step of a gesture that the containing context hands in goes in this context. A nested context
-// passes a step on to the document around it unless one of its scrollers takes or keeps it.
+/// Where the first step of a gesture that the containing context hands in goes in this context. A nested context
+/// passes a step on to the document around it unless one of its scrollers takes or keeps it.
 pub struct FirstWheelStepRoute {
     pub kind: FirstWheelStepRouteKind,
     pub decision: InputRoutingDecision,
@@ -164,25 +165,25 @@ pub enum FirstWheelStepRouteKind {
     PassedOn,
 }
 
-// What a presenting context keeps of the contexts nested in it that the pointer is in, with positions in the device
-// pixels of those contexts.
+/// What a presenting context keeps of the contexts nested in it that the pointer is in, with positions in the device
+/// pixels of those contexts.
 #[derive(Default)]
 pub struct PointerInNestedContexts {
-    // The context whose scrollbar the pointer is dragging, which takes the pointer wherever it goes until the drag
-    // ends.
+    /// The context whose scrollbar the pointer is dragging, which takes the pointer wherever it goes until the drag
+    /// ends.
     pub context_with_captured_scrollbar: Option<CompositorContextId>,
     pub last_position_in_context_with_captured_scrollbar: FloatPoint,
     pub context_under_pointer: Option<CompositorContextId>,
 }
 
-// What this context noted of a wheel event as the event arrived.
+/// What this context noted of a wheel event as the event arrived.
 pub struct NotedWheelEvent {
     pub wheel_gesture_mark: WheelGestureMark,
-    // Only the first step of a gesture that moves anything goes to a nested context.
+    /// Only the first step of a gesture that moves anything goes to a nested context.
     pub is_first_wheel_event_with_delta: bool,
 }
 
-// What the presentation a context is shown through makes of the user's scrolling.
+/// What the presentation a context is shown through makes of the user's scrolling.
 pub struct ScrollCapabilities {
     pub synthesizes_scroll_momentum: bool,
     pub scrolls_elastically: bool,
@@ -203,8 +204,8 @@ impl Default for ScrollCapabilities {
 
 pub struct ScreenshotInputs {
     pub frame_inputs: FrameInputs,
-    // The scrollbar fade damage that the screenshot does not present on screen.
-    pub scrollbar_fade_damage_rect: IntRect,
+    /// Whether a scrollbar fade changed for the screenshot, which a frame then presents on screen.
+    pub scrollbar_fades_changed: bool,
 }
 
 struct ActiveSmoothScrollAnimation {
@@ -213,8 +214,7 @@ struct ActiveSmoothScrollAnimation {
     animation: SmoothScrollAnimation,
     started_at: MonotonicTime,
     is_user_scroll: bool,
-    // Whether the scroll goes to an end of the scroll range, as the Home and End keys scroll.
-    heads_to_an_extent: bool,
+    heads_to_end_of_scroll_range: bool,
 }
 
 struct VisualViewportScrollDelta {
@@ -257,14 +257,13 @@ struct WheelGestureLatchAttempt {
     latched_scroll_node_index: Option<SpatialNodeIndex>,
 }
 
-// A press beside the thumb that pages toward the pointer for as long as it is held.
 #[derive(Clone, Copy, Default)]
 struct ScrollbarPaging {
     direction: i32,
     primary_position: f32,
 }
 
-// Collects the routing decisions of input events while a test asks for them.
+/// Collects the routing decisions of input events while a test asks for them.
 #[derive(Default)]
 pub struct InputTraceRecorder {
     records: Option<Vec<InputTraceRecord>>,
@@ -284,7 +283,7 @@ impl InputTraceRecorder {
         };
         records.push(record);
     }
-    // Returns what was recorded since the trace began, and stops recording.
+    /// Returns what was recorded since the trace began, and stops recording.
     pub fn take(&mut self) -> Vec<InputTraceRecord> {
         self.records.take().unwrap_or_default()
     }
@@ -319,7 +318,6 @@ pub struct ContextState {
     context_user_input_scroll_count: u64,
     // The boxes the last frame brought, whose offsets came from that frame's snapshot.
     scroll_nodes_seeded_by_last_frame: HashSet<AsyncScrollNodeStableID>,
-    // Whether this context has scrolled boxes to offsets that WebContent's last frame does not have them at.
     scroll_offsets_differ_from_last_frame: bool,
     // The document whose visual viewport this context zoomed or panned, which it presents as it left it from then on.
     visual_viewport_document_id: Option<UniqueNodeId>,
@@ -581,7 +579,7 @@ impl ContextState {
             || self.elastic_overscroll_controller.has_rebound()
             || self.visual_animations_need_frame(now)
             || self.scrollbar_controller.fades_need_frame(now)
-            || self.overlays.fades_need_frame()
+            || self.overlays.fades_or_compositor_layers_overlay_need_frame()
     }
     pub fn has_active_scroll_fling(&self) -> bool {
         self.scroll_fling_controller.is_active()
@@ -615,18 +613,20 @@ impl ContextState {
         }
     }
 
-    pub fn timer_fired(&mut self, timer: ContextTimer, now: MonotonicTime) -> Option<IntRect> {
+    /// Answers whether the timer asks for a frame, as each blink of a caret does.
+    pub fn timer_fired(&mut self, timer: ContextTimer, now: MonotonicTime) -> bool {
         match timer {
             ContextTimer::ScrollStepGestureInput => self.end_scroll_step_gestures_whose_input_ran_out(now),
             ContextTimer::ScrollbarPaging => {
                 self.scrollbar_paging_timer_is_armed = false;
-                // Paging ends with the press, and with the scrollbar the press holds.
                 if self.scrollbar_paging.is_none() || !self.scrollbar_controller.has_captured_scrollbar() {
                     self.stop_scrollbar_paging();
-                    return None;
+                    return false;
                 }
                 // Once the thumb reaches the pointer, paging waits for the pointer to move.
-                self.page_captured_scrollbar(now)?;
+                if self.page_captured_scrollbar(now).is_none() {
+                    return false;
+                }
                 self.request_rendering_update();
                 self.request_display_ticks_if_needed(now);
                 self.host.set_timer(
@@ -638,16 +638,18 @@ impl ContextState {
             }
             ContextTimer::ScrollbarFadeOut => self.request_display_ticks_if_needed(now),
             ContextTimer::CaretBlink => {
-                let damage_rect = self.damage_rect_of_blinking_carets();
                 self.schedule_next_caret_blink(now);
-                if !damage_rect.is_empty() {
-                    return Some(damage_rect);
-                }
+                // The frame finds what the blink changes in the content hashes of what draws each caret.
+                return true;
             }
             // The core handles the timers of presenting.
-            ContextTimer::BackingStoreShrink | ContextTimer::SurplusStoreRetirement => {}
+            ContextTimer::BackingStoreShrink
+            | ContextTimer::SurplusStoreRetirement
+            | ContextTimer::HiddenStoreRetirement
+            | ContextTimer::SpareTileEviction
+            | ContextTimer::TileRasterScratchSurfaceRelease => {}
         }
-        None
+        false
     }
 
     pub fn request_rendering_update(&mut self) {
@@ -720,7 +722,7 @@ impl ContextState {
         }
     }
 
-    // Whether the scroll offsets here moved past those of the last frame WebContent presented.
+    /// Whether the scroll offsets here moved past those of the last frame WebContent presented.
     pub fn scrolled_since_last_frame(&self) -> bool {
         self.has_pending_async_scroll_updates()
             || self.scroll_offsets_differ_from_last_frame
@@ -761,7 +763,7 @@ impl ContextState {
         self.parent_context_id = parent_context_id;
     }
 
-    // Returns false, leaving everything as it was, for scrolling state with numbers no scroll can be calculated with.
+    /// Returns false, leaving everything as it was, for scrolling state with numbers no scroll can be calculated with.
     pub fn install_display_list_update(
         &mut self,
         display_list: Rc<DisplayList>,
@@ -834,10 +836,9 @@ impl ContextState {
         self.has_async_scrolling_state = true;
     }
 
-    // Repaints the blinking caret of a display list each time its blink cycle turns it on or off.
     fn restart_caret_blink_for(&mut self, display_list: &DisplayList, now: MonotonicTime) {
         let mut blink_cycle_start_time_ns = None;
-        display_list.for_each_caret(|_, _, caret| {
+        display_list.for_each_caret(|caret| {
             if caret.should_blink {
                 blink_cycle_start_time_ns = Some(caret.blink_cycle_start_time_ns);
             }
@@ -867,43 +868,26 @@ impl ContextState {
         );
     }
 
-    fn damage_rect_of_blinking_carets(&mut self) -> IntRect {
-        if self.scene.display_list().is_none() || self.scene.visual_context_tree().is_none() {
-            return Default::default();
-        }
-        let display_list = self.scene.display_list().as_ref().unwrap().clone();
-        let visual_context_tree = self.scene.visual_context_tree_for_compositing().clone();
-        let stretched_scroll_state_snapshot = self.scroll_state_snapshot_stretched_by_elastic_overscrolls();
-        let presented_scroll_state_snapshot = stretched_scroll_state_snapshot
-            .as_ref()
-            .unwrap_or(&self.scroll_state_snapshot);
-        let mut damage_rect = IntRect::default();
-        let viewport_rect = IntRect::new(0, 0, self.viewport_size.width, self.viewport_size.height);
-        display_list.for_each_caret(|context, bounding_rect, caret| {
-            if !caret.should_blink {
-                return;
-            }
-            let mut rect = visual_context_tree.transform_rect_to_viewport(
-                context.spatial,
-                bounding_rect.to_float(),
-                presented_scroll_state_snapshot,
-                IncludeVisualViewportTransform::Yes,
-            );
-            if !rect.x.is_finite() || !rect.y.is_finite() || !rect.width.is_finite() || !rect.height.is_finite() {
-                damage_rect = viewport_rect;
-                return;
-            }
-            rect = rect.intersected(viewport_rect.to_float());
-            if !rect.is_empty() {
-                damage_rect = damage_rect.united(enclosing_int_rect(rect).inflated_edges(1, 1, 1, 1));
-            }
-        });
-        damage_rect = damage_rect.intersected(viewport_rect);
-        damage_rect
+    pub fn forget_layer_plan(&mut self) {
+        self.scene.forget_layer_plan();
     }
 
-    // Returns false for a tree that does not fit the installed display list, which keeps the tree it has and takes only
-    // the scroll state that pairs with the new one.
+    pub fn take_layer_plan_of_installed_update(
+        &mut self,
+        layer_plan: Option<UnvalidatedLayerPlan>,
+    ) -> Result<(), &'static str> {
+        self.scene.take_layer_plan_of_installed_update(layer_plan)
+    }
+
+    pub fn take_layer_plan_of_scroll_state(
+        &mut self,
+        layer_plan: Option<UnvalidatedLayerPlan>,
+    ) -> Result<(), &'static str> {
+        self.scene.take_layer_plan_of_scroll_state(layer_plan)
+    }
+
+    /// Returns false for a tree that does not fit the installed display list, which keeps the tree it has and takes
+    /// only the scroll state that pairs with the new one.
     pub fn update_visual_context_tree(
         &mut self,
         visual_context_tree: AccumulatedVisualContextTree,

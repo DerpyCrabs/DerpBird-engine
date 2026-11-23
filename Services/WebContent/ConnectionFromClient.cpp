@@ -78,6 +78,7 @@
 #include <LibWeb/HTML/RemoteNavigable.h>
 #include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
+#include <LibWeb/HTML/SessionHistoryEntry.h>
 #include <LibWeb/HTML/Storage.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/WorkerAgentParent.h>
@@ -191,6 +192,35 @@ void ConnectionFromClient::did_receive_derpbird_values(Web::PageId page_id, Web:
 void ConnectionFromClient::die()
 {
     Core::Process::terminate_immediately(0);
+}
+
+// What the main thread and each worker thread give up when the process is short of memory.
+static void release_memory_of_this_thread()
+{
+    Web::Fetch::Fetching::clear_http_memory_cache();
+    // NB: This comes last, so that what the steps before it let go of goes back to the system as well.
+    GC::Heap::the().collect_garbage_and_return_memory_to_system();
+}
+
+// The browser asks for this when the process is near its memory limit, or when its tabs were hidden for a while. The
+// process gives up everything it can work without. What it gives up may cost time to make again.
+void ConnectionFromClient::release_memory()
+{
+    // NB: The browser asks for more than one reason, and one release serves all requests that wait for it.
+    static bool is_pending = false;
+    if (is_pending)
+        return;
+    is_pending = true;
+
+    Web::CSS::StyleScope::release_kept_data();
+    Web::CSS::StyleScope::release_shaped_texts();
+
+    WebWorker::post_to_worker_threads(release_memory_of_this_thread);
+    // NB: This is deferred so that garbage collection runs with as little on the stack as possible.
+    Core::deferred_invoke([] {
+        is_pending = false;
+        release_memory_of_this_thread();
+    });
 }
 
 void ConnectionFromClient::set_font_service(IPC::TransportHandle handle, IPC::File catalog, u64 catalog_size, u64 generation)
@@ -2608,6 +2638,24 @@ void ConnectionFromClient::set_has_devtools_client(Web::PageId page_id, bool has
         page->set_has_devtools_client(has_devtools_client);
 }
 
+// The Hub holds the session history, but only learns where the user is in a document once they leave it. Each navigable
+// of the page saves what it would save then, and the Hub hears when all of them have.
+void ConnectionFromClient::save_session_history_entry_states(Web::PageId page_id)
+{
+    auto page = this->page(page_id);
+    if (!page.has_value())
+        return;
+    for (auto const& navigable : page->page().hosted_navigables()) {
+        navigable->save_persisted_state_to_active_session_history_entry();
+        auto entry = navigable->active_session_history_entry();
+        if (!entry)
+            continue;
+        if (auto persisted_state = Web::HTML::create_session_history_entry_persisted_state(*entry); persisted_state.has_value())
+            async_did_save_session_history_entry_state(page_id, navigable->id(), persisted_state.release_value());
+    }
+    async_did_save_session_history_entry_states(page_id);
+}
+
 void ConnectionFromClient::start_sending_console_output(Web::PageId page_id, bool messages, bool errors)
 {
     if (auto page = this->page(page_id); page.has_value())
@@ -2946,6 +2994,17 @@ static void append_gc_graph(StringBuilder& builder)
 {
     auto gc_graph = Web::Bindings::main_thread_vm().heap().dump_graph();
     gc_graph.serialize(builder);
+}
+
+void ConnectionFromClient::describe_owners_of_visual_context_nodes(Web::PageId page_id, Vector<u32> spatial_node_indices, Vector<u32> effect_node_indices)
+{
+    Web::Painting::OwnersOfVisualContextNodes owners;
+    auto page = this->page(page_id);
+    if (auto document = page.has_value() && page->page().has_local_traversable() ? page->page().local_traversable()->active_document() : nullptr)
+        owners = Web::Painting::describe_owners_of_visual_context_nodes(*document, spatial_node_indices, effect_node_indices);
+    else
+        owners.owners.resize(spatial_node_indices.size() + effect_node_indices.size());
+    async_did_describe_owners_of_visual_context_nodes(page_id, owners.structural_epoch, move(spatial_node_indices), move(effect_node_indices), move(owners.owners));
 }
 
 void ConnectionFromClient::request_internal_page_info(Web::PageId page_id, WebView::PageInfoType type)
@@ -3712,6 +3771,16 @@ void ConnectionFromClient::request_file(Web::PageId page_id, Web::FileRequest fi
     m_requested_files.set(id, move(file_request));
 
     async_did_request_file(page_id, path, id);
+}
+
+void ConnectionFromClient::request_file_for_webdriver(Web::PageId page_id, u64 command_id, Web::FileRequest file_request)
+{
+    i32 const id = last_id++;
+
+    auto path = file_request.path();
+    m_requested_files.set(id, move(file_request));
+
+    async_did_request_file_for_webdriver(page_id, command_id, path, id);
 }
 
 void ConnectionFromClient::blob_url_entry_removed(Utf16String url)

@@ -447,7 +447,6 @@ void FontComputer::invalidate_changed_font_cascades(Vector<Utf16FlyString> const
         fill_loaded_font_faces(move(loaded_face_fills));
     if (!invalidated_font_lists.is_empty() && m_document)
         record_font_input_changes({}, invalidated_font_lists);
-    request_wanted_web_faces();
 }
 
 // Has the style engine record an input change for every element whose style uses a font that resolves differently
@@ -563,7 +562,9 @@ NonnullRefPtr<FontFaceSnapshot const> FontComputer::font_face_snapshot() const
     for (auto const& [key, faces] : m_font_faces) {
         Vector<FontFaceSnapshot::Face> snapshot_faces;
         snapshot_faces.ensure_capacity(faces.size());
-        for (auto const& face : faces) {
+        // https://drafts.csswg.org/css-fonts-4/#font-style-matching
+        // Try the faces of a composite face in reverse order of definition.
+        for (auto const& face : faces.in_reverse()) {
             snapshot_faces.unchecked_append({
                 .id = face->id(),
                 .typeface = face->typeface(),
@@ -652,6 +653,10 @@ void FontComputer::register_font_face(NonnullRefPtr<FontFaceState> face)
     if (faces.contains_slow(face))
         return;
     faces.append(face);
+    // Editing a matching descriptor can return an earlier face to a group that already has a later one.
+    // Loading a sheet synchronizes the whole batch once every face has joined the font source.
+    if (faces.size() > 1 && m_document && m_font_face_change_batch_depth == 0)
+        document().fonts()->synchronize_css_connected_font_order();
     did_load_font(key);
 }
 
@@ -671,6 +676,8 @@ void FontComputer::unregister_font_face(NonnullRefPtr<FontFaceState> face)
 void FontComputer::synchronize_font_face_order(Vector<NonnullRefPtr<FontFaceState>> const& font_source_order)
 {
     for (auto& entry : m_font_faces) {
+        if (entry.value.size() < 2)
+            continue;
         Vector<NonnullRefPtr<FontFaceState>> ordered_faces;
         for (auto& font_face : font_source_order) {
             if (entry.value.contains_slow(font_face))

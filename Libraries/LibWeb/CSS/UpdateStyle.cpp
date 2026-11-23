@@ -278,8 +278,8 @@ StyleEngineFFI::FfiReactionElement StyleEngineFFI::web_css_style_inheritance_par
 // Swaps in the styles of a style installation, which the render side installed in the layout arena, and performs
 // the main-side effects of the elements whose styles move where they have any. Both are in tree order, and each
 // element's effects follow its swaps, which they name: an element's effects can clear the styles of its descendants,
-// whose swaps come after them.
-void StyleEngineFFI::web_css_install_styles(StyleReactionApplication* application, StyleSwap const* swaps, size_t swap_count, InstalledElementEffects const* effects, size_t effect_count, u32 document_damage)
+// which they name too, and whose swaps come after them.
+void StyleEngineFFI::web_css_install_styles(StyleReactionApplication* application, StyleSwap const* swaps, size_t swap_count, InstalledElementEffects const* effects, size_t effect_count, u32 const* cleared_descendants, size_t cleared_descendant_count, u32 document_damage)
 {
     auto const& read = application->read;
     auto& document = *application->document;
@@ -294,6 +294,7 @@ void StyleEngineFFI::web_css_install_styles(StyleReactionApplication* applicatio
     ScopeGuard end_style_installation = [&] { style_computer.end_style_installation(); };
 
     ReadonlySpan<StyleSwap> all_swaps { swaps, swap_count };
+    ReadonlySpan<u32> all_cleared_descendants { cleared_descendants, cleared_descendant_count };
     size_t next_swap = 0;
     // Swaps in the styles up to the swap `end`, each element's at once.
     auto swap_in_styles_until = [&](size_t end) {
@@ -355,6 +356,16 @@ void StyleEngineFFI::web_css_install_styles(StyleReactionApplication* applicatio
                     pseudo_element_before_change[i] = element->installed_style(pseudo_element);
             }
         }
+        // The pseudo-elements that are displayed before their swaps, ignoring animations: one that no longer is after
+        // them ends the animations it owns.
+        u16 pseudo_elements_displayed_before = 0;
+        if (element && element_effects.pseudo_elements_composed != 0 && element->has_css_animations_or_transitions()) {
+            for (auto pseudo_element : DOM::Element::computed_pseudo_elements) {
+                auto const& style = element->installed_style(pseudo_element);
+                if (style && !style.display_is_none_ignoring_animations())
+                    pseudo_elements_displayed_before |= static_cast<u16>(1 << to_underlying(pseudo_element));
+            }
+        }
         // The effects compare the record the element moves to with the one it moves from, which the installation pins
         // while the host applies it.
         InstalledStyle const old_style { element_effects.old_record };
@@ -396,7 +407,7 @@ void StyleEngineFFI::web_css_install_styles(StyleReactionApplication* applicatio
         // The host composes the records swapped in for the element's pseudo-elements that owe the plan of their
         // animations or the transition step, or whose element has animations, as it composes those it settles.
         if (element_effects.pseudo_elements_composed != 0) {
-            application->invalidation |= element->compose_style_pseudo_element_records(read, element_effects.pseudo_elements_composed, element_effects.pseudo_element_transition_steps, pseudo_element_before_change);
+            application->invalidation |= element->compose_style_pseudo_element_records(read, element_effects.pseudo_elements_composed, element_effects.pseudo_element_transition_steps, pseudo_element_before_change, pseudo_elements_displayed_before);
         }
         if (display_none_before.has_value()) {
             element->apply_display_none_change(*display_none_before);
@@ -404,9 +415,17 @@ void StyleEngineFFI::web_css_install_styles(StyleReactionApplication* applicatio
             if (element->installed_style().view().animated_overlay || element->custom_property_data_is_animation_overlay({}))
                 sample_animations_for_installed_record(DOM::AbstractElement { *element });
         }
-        // The render side decided whether the element's descendants hold styles while it is hidden.
-        if (has_flag(main_effects, CSS::MainEffects::ClearHiddenDescendants))
-            element->clear_computed_styles_from_display_none_descendants(read);
+        // The render side decided whether the element's descendants hold styles while it is hidden, and which of them
+        // do: those it found below the element in the tree the transaction was computed from. That can be another
+        // tree than the document's now, where a write made beside a transaction that flew moved an element in it.
+        if (has_flag(main_effects, CSS::MainEffects::ClearHiddenDescendants)) {
+            VERIFY(element_effects.cleared_descendants_begin <= element_effects.cleared_descendants_end);
+            VERIFY(element_effects.cleared_descendants_end <= all_cleared_descendants.size());
+            for (auto style_node : all_cleared_descendants.slice(element_effects.cleared_descendants_begin, element_effects.cleared_descendants_end - element_effects.cleared_descendants_begin)) {
+                if (auto* descendant = element_for(style_node))
+                    descendant->clear_computed_style_below_display_none(read);
+            }
+        }
         if (has_flag(main_effects, CSS::MainEffects::VisibilityFlip))
             document.throttled_animation_visibility_changed();
     }
@@ -928,6 +947,11 @@ void Document::update_style()
         if (stopped_passes() == exchange(stopped_before, stopped_passes()))
             break;
     }
+}
+
+bool Document::has_style_work(Layout::BegunRead const& read) const
+{
+    return CSS::document_has_style_work(read, *this);
 }
 
 bool Document::let_style_update_fly(Layout::RustFFI::FfiFlightBlocker blocker)

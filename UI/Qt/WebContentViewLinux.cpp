@@ -848,6 +848,22 @@ struct WebContentView::VulkanRenderer {
     size_t next_imported_texture_slot { 0 };
 };
 
+// Whether one of the queue families of the window's device can present to it.
+static bool can_present_to(QVulkanWindow& window)
+{
+    auto* physical_device = window.physicalDevice();
+    u32 queue_family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, nullptr);
+    for (u32 queue_family_index = 0; queue_family_index < queue_family_count; ++queue_family_index) {
+        if (window.vulkanInstance()->supportsPresent(physical_device, queue_family_index, &window))
+            return true;
+    }
+    return false;
+}
+
+// Whether the window system has refused to present the window of a view.
+static bool s_vulkan_windows_cannot_present { false };
+
 struct WebContentView::VulkanWindowRenderer final : public QVulkanWindowRenderer {
     AK_ALLOC_WITH_KMALLOC;
 
@@ -855,6 +871,12 @@ struct WebContentView::VulkanWindowRenderer final : public QVulkanWindowRenderer
         : m_view(view)
         , m_window(window)
     {
+    }
+
+    virtual void preInitResources() override
+    {
+        if (!can_present_to(m_window))
+            m_view.fall_back_from_vulkan_window();
     }
 
     virtual void releaseSwapChainResources() override
@@ -1064,7 +1086,7 @@ struct WebContentView::VulkanWindow final : public QVulkanWindow {
 void WebContentView::create_vulkan_window()
 {
     auto* instance = vulkan_instance();
-    if (!instance)
+    if (!instance || s_vulkan_windows_cannot_present)
         return;
 
     m_vulkan_window = new VulkanWindow(*this);
@@ -1198,6 +1220,19 @@ void WebContentView::fall_back_to_bitmap_rendering()
     });
 }
 
+void WebContentView::fall_back_from_vulkan_window()
+{
+    if (!s_vulkan_windows_cannot_present) {
+        dbgln("The window system cannot present frames drawn with Vulkan, so Qt shows the pages instead");
+        s_vulkan_windows_cannot_present = true;
+    }
+    // NB: This is invoked while QVulkanWindow initializes, which must finish before the window is destroyed.
+    QTimer::singleShot(0, this, [this] {
+        destroy_vulkan_window();
+        schedule_vulkan_window_update();
+    });
+}
+
 void WebContentView::destroy_vulkan_window()
 {
     if (m_vulkan_window)
@@ -1323,6 +1358,14 @@ bool WebContentView::page_surface_can_show_frames() const
     // NB: The page surface leaves the strips that hover-expanded chrome covers to Qt, except for a frame scaled to fit.
     auto has_hover_expanded_chrome = m_vertical_tab_overlay_left != 0 || m_vertical_tab_overlay_right != 0 || m_bookmarks_bar_overlay_height != 0;
     return !scales_frames_to_fit() || !has_hover_expanded_chrome;
+}
+
+void WebContentView::backing_stores_were_retired()
+{
+    // NB: A hidden view presents nothing, which is when the page surface would let go of the buffers of retired backing
+    //     stores, so their dma-bufs would stay with the compositor of the desktop until the view is shown again.
+    if (m_page_surface)
+        m_page_surface->forget_buffers_except(backing_stores().shared_image_buffers());
 }
 
 void WebContentView::hide_page_surface()

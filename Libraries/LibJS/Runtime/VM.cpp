@@ -543,6 +543,16 @@ Vector<StackTraceElement> VM::stack_trace() const
     return stack_trace;
 }
 
+void VM::set_keeps_long_stack_traces(bool keeps_long_stack_traces)
+{
+    js_vm_set_keeps_long_stack_traces(vm_abi(*this), keeps_long_stack_traces);
+}
+
+Optional<SourceRange> VM::innermost_source_range() const
+{
+    return source_range_from_abi(js_vm_innermost_source_range(vm_abi(*this)));
+}
+
 Optional<SourceRange> VM::take_throw_site_of(Value value)
 {
     auto throw_site = source_range_from_abi(js_vm_throw_site_of(vm_abi(*this), value_to_abi(value)));
@@ -673,9 +683,10 @@ ScriptOrModule VM::get_active_script_or_module() const
     // 2. Let ec be the topmost execution context on the execution context stack whose ScriptOrModule component is not null.
     ScriptOrModule script_or_module = Empty {};
     for_each_execution_context_top_to_bottom([&](ExecutionContext const& execution_context) {
-        if (execution_context.script_or_module.has<Empty>())
+        auto execution_context_script_or_module = execution_context.script_or_module();
+        if (execution_context_script_or_module.has<Empty>())
             return true;
-        script_or_module = execution_context.script_or_module;
+        script_or_module = execution_context_script_or_module;
         return false;
     });
 

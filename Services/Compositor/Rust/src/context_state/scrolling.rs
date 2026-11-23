@@ -125,7 +125,7 @@ impl ContextState {
             ),
             started_at: now,
             is_user_scroll: true,
-            heads_to_an_extent: false,
+            heads_to_end_of_scroll_range: false,
         });
         self.scroll_snap_controller
             .did_start_snap_scroll(stable_node_id, operation_id, destination);
@@ -145,7 +145,8 @@ impl ContextState {
         operation_id
     }
 
-    // The end of a gesture snaps the boxes it panned; the first snap scroll it starts is the operation a caller follows.
+    /// The end of a gesture snaps the boxes it panned; the first snap scroll it starts is the operation a caller
+    /// follows.
     pub(super) fn snap_at_gesture_end(&mut self, now: MonotonicTime) -> Option<AsyncScrollOperationID> {
         let mut operation_id = None;
         for snap in self
@@ -160,7 +161,6 @@ impl ContextState {
         operation_id
     }
 
-    // The viewport rect a wheel scroll presents, moved along with the viewport when the scroll moved it.
     fn note_async_scrolling_viewport_rect(
         &mut self,
         mut viewport_rect: IntRect,
@@ -179,9 +179,9 @@ impl ContextState {
         viewport_rect
     }
 
-    // A step of a wheel gesture that is latched to the node. A stretch of the node is relaxed before the visual
-    // viewport is panned, the node only scrolls by what both leave of the step, and what the node cannot scroll by
-    // either is what pulls it past its edge.
+    /// A step of a wheel gesture that is latched to the node. A stretch of the node is relaxed before the visual
+    /// viewport is panned, the node only scrolls by what both leave of the step, and what the node cannot scroll by
+    /// either is what pulls it past its edge.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn perform_wheel_scroll_of_node(
         &mut self,
@@ -685,7 +685,7 @@ impl ContextState {
             if shifts_running_animation {
                 let animation = &mut self.smooth_scroll_animations[running_animation.unwrap()];
                 // A step that goes to an end of the scroll range still goes there.
-                if !animation.heads_to_an_extent {
+                if !animation.heads_to_end_of_scroll_range {
                     animation.animation.shift_by(instant_scroll_delta);
                     let destination_offset = animation.animation.destination_offset();
                     let clamped_destination_offset = self
@@ -746,7 +746,7 @@ impl ContextState {
                             animation,
                             started_at: now,
                             is_user_scroll: smooth_scroll.initiator == SmoothScrollInitiator::UserInput,
-                            heads_to_an_extent: false,
+                            heads_to_end_of_scroll_range: false,
                         });
                     }
                 }
@@ -835,7 +835,6 @@ impl ContextState {
         });
     }
 
-    // Returns whether the request moved the visual viewport.
     fn apply_visual_viewport_scroll_request(
         &mut self,
         scroll_request: &ScrollRequest,
@@ -950,7 +949,7 @@ impl ContextState {
             ),
             started_at: now,
             is_user_scroll: true,
-            heads_to_an_extent: false,
+            heads_to_end_of_scroll_range: false,
         });
         self.report_started_user_scroll(
             operation_id,
@@ -1099,7 +1098,9 @@ impl ContextState {
 mod tests {
     use super::*;
     use crate::host::{FfiCompositorCoreHost, FfiOverlayLabel};
-    use libcompositing_rust::display_list::commands::{CompositorContextId, UniqueNodeId};
+    use libcompositing_rust::display_list::commands::{
+        ClipNodeIndex, CompositorContextId, ContextRef, EffectNodeIndex, UniqueNodeId,
+    };
     use libcompositing_rust::display_list::storage::DisplayListStorage;
     use libcompositing_rust::node_slot_id::NodeSlotId;
     use libcompositing_rust::visual_context::{
@@ -1132,13 +1133,15 @@ mod tests {
         }
     }
 
-    unsafe extern "C" fn set_timer(_: *mut c_void, _: u64, _: ContextTimer, _: i64) {}
-    unsafe extern "C" fn cancel_timer(_: *mut c_void, _: u64, _: ContextTimer) {}
+    unsafe extern "C" fn set_timer(_: *mut c_void, _: u64, _: i64) {}
+    unsafe extern "C" fn cancel_timer(_: *mut c_void, _: u64) {}
+    unsafe extern "C" fn destroy_timer(_: *mut c_void, _: u64) {}
     unsafe extern "C" fn shape_overlay_label(
         _: *mut c_void,
         _: u64,
         _: bool,
         _: ak::Span<'_, u8>,
+        _: f32,
         _: f64,
         _: ak::Span<'_, u8>,
         _: *mut c_void,
@@ -1164,6 +1167,7 @@ mod tests {
                     post_message_to_presentation: record_completions,
                     set_timer,
                     cancel_timer,
+                    destroy_timer,
                     shape_overlay_label,
                 })
             };
@@ -1317,6 +1321,85 @@ mod tests {
             assert_eq!(test.offset(), FloatPoint { x: 0.0, y: 240.0 });
             assert_eq!(test.completed_operations.borrow().as_slice(), &[operation]);
             assert!(test.context.smooth_scroll_animations.is_empty());
+        }
+    }
+
+    // The compositor drags a scrollbar of the viewport by itself, and the page sees neither the pointer moving over it
+    // nor a press on it. A scrollbar of an element is part of the element, so the page sees both.
+    #[test]
+    fn the_page_sees_the_pointer_on_a_scrollbar_of_an_element_only() {
+        for kind in [AsyncScrollNodeKind::Viewport, AsyncScrollNodeKind::Element] {
+            let mut test = WheelTest::new(kind);
+            let scrolls_viewport = kind == AsyncScrollNodeKind::Viewport;
+            test.context.scrollbar_controller = ScrollbarController::new(true);
+            test.context.scrollbar_controller.set_scrollbars(&[AsyncScrollbar {
+                scroller_stable_node_id: Some(AsyncScrollNodeStableID {
+                    node_id: UniqueNodeId(1),
+                    kind,
+                    pseudo_element_type: 0,
+                }),
+                scroll_node_index: test.node_index,
+                context: ContextRef {
+                    spatial: VISUAL_VIEWPORT_NODE_INDEX,
+                    clip: ClipNodeIndex::NONE,
+                    effect: EffectNodeIndex::NONE,
+                },
+                thumb_rect: IntRect::new(90, 0, 10, 25),
+                track_rect: IntRect::new(90, 0, 10, 100),
+                expanded_gutter_rect: IntRect::new(86, 0, 14, 100),
+                expanded_thumb_rect: IntRect::new(88, 0, 12, 25),
+                scroll_size: 0.075,
+                expanded_scroll_size: 0.075,
+                max_scroll_offset: 1000.0,
+                vertical: true,
+                scrolls_viewport,
+                ..Default::default()
+            }]);
+            test.context.rebuild_wheel_hit_test_targets();
+            let position = FloatPoint { x: 95.0, y: 10.0 };
+            let mouse_event = |r#type, button| MouseEvent {
+                r#type,
+                position: DevicePixelPoint { x: 95, y: 10 },
+                screen_position: DevicePixelPoint { x: 95, y: 10 },
+                button,
+                buttons: button,
+                modifiers: KeyModifier::Mod_None,
+                wheel_delta_x: 0.0,
+                wheel_delta_y: 0.0,
+                wheel_tick_120ths_x: 0.0,
+                wheel_tick_120ths_y: 0.0,
+                wheel_delta_precision: WheelDeltaPrecision::Discrete,
+                scroll_gesture_phase: ScrollGesturePhase::None,
+                click_count: 1,
+                async_scroll_performed_default_action: false,
+                id: 1,
+                scrollbar_dragged_by_compositor: None,
+                pointer_data: PointerInputData { properties: None },
+                wheel_gesture_mark: None,
+            };
+            let now = MonotonicTime::from_nanoseconds(1_000_000_000);
+            let hovered = test.context.handle_mouse_event_from_containing_context(
+                &mouse_event(MouseEventType::MouseMove, MouseButton::None),
+                position,
+                now,
+            );
+            assert_eq!(
+                hovered.routing_decision,
+                Some(if scrolls_viewport {
+                    InputRoutingDecision::HoveringViewportScrollbar
+                } else {
+                    InputRoutingDecision::HoveringElementScrollbar
+                })
+            );
+            assert_eq!(hovered.accepted, scrolls_viewport);
+
+            let pressed = test.context.handle_mouse_event_from_containing_context(
+                &mouse_event(MouseEventType::MouseDown, MouseButton::Primary),
+                position,
+                now,
+            );
+            assert_eq!(pressed.routing_decision, Some(InputRoutingDecision::BeganScrollbarDrag));
+            assert_eq!(pressed.scrollbar_dragged_by_compositor.is_some(), !scrolls_viewport);
         }
     }
 }

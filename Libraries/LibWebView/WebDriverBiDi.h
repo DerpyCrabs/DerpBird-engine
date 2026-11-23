@@ -24,6 +24,7 @@
 #include <LibWebCommon/WebDriver/Response.h>
 #include <LibWebView/Forward.h>
 #include <LibWebView/Export.h>
+#include <LibWebView/LocalFileRoot.h>
 
 namespace WebView {
 
@@ -145,7 +146,7 @@ private:
         Interactive,
         Complete,
     };
-    void await_a_navigation(CanonicalNavigable&, URL::URL, WaitCondition, CommandResult);
+    void await_a_navigation(CanonicalNavigable&, URL::URL, WaitCondition, LocalFileAccess, CommandResult);
     void await_navigation_completion(Web::HTML::CrossProcessId navigable_id, Utf16String const& navigation_id, WaitCondition, CommandResult);
 
     void browsing_context_activate(JsonObject const& params, CommandResult);

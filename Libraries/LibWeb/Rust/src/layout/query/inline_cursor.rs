@@ -276,8 +276,7 @@ impl<'a, A: PaintRead> InlineCursor<'a, A> {
     }
 
     /// A caret as tall as the font of `style_source`, at the inline start of `area` and where layout puts text across a
-    /// line of `line_height` from its block start, or across its block extent: the smaller half of the leading is on
-    /// the ascent side.
+    /// line of `line_height` from its block start, or across its block extent.
     fn caret_rect_at_inline_start(
         &self,
         area: CssPixelRect,
@@ -290,7 +289,7 @@ impl<'a, A: PaintRead> InlineCursor<'a, A> {
         let font_height = CssPixels::from_integer((style.font_ascent() + style.font_descent()) as i64);
         let height = font_height.min(line_height);
         let leading = line_height - height;
-        let leading_above = leading.scaled(0.5).floor();
+        let leading_above = leading / 2;
         let one = CssPixels::from_integer(1);
         let at_end = style.inline_axis_is_reverse();
         Some(if horizontal {
@@ -383,7 +382,7 @@ impl<'a, A: PaintRead> InlineCursor<'a, A> {
         if node_painting::is_fragmented_inline(arena, node) {
             let mut has_content = paint_order::first_paint_child(arena, node).is_some();
             with_inline_pieces(arena, node, |piece| {
-                has_content |= !piece.is_geometry_only_placeholder;
+                has_content |= !piece.is_geometry_only_placeholder && piece.fragment_count != 0;
                 !has_content
             });
             if has_content {
@@ -476,9 +475,9 @@ impl<'a, A: PaintRead> InlineCursor<'a, A> {
         let range = side.lines().get(line.index as usize).map_or(0..0, |record| {
             record.first_fragment as usize..(record.first_fragment + record.fragment_count) as usize
         });
-        side.fragments()[range]
-            .iter()
-            .filter(move |fragment| !fragment.is_block_ellipsis && accepts(fragment))
+        side.fragments()[range].iter().filter(move |fragment| {
+            !fragment.is_block_ellipsis && !fragment.is_text_overflow_ellipsis && accepts(fragment)
+        })
     }
 
     /// The position in front of the <br> or preserved newline that ends `line`.
@@ -1011,33 +1010,27 @@ impl<'a, A: PaintRead> InlineCursor<'a, A> {
             }
             true
         });
-        let mut roots: Vec<NodeSlotId> = nodes
-            .iter()
-            .filter_map(|&node| text_fragment::containing_block_paintable_of_node(arena, node))
-            .collect();
-        roots.dedup();
-        for root in roots {
-            for (index, record) in arena.committed_side_data(root).lines().iter().enumerate() {
-                if let Some(position) = record.forced_break
-                    && record.fragment_count == 0
-                    && nodes.contains(&position.node)
-                {
-                    let offset = arena.dom_offset_for_rendered_text_offset(
-                        position.node,
-                        position.rendered_offset as usize,
-                        RenderedTextBoundary::Start,
-                    );
-                    lines.push(TextLine {
-                        line: InlineLine {
-                            root,
-                            index: index as u32,
-                        },
-                        start_offset: offset,
-                        end_offset: offset,
-                        end_offset_with_trailing_whitespace: offset,
-                        has_fragments: false,
-                    });
-                }
+        for &node in nodes {
+            let Some(root) = text_fragment::containing_block_paintable_of_node(arena, node) else {
+                continue;
+            };
+            let content = arena.committed_side_data(root);
+            for &index in content.fragmentless_break_lines_of(node) {
+                let position = content.lines()[index as usize]
+                    .forced_break
+                    .expect("indexed forced break");
+                let offset = arena.dom_offset_for_rendered_text_offset(
+                    node,
+                    position.rendered_offset as usize,
+                    RenderedTextBoundary::Start,
+                );
+                lines.push(TextLine {
+                    line: InlineLine { root, index },
+                    start_offset: offset,
+                    end_offset: offset,
+                    end_offset_with_trailing_whitespace: offset,
+                    has_fragments: false,
+                });
             }
         }
         lines.sort_by_key(|line| line.start_offset);

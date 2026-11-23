@@ -65,12 +65,13 @@ public:
     bool has_completed_initial_paint() const;
     bool initial_paint_had_pending_fonts() const;
     bool has_pending_image_loads() const;
+    bool had_user_edits() const;
     void set_font_display_time(CSS::FontFace&, u32 milliseconds);
     WebIDL::ExceptionOr<Utf16String> set_time_zone(Utf16String const& time_zone);
 
     void gc();
     u32 worker_agent_count() const;
-    void gc_async(GC::Ref<WebIDL::Promise>);
+    void gc_async(bool move_cells, GC::Ref<WebIDL::Promise>);
     WebIDL::UnsignedLongLong discard_decoded_image_frames();
     WebIDL::ExceptionOr<void> mark_as_garbage(Utf16String const& variable_name);
     bool wrapper_is_preserved(JS::Object&);
@@ -144,6 +145,7 @@ public:
     Utf16String devtools_log(GC::RootVector<JS::Value> const& arguments);
     Utf16String devtools_logged_properties(u64 object_id);
     Utf16String devtools_log_table(GC::Root<JS::Object> const& table_data);
+    void set_long_stack_traces_enabled(bool);
     Optional<Vector<String>> complete_console_input(Utf16String const& input);
 
     void find_in_page(Utf16String const& query, bool highlight_all);
@@ -192,6 +194,7 @@ public:
     void begin_visual_context_trace();
     Utf16String take_visual_context_trace();
     void update_visual_contexts_for_testing();
+    u64 describe_owners_of_visual_context_nodes();
     Utf16String take_display_list_trace();
     void begin_input_trace();
     GC::Ref<JS::Object> take_input_trace();
@@ -321,6 +324,7 @@ public:
     Utf16String presented_selection();
     Utf16String painted_selection();
     GC::Ptr<Geometry::DOMRect> presented_border_box(DOM::Element&);
+    GC::Ptr<Geometry::DOMPointReadOnly> presented_scroll_offset(DOM::Element&);
     Optional<Vector<String>> presented_compositor_animations(DOM::Element&);
     Optional<double> presented_opacity(DOM::Element&);
     Optional<String> presented_color(DOM::Element&, Optional<Utf16String> const& pseudo_element);

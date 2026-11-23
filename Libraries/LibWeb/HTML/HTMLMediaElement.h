@@ -21,6 +21,7 @@
 #include <LibGfx/Rect.h>
 #include <LibJS/Forward.h>
 #include <LibMedia/Forward.h>
+#include <LibMedia/SeekMode.h>
 #include <LibMedia/VideoSinkHandle.h>
 #include <LibMediaClient/Forward.h>
 #include <LibWeb/DOM/Document.h>
@@ -62,6 +63,10 @@ class HTMLMediaElement : public HTMLElement {
     WEB_WRAPPABLE(HTMLMediaElement, HTMLElement);
 
 public:
+    // NB: A move runs no children changed steps, so the move algorithm reports these instead.
+    void child_moved_out(DOM::Node const& child, GC::Ptr<DOM::Node> old_previous_sibling);
+    void child_moved_in();
+
     static constexpr size_t audio_tracks_offset() { return offsetof(HTMLMediaElement, m_audio_tracks); }
     static constexpr size_t video_tracks_offset() { return offsetof(HTMLMediaElement, m_video_tracks); }
     static constexpr size_t text_tracks_offset() { return offsetof(HTMLMediaElement, m_text_tracks); }
@@ -126,6 +131,7 @@ public:
 
     double current_playback_position() const;
     void set_official_playback_position(double);
+    double earliest_possible_position() const;
 
     double duration() const;
     JS::Object* get_start_date(JS::Object& relevant_global_object) const;
@@ -179,7 +185,7 @@ public:
         Yes,
     };
     void sync_video_sink_ticking(DocumentWasLaidOut = DocumentWasLaidOut::Yes) const;
-    void video_sink_ticking_inputs_changed() const;
+    void video_sink_ticking_inputs_changed();
     void detach_video_sink_edge();
 
     GC::Ref<TextTrack> add_text_track(Bindings::TextTrackKind kind, Utf16View label, Utf16View language);
@@ -311,6 +317,7 @@ private:
     void on_video_track_added(Media::Track const&);
     void on_metadata_parsed(SourceType);
     void on_playback_manager_state_change();
+    void on_playback_manager_seek_decided(Media::SeekDecision);
     void upon_current_playback_position_possibly_changed();
     void start_or_stop_playback_position_update_timer();
     void play_element();
@@ -333,8 +340,9 @@ private:
     virtual bool is_shown_elsewhere() const { return false; }
     virtual HTMLMediaElement& media_element_for_controls() { return *this; }
 
-    // Mirrors what PlaybackManager and the compositor were last told; a freshly reserved sink is assumed to tick.
-    mutable bool m_video_sink_is_ticking { true };
+    // Mirrors what PlaybackManager was last told. A freshly reserved sink is undecided, and leaves its input unstarted
+    // until the first decision.
+    mutable Optional<bool> m_video_sink_is_ticking;
     void note_frame_captured() const;
 
     bool is_eligible_for_autoplay() const;
@@ -378,6 +386,18 @@ private:
 
     // https://html.spec.whatwg.org/multipage/media.html#media-element-event-task-source
     UniqueTaskSource m_media_element_event_task_source;
+
+    // NB: The media element tasks that haven't run yet, in the order they were queued, so that they can follow the
+    //     element when it's adopted into another document.
+    struct PendingMediaElementTask {
+        u64 key { 0 };
+        TaskID task_id;
+        GC::Ref<GC::Function<void(HTMLMediaElement&)>> steps;
+    };
+    void queue_pending_media_element_task(PendingMediaElementTask&);
+    void requeue_pending_media_element_tasks();
+    Vector<PendingMediaElementTask> m_pending_media_element_tasks;
+    u64 m_next_media_element_task_key { 0 };
 
     // https://html.spec.whatwg.org/multipage/media.html#dom-media-error
     GC::Ptr<MediaError> m_error;

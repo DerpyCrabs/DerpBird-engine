@@ -191,6 +191,13 @@ pub struct VmOptions {
 /// An execution context stack that VM::save_execution_context_stack() set aside, with the TypeErrorRealmScope that
 /// was active on it.
 struct SavedExecutionContextStack {
+    #[cfg_attr(
+        ladybird_gc_lints,
+        expect(
+            gc_container_in_untraced_type,
+            reason = "a traced context below each entry holds its previous realm"
+        )
+    )]
     storage: Vec<ExecutionContextStackEntry>,
     length: usize,
     running_execution_context: *mut ExecutionContext,
@@ -656,6 +663,9 @@ pub struct Vm {
     host_finalize_import_meta: Cell<HostFinalizeImportMeta>,
     host_get_supported_import_attributes: Cell<HostGetSupportedImportAttributes>,
     dynamic_imports_allowed: Cell<bool>,
+    /// Whether errors keep at least LONG_STACK_TRACE_FRAME_COUNT frames, for a debugger that lists them, even when
+    /// Error.stackTraceLimit is not a number. Their stack strings and script-visible frames stay as without it.
+    keeps_long_stack_traces: Cell<bool>,
     loaded_modules: OnceCell<Gc<LoadedModules>>,
     module_execution_depth: Cell<u32>,
     module_async_evaluation_count: Cell<u64>, // [[ModuleAsyncEvaluationCount]]
@@ -721,6 +731,13 @@ impl Vm {
         let native_function_table = unsafe {
             Box::<[NativeFunctionTableEntry]>::new_zeroed_slice(NATIVE_FUNCTION_TABLE_CAPACITY).assume_init()
         };
+        #[cfg_attr(
+            ladybird_gc_lints,
+            expect(
+                gc_container_on_stack,
+                reason = "a traced context below each entry holds its previous realm"
+            )
+        )]
         let mut execution_context_stack_storage = Vec::new();
         let vm = Vm {
             head: VmHead {
@@ -742,6 +759,7 @@ impl Vm {
                 type_error_realm_override_depth: Cell::new(0),
                 keyed_property_lookup_cache_entries: Cell::new(core::ptr::null()),
                 dispatch_tables: [const { Cell::new(core::ptr::null()) }; DISPATCH_TABLE_COUNT],
+                current_realm: Cell::new(None),
             },
             jit_native_stack_limit: AtomicUsize::new(0),
             interrupt_requested: AtomicBool::new(false),
@@ -827,6 +845,7 @@ impl Vm {
             host_finalize_import_meta: Cell::new(default_host_finalize_import_meta),
             host_get_supported_import_attributes: Cell::new(default_host_get_supported_import_attributes),
             dynamic_imports_allowed: Cell::new(false),
+            keeps_long_stack_traces: Cell::new(false),
             loaded_modules: OnceCell::new(),
             module_execution_depth: Cell::new(0),
             module_async_evaluation_count: Cell::new(0),
@@ -930,6 +949,11 @@ impl Vm {
         self.heap.get().expect("the VM has a heap")
     }
 
+    /// The heap, unless the VM let go of it, as it does while the heap is destroyed.
+    pub(crate) fn heap_if_held(&self) -> Option<&Heap> {
+        self.heap.get()
+    }
+
     pub fn interpreter_stack(&self) -> &InterpreterStack {
         &self.head.interpreter_stack
     }
@@ -940,7 +964,13 @@ impl Vm {
 
     /// The Realm of the running execution context.
     pub fn current_realm(&self) -> Option<Gc<Realm>> {
-        self.running_execution_context_if_any()?.realm.get()
+        self.head.current_realm.get()
+    }
+
+    /// Whether `function` runs in the current realm. Only calls of such functions may enter their frame inline (see
+    /// `VmHead::current_realm`).
+    pub fn is_in_current_realm(&self, function: Gc<FunctionObject>) -> bool {
+        function.function_realm() == self.current_realm()
     }
 
     /// Whether so little of the native stack is left that running more JavaScript could overflow it.
@@ -1031,9 +1061,38 @@ impl Vm {
         Err(Throw::new(self.interrupt_exception()))
     }
 
+    /// Makes `context` (which may be null) the running execution context, and its realm the current realm.
+    pub fn set_running_execution_context(&self, context: *mut ExecutionContext) {
+        self.head.running_execution_context.set(context);
+        // SAFETY: The running context is live.
+        let realm = NonNull::new(context).and_then(|context| unsafe { context.as_ref() }.realm());
+        self.head.current_realm.set(realm);
+    }
+
+    /// Makes `frame`, a frame entered inline for a call or left for its caller, the running execution context. Such
+    /// frames run in the current realm, as the interpreter and JIT code leave calls into another realm to the runtime.
+    pub(crate) fn set_running_frame_in_current_realm(&self, frame: *mut ExecutionContext) {
+        self.head.running_execution_context.set(frame);
+        debug_assert!(
+            // SAFETY: The running context is live.
+            NonNull::new(frame).is_none_or(|frame| unsafe { frame.as_ref() }.realm() == self.head.current_realm.get()),
+            "a frame entered or left inline runs in the current realm"
+        );
+    }
+
     pub fn push_execution_context(&self, context: NonNull<ExecutionContext>) {
         // SAFETY: The caller passes a live context.
+        let realm = unsafe { context.as_ref() }.realm();
+        self.push_execution_context_in_realm(context, realm);
+    }
+
+    /// push_execution_context() of a context whose [[Realm]], `realm`, the caller has at hand, which saves asking the
+    /// context for it.
+    #[inline]
+    pub fn push_execution_context_in_realm(&self, context: NonNull<ExecutionContext>, realm: Option<Gc<Realm>>) {
+        // SAFETY: The caller passes a live context.
         let context_ref = unsafe { context.as_ref() };
+        debug_assert!(realm == context_ref.realm(), "a context is pushed with its own realm");
         context_ref.caller_frame.set(core::ptr::null_mut());
         context_ref.caller_return_pc.set(0);
         context_ref.caller_dst_raw.set(0);
@@ -1049,8 +1108,10 @@ impl Vm {
         entry
             .previous_running_execution_context
             .set(self.head.running_execution_context.get());
+        entry.previous_realm.set(self.head.current_realm.get());
         self.head.execution_context_stack_length.set(length + 1);
         self.head.running_execution_context.set(context.as_ptr());
+        self.head.current_realm.set(realm);
     }
 
     pub fn pop_execution_context(&self) -> NonNull<ExecutionContext> {
@@ -1063,9 +1124,12 @@ impl Vm {
         // SAFETY: The entry below the length is on the stack.
         let entry = unsafe { &*self.head.execution_context_stack_entries.get().add(length) };
         self.head.execution_context_stack_length.set(length);
+        // NB: The realm of a context does not change while it runs, so the realm that was current when the entry was
+        //     pushed is that of the context it makes running again.
         self.head
             .running_execution_context
             .set(entry.previous_running_execution_context.get());
+        self.head.current_realm.set(entry.previous_realm.get());
         NonNull::new(entry.execution_context.get()).expect("every entry on the stack has its context")
     }
 
@@ -1076,6 +1140,7 @@ impl Vm {
         storage.resize_with(capacity, || ExecutionContextStackEntry {
             execution_context: Cell::new(core::ptr::null_mut()),
             previous_running_execution_context: Cell::new(core::ptr::null_mut()),
+            previous_realm: Cell::new(None),
         });
         self.head.execution_context_stack_entries.set(storage.as_mut_ptr());
         self.head.execution_context_stack_capacity.set(capacity);
@@ -1099,6 +1164,13 @@ impl Vm {
     }
 
     /// Hands the head the storage of an execution context stack with `length` entries on it.
+    #[cfg_attr(
+        ladybird_gc_lints,
+        expect(
+            gc_container_on_stack,
+            reason = "a traced context below each entry holds its previous realm"
+        )
+    )]
     fn install_execution_context_stack(&self, mut storage: Vec<ExecutionContextStackEntry>, length: usize) {
         assert!(length <= storage.len());
         self.head.execution_context_stack_entries.set(storage.as_mut_ptr());
@@ -1121,7 +1193,7 @@ impl Vm {
         );
     }
 
-    /// The id of a frame, which frames that JIT code creates get when first asked (see ExecutionContext::frame_id).
+    /// The id of a frame, which frames get when first asked (see ExecutionContext::frame_id).
     pub fn frame_id_of(&self, frame: &ExecutionContext) -> u64 {
         if frame.frame_id.get() == 0 {
             frame.frame_id.set(self.interpreter_stack().take_next_frame_id());
@@ -1186,14 +1258,22 @@ impl Vm {
     /// is active on it, and leaves an empty stack with nothing running. The garbage collector keeps tracing the saved
     /// stack until restore_execution_context_stack() brings it back.
     pub fn save_execution_context_stack(&self) {
+        #[cfg_attr(
+            ladybird_gc_lints,
+            expect(
+                gc_container_on_stack,
+                reason = "a traced context below each entry holds its previous realm"
+            )
+        )]
         let saved_stack = SavedExecutionContextStack {
             storage: core::mem::take(&mut *self.execution_context_stack_storage.borrow_mut()),
             length: self.head.execution_context_stack_length.get(),
-            running_execution_context: self.head.running_execution_context.replace(core::ptr::null_mut()),
+            running_execution_context: self.head.running_execution_context.get(),
             type_error_realm_override: self.head.type_error_realm_override.take(),
             type_error_realm_override_depth: self.head.type_error_realm_override_depth.replace(0),
         };
         self.saved_execution_context_stacks.borrow_mut().push(saved_stack);
+        self.set_running_execution_context(core::ptr::null_mut());
         self.install_execution_context_stack(Vec::new(), 0);
     }
 
@@ -1201,7 +1281,7 @@ impl Vm {
     /// storage.
     pub fn clear_execution_context_stack(&self) {
         self.head.execution_context_stack_length.set(0);
-        self.head.running_execution_context.set(core::ptr::null_mut());
+        self.set_running_execution_context(core::ptr::null_mut());
         self.head.type_error_realm_override.set(None);
         self.head.type_error_realm_override_depth.set(0);
     }
@@ -1209,15 +1289,20 @@ impl Vm {
     /// VM::restore_execution_context_stack(): replaces the execution context stack with the one the matching
     /// save_execution_context_stack() set aside.
     pub fn restore_execution_context_stack(&self) {
+        #[cfg_attr(
+            ladybird_gc_lints,
+            expect(
+                gc_container_on_stack,
+                reason = "a traced context below each entry holds its previous realm"
+            )
+        )]
         let saved_stack = self
             .saved_execution_context_stacks
             .borrow_mut()
             .pop()
             .expect("a saved execution context stack to restore");
         self.install_execution_context_stack(saved_stack.storage, saved_stack.length);
-        self.head
-            .running_execution_context
-            .set(saved_stack.running_execution_context);
+        self.set_running_execution_context(saved_stack.running_execution_context);
         self.head
             .type_error_realm_override
             .set(saved_stack.type_error_realm_override);
@@ -1248,6 +1333,7 @@ impl Vm {
     fn gather_roots(&self, visitor: &mut Visitor) {
         self.code_flushing.begin_pass(self);
         self.jit.trace(visitor);
+        self.trace_embedded_cells_of_running_jit_code(visitor);
         self.for_each_execution_context_top_to_bottom(|context| {
             context.trace(visitor);
             ControlFlow::Continue(())
@@ -1534,22 +1620,28 @@ impl Vm {
     pub fn stack_trace(&self) -> MarkedVec<'_, StackTraceElement> {
         let stack_trace = MarkedVec::new(self);
         self.for_each_stack_frame_top_to_bottom(|frame| {
-            // NB: Builtins written in JavaScript show up like other builtins, without a position in their source.
-            let runs_builtin = frame
-                .function
-                .is_some_and(|function| function.is::<NativeJavaScriptBackedFunction>());
-            let source_range = frame
-                .executable
-                .filter(|_| !runs_builtin)
-                .map(|executable| executable.get_source_range(frame.program_counter));
             stack_trace.push(StackTraceElement {
                 execution_context: NonNull::from(frame.execution_context),
                 function: frame.function,
-                source_range,
+                source_range: frame.source_range(),
             });
             ControlFlow::Continue(())
         });
         stack_trace
+    }
+
+    /// The source range of the innermost frame that has one, as the first such element of stack_trace() has, without
+    /// walking the rest of the stack.
+    pub fn innermost_source_range(&self) -> Option<SourceRange> {
+        let mut source_range = None;
+        self.for_each_stack_frame_top_to_bottom(|frame| {
+            source_range = frame.source_range();
+            if source_range.is_some() {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+        source_range
     }
 
     /// Calls `callback` with each frame from the running one down, until it breaks, like
@@ -1595,6 +1687,22 @@ impl Vm {
         });
     }
 
+    /// Keeps the cells that the JIT code which frames run embeds alive. Other JIT code holds them weakly (see
+    /// `JitCode::embedded_cells`).
+    fn trace_embedded_cells_of_running_jit_code(&self, visitor: &mut Visitor) {
+        // NB: Frames of recursive calls run the same code, which is traced once.
+        let mut traced_executables = HashSet::new();
+        self.for_each_live_execution_context(|frame| {
+            if frame.runs_jit_code.get()
+                && let Some(head) = frame.executable.get()
+                && traced_executables.insert(head.as_ptr().addr())
+            {
+                Executable::from_head(head).trace_embedded_cells_of_jit_code(self, visitor);
+            }
+            ControlFlow::Continue(())
+        });
+    }
+
     /// Clears the idle count of the executables that frames still run: they are not idle, even when no frame entered
     /// them for many collections (as in a long loop).
     fn clear_idle_collection_counts_of_running_executables(&self) {
@@ -1609,7 +1717,8 @@ impl Vm {
     /// Drops the weak cache entries of strings that died in this collection, and every entry of the caches that each
     /// collection empties.
     fn remove_dead_strings_from_weak_caches(&self, sweep: &Sweep<'_>) {
-        let is_dead = |string: Gc<PrimitiveString>| sweep.is_dead(string);
+        // NB: The caches forget strings that move.
+        let is_dead = |string: Gc<PrimitiveString>| sweep.is_dead_or_moving(string);
         for cache_slot in self.fly_string_cache.iter() {
             if cache_slot.get().is_some_and(is_dead) {
                 cache_slot.set(None);
@@ -1620,7 +1729,17 @@ impl Vm {
                 *entry = StringToAtomCacheEntry::default();
             }
         }
-        self.interned_strings.borrow_mut().retain(|_, string| !is_dead(*string));
+        let mut interned_strings = self.interned_strings.borrow_mut();
+        interned_strings.retain(|_, string| !sweep.is_dead(*string));
+        if sweep.moves_cells() {
+            // NB: The table is keyed by the identity of the fly strings, which moves of the strings do not change.
+            for string in interned_strings.values() {
+                // SAFETY: Only creating an interned string changes the table, which nothing does until the collection
+                //         is over.
+                unsafe { sweep.record_slot(string) };
+            }
+        }
+        drop(interned_strings);
         self.characters_to_atom_cache
             .borrow_mut()
             .fill_with(CharactersToAtomCacheEntry::default);
@@ -1639,6 +1758,7 @@ impl Vm {
                 return false;
             }
             executable.remove_dead_cells(sweep);
+            executable.drop_jit_code_that_lost_embedded_cells(self, sweep);
             let idle_collection_count = &executable.head.idle_collection_count;
             idle_collection_count.set(idle_collection_count.get().saturating_add(1));
             true
@@ -1648,7 +1768,7 @@ impl Vm {
         self.prototype_transition_cache.remove_dead_entries(sweep);
         self.construct_shape_cache.remove_dead_entries(sweep);
         self.keyed_property_store_cache.remove_dead_entries(sweep);
-        self.jit.dependents.remove_dead_entries(sweep);
+        self.jit.dependents.remove_dead_entries(self, sweep);
     }
 
     /// Has the JIT code that idled long enough in this collection flushed once the collection is over.
@@ -1976,6 +2096,14 @@ impl Vm {
         self.dynamic_imports_allowed.set(value);
     }
 
+    pub fn keeps_long_stack_traces(&self) -> bool {
+        self.keeps_long_stack_traces.get()
+    }
+
+    pub fn set_keeps_long_stack_traces(&self, value: bool) {
+        self.keeps_long_stack_traces.set(value);
+    }
+
     pub fn enter_module_execution(&self) {
         self.module_execution_depth.set(self.module_execution_depth.get() + 1);
     }
@@ -2124,6 +2252,7 @@ impl Vm {
     }
 
     /// Pushes `context`, unless so little of the native stack is left that the next call could overflow it.
+    #[inline]
     pub fn push_execution_context_checking_stack_space(
         &self,
         context: NonNull<ExecutionContext>,
@@ -2133,6 +2262,22 @@ impl Vm {
             return self.throw_completion(ErrorKind::InternalError, ErrorType::CallStackSizeExceeded, &[]);
         }
         self.push_execution_context(context);
+        Ok(())
+    }
+
+    /// push_execution_context_checking_stack_space() of a suspended context that resumes, such as that of a generator.
+    #[inline]
+    pub fn push_resumed_execution_context_checking_stack_space(
+        &self,
+        context: NonNull<ExecutionContext>,
+    ) -> ThrowCompletionOr<()> {
+        // Ensure we got some stack space left, so the next function call doesn't kill us.
+        if self.did_reach_stack_space_limit() {
+            return self.throw_completion(ErrorKind::InternalError, ErrorType::CallStackSizeExceeded, &[]);
+        }
+        // SAFETY: The caller passes a live context.
+        let realm = unsafe { context.as_ref() }.realm_of_resumed_frame();
+        self.push_execution_context_in_realm(context, realm);
         Ok(())
     }
 
@@ -2146,7 +2291,7 @@ impl Vm {
         // 2. Let ec be the topmost execution context on the execution context stack whose ScriptOrModule component is not null.
         let mut script_or_module = ScriptOrModule::Empty;
         self.for_each_execution_context_top_to_bottom(|execution_context| {
-            script_or_module = execution_context.script_or_module.get();
+            script_or_module = execution_context.script_or_module();
             if matches!(script_or_module, ScriptOrModule::Empty) {
                 return ControlFlow::Continue(());
             }
@@ -2226,7 +2371,7 @@ impl Vm {
     }
 
     pub fn variable_environment(&self) -> Option<Gc<Environment>> {
-        self.running_execution_context_ref().variable_environment.get()
+        self.running_execution_context_ref().variable_environment()
     }
 
     /// The Realm of the running execution context, which C++ VM::realm() dereferences.
@@ -2403,7 +2548,14 @@ unsafe extern "C" fn sweep(context: *mut c_void) {
     let sweep = unsafe { Sweep::new(vm) };
     vm.code_flushing.finish_pass(vm, &sweep);
     crate::parser::release_idle_reparse_contexts();
-    crate::source_text::park_idle_source_texts();
+    // NB: The VM has no heap anymore when this runs for the last collection of a heap that goes away.
+    if vm.heap.get().is_some_and(Heap::is_returning_memory_to_system) {
+        crate::source_text::park_all_source_texts();
+        crate::runtime::regexp_prototype::clear_regex_cache();
+        crate::work_zone::release_idle_memory();
+    } else {
+        crate::source_text::park_idle_source_texts();
+    }
     vm.remove_dead_async_waits(&sweep);
     vm.remove_dead_cells_from_weak_containers(&sweep);
     vm.remove_dead_strings_from_weak_caches(&sweep);
@@ -2467,6 +2619,19 @@ pub struct StackFrame<'a> {
     pub program_counter: u32,
     /// For a frame of a call that JIT code inlined: where its values are.
     pub inlined_call: Option<InlinedCallStackFrame>,
+}
+
+impl StackFrame<'_> {
+    /// Where the frame is in the source of its executable, which is nowhere for a frame that runs no bytecode.
+    pub fn source_range(&self) -> Option<SourceRange> {
+        // NB: Builtins written in JavaScript show up like other builtins, without a position in their source.
+        let runs_builtin = self
+            .function
+            .is_some_and(|function| function.is::<NativeJavaScriptBackedFunction>());
+        self.executable
+            .filter(|_| !runs_builtin)
+            .map(|executable| executable.get_source_range(self.program_counter))
+    }
 }
 
 /// Where the values of a frame of a call that JIT code inlined are: the inlined call site of the code running the

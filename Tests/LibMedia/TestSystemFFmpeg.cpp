@@ -6,6 +6,7 @@
 
 #include <LibMedia/DemuxerRegistry.h>
 #include <LibMedia/FFmpeg/FFmpegAudioDecoder.h>
+#include <LibMedia/FFmpeg/FFmpegChannelLayout.h>
 #include <LibMedia/IncrementallyPopulatedStream.h>
 #include <LibMediaCodecs/AudioBlock.h>
 #include <LibMediaCodecs/Codecs/AAC.h>
@@ -35,6 +36,28 @@ TEST_CASE(a_missing_library_is_an_error)
     EXPECT_EQ(result.error().category(), Media::DecoderErrorCategory::NotImplemented);
 }
 
+static void expect_custom_channel_layout_round_trips(Media::FFmpeg::FFmpegFunctions const& functions)
+{
+    // Out of native order, so this needs a custom layout.
+    auto channel_map = Audio::ChannelMap(Audio::Channel::FrontRight, Audio::Channel::FrontLeft, Audio::Channel::LowFrequency);
+    auto layout = TRY_OR_FAIL(Media::FFmpeg::FFmpegChannelLayout::from_channel_map(functions, channel_map));
+    EXPECT_EQ(layout.layout().order, AV_CHANNEL_ORDER_CUSTOM);
+    EXPECT_EQ(layout.layout().nb_channels, 3);
+    for (int i = 0; i < layout.layout().nb_channels; i++)
+        EXPECT_EQ(layout.layout().u.map[i].name[0], '\0');
+    EXPECT_EQ(TRY_OR_FAIL(layout.to_channel_map()), channel_map);
+}
+
+TEST_CASE(custom_channel_layouts_round_trip_through_the_loaded_library)
+{
+    auto library = load_bundled_library();
+    expect_custom_channel_layout_round_trips(library->functions());
+
+    Media::FFmpeg::SystemFFmpeg::load();
+    if (auto const* system_library = Media::FFmpeg::SystemFFmpeg::the())
+        expect_custom_channel_layout_round_trips(system_library->functions());
+}
+
 static size_t decode_every_frame(Media::FFmpeg::SystemFFmpeg const& library, StringView path)
 {
     auto file = MUST(Core::File::open(path, Core::File::OpenMode::Read));
@@ -51,7 +74,7 @@ static size_t decode_every_frame(Media::FFmpeg::SystemFFmpeg const& library, Str
     size_t frame_count = 0;
     auto drain = [&] {
         while (true) {
-            auto frame = decoder->take_next_output(track.video_data().cicp);
+            auto frame = decoder->take_next_output(track.video_data().color_metadata);
             if (frame.is_error())
                 return frame.release_error();
             frame_count++;

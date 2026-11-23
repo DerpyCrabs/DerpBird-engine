@@ -55,7 +55,10 @@ impl PartialEq for GlyphInkOfLines {
 /// The indices of each node's fragments in its line root's content, which queries that start from a node look up in a
 /// line root with many fragments. Most line roots are never asked, so the index is built the first time one is.
 #[derive(Default)]
-pub struct TextFragmentIndex(std::sync::OnceLock<InlineBoxIndex>);
+pub struct TextFragmentIndex {
+    fragments: std::sync::OnceLock<InlineBoxIndex>,
+    fragmentless_break_lines: std::sync::OnceLock<Box<InlineBoxIndex>>,
+}
 
 // NB: The index follows from the fragments, so a copy builds its own, and it does not tell two contents apart.
 impl Clone for TextFragmentIndex {
@@ -170,6 +173,8 @@ pub struct LineRecord {
     pub(crate) horizontal_extent: CssPixels,
     pub(crate) reusable_atomic_prefix: bool,
     pub inline_length: CssPixels,
+    /// The text-indent the line begins with, which its inline length includes.
+    pub(crate) indent: CssPixels,
     pub inline_length_before_block_ellipsis: Option<CssPixels>,
     pub block_length: CssPixels,
     pub block_start: CssPixels,
@@ -422,6 +427,8 @@ pub struct FragmentRecord {
     pub direction: u8,
     pub writing_mode: u8,
     pub is_block_ellipsis: bool,
+    /// Whether the fragment is the ellipsis that text-overflow draws, rather than content.
+    pub is_text_overflow_ellipsis: bool,
     pub is_atomic_inline: bool,
     pub white_space_collapse: u8,
     pub(crate) content_baselines: Option<formatting_context::DerivedBaselines>,
@@ -692,14 +699,29 @@ impl InlineContent {
     /// The indices of the fragments of `node`, in fragment order.
     pub(crate) fn fragment_indices_of(&self, node: NodeSlotId) -> &[u32] {
         self.text_fragments
-            .0
+            .fragments
             .get_or_init(|| InlineBoxIndex::of_nodes(self.fragments.iter().map(|fragment| fragment.layout_node)))
             .piece_indices_of(node)
     }
 
+    /// Lines with a preserved break owned by this node and no fragments to identify the line by.
+    pub(crate) fn fragmentless_break_lines_of(&self, node: NodeSlotId) -> &[u32] {
+        self.text_fragments
+            .fragmentless_break_lines
+            .get_or_init(|| {
+                Box::new(InlineBoxIndex::of_nodes(self.lines.iter().map(|line| {
+                    line.forced_break
+                        .filter(|_| line.fragment_count == 0)
+                        .map_or(NodeSlotId::INVALID, |position| position.node)
+                })))
+            })
+            .piece_indices_of(node)
+    }
+
     fn drop_repeated_placeholder_pieces(&mut self) {
-        let is_placeholder =
-            |piece: &InlineBoxPieceRecord| piece.is_geometry_only_placeholder && piece.fragment_count == 0;
+        // NB: An inline box that's empty within one fragment has a piece there with no fragment of its content,
+        //     which is a placeholder unless the box is empty in every fragment it's laid out in.
+        let is_placeholder = |piece: &InlineBoxPieceRecord| piece.fragment_count == 0;
         if !self.inline_box_pieces.iter().any(is_placeholder) {
             return;
         }
@@ -713,15 +735,21 @@ impl InlineContent {
         let mut kept_count = 0u32;
         self.inline_box_pieces.retain(|piece| {
             let keep = !is_placeholder(piece) || nodes_with_pieces.insert(piece.node);
-            new_indices.push(kept_count);
+            new_indices.push(keep.then_some(kept_count));
             kept_count += u32::from(keep);
             keep
         });
-        for item in &mut self.items {
-            if let InlineItem::BoxPiece(index) = item {
-                *index = new_indices[*index as usize];
-            }
-        }
+        // NB: A dropped piece that isn't a geometry-only placeholder is painted, so its item goes too.
+        self.items.retain_mut(|item| match item {
+            InlineItem::BoxPiece(index) => match new_indices[*index as usize] {
+                Some(new_index) => {
+                    *index = new_index;
+                    true
+                }
+                None => false,
+            },
+            _ => true,
+        });
     }
 
     fn append_translated(

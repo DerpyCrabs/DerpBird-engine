@@ -66,6 +66,8 @@ pub(crate) mod canvas_2d;
 )]
 pub(crate) mod clipboard;
 #[cfg(not(test))]
+pub(crate) mod compositor_connection;
+#[cfg(not(test))]
 #[cfg_attr(
     not(web_idl_bindings),
     allow(dead_code, reason = "only the generated bindings use the interfaces")
@@ -75,6 +77,16 @@ pub(crate) mod clipboard;
     reason = "the bindings call every attribute and operation as one that can throw"
 )]
 pub(crate) mod compression;
+#[cfg(not(test))]
+#[cfg_attr(
+    not(web_idl_bindings),
+    allow(dead_code, reason = "only the generated bindings use the interfaces")
+)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the bindings call every attribute and operation as one that can throw"
+)]
+pub(crate) mod content_security_policy;
 #[cfg(not(test))]
 #[cfg_attr(
     not(web_idl_bindings),
@@ -142,6 +154,16 @@ pub(crate) mod encoding;
     clippy::unnecessary_wraps,
     reason = "the bindings call every attribute and operation as one that can throw"
 )]
+pub(crate) mod encrypted_media_extensions;
+#[cfg(not(test))]
+#[cfg_attr(
+    not(web_idl_bindings),
+    allow(dead_code, reason = "only the generated bindings use the interfaces")
+)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the bindings call every attribute and operation as one that can throw"
+)]
 pub(crate) mod event_timing;
 #[cfg(not(test))]
 pub(crate) mod fetch;
@@ -154,6 +176,16 @@ pub(crate) mod fetch;
     reason = "the bindings call every attribute and operation as one that can throw"
 )]
 pub(crate) mod file_api;
+#[cfg(not(test))]
+#[cfg_attr(
+    not(web_idl_bindings),
+    allow(dead_code, reason = "only the generated bindings use the interfaces")
+)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the bindings call every attribute and operation as one that can throw"
+)]
+pub(crate) mod gamepad;
 #[cfg(not(test))]
 #[cfg_attr(
     not(web_idl_bindings),
@@ -231,6 +263,26 @@ pub(crate) mod largest_contentful_paint;
     clippy::unnecessary_wraps,
     reason = "the bindings call every attribute and operation as one that can throw"
 )]
+pub(crate) mod media_capture;
+#[cfg(not(test))]
+#[cfg_attr(
+    not(web_idl_bindings),
+    allow(dead_code, reason = "only the generated bindings use the interfaces")
+)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the bindings call every attribute and operation as one that can throw"
+)]
+pub(crate) mod media_source_extensions;
+#[cfg(not(test))]
+#[cfg_attr(
+    not(web_idl_bindings),
+    allow(dead_code, reason = "only the generated bindings use the interfaces")
+)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the bindings call every attribute and operation as one that can throw"
+)]
 pub(crate) mod navigation_timing;
 #[cfg(not(test))]
 #[cfg_attr(
@@ -276,6 +328,16 @@ pub(crate) mod permissions;
 pub(crate) mod permissions_api;
 #[cfg(not(test))]
 pub(crate) mod permissions_policy;
+#[cfg(not(test))]
+#[cfg_attr(
+    not(web_idl_bindings),
+    allow(dead_code, reason = "only the generated bindings use the interfaces")
+)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the bindings call every attribute and operation as one that can throw"
+)]
+pub(crate) mod picture_in_picture;
 #[cfg(not(test))]
 pub(crate) mod platform;
 #[cfg(not(test))]
@@ -377,6 +439,16 @@ pub(crate) mod web_gl;
 )]
 pub(crate) mod web_locks;
 #[cfg(not(test))]
+#[cfg_attr(
+    not(web_idl_bindings),
+    allow(dead_code, reason = "only the generated bindings use the interfaces")
+)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the bindings call every attribute and operation as one that can throw"
+)]
+pub(crate) mod web_vtt;
+#[cfg(not(test))]
 pub(crate) mod webidl;
 #[cfg(not(test))]
 pub(crate) mod webrtc;
@@ -405,9 +477,9 @@ mod webgl_proxy;
 #[cfg(test)]
 #[allow(
     dead_code,
-    reason = "the tests do not run the writer of the vocabulary, which the model is for as well"
+    reason = "the tests do not run the generators, which the model is for as well"
 )]
-#[path = "../generate/webgl_wire_model.rs"]
+#[path = "../../../../LibCompositing/Rust/generate/webgl_wire_model.rs"]
 mod webgl_wire_model;
 
 // NB: Little in this crate names libweb_rust, which C++ calls into. Linking it keeps its extern "C" functions in the

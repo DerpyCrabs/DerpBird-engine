@@ -32,6 +32,7 @@ set(ABOUT_PAGES
     downloads.html
     derpbird.html
     history.html
+    licenses.html
     newtab.html
     settings.html
     support.html
@@ -163,15 +164,15 @@ function(copy_resources_to_build base_directory bundle_target)
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
 
-    if (APPLE AND LADYBIRD_ICU_DATA_FILE)
-        copy_resource_set(icu RESOURCES ${LADYBIRD_ICU_DATA_FILE}
-            DESTINATION ${base_directory} TARGET ${bundle_target}
-        )
-    endif()
-
     copy_resource_set(ladybird RESOURCES ${INTERNAL_RESOURCES}
         DESTINATION ${base_directory} TARGET ${bundle_target}
     )
+
+    set_source_files_properties("${LADYBIRD_LICENSES_FILE}" PROPERTIES GENERATED TRUE)
+    copy_resource_set(ladybird RESOURCES "${LADYBIRD_LICENSES_FILE}"
+        DESTINATION ${base_directory} TARGET ${bundle_target}
+    )
+    add_dependencies(${bundle_target} generate_licenses)
 
     copy_resource_set(ladybird/about-pages RESOURCES ${ABOUT_PAGES}
         DESTINATION ${base_directory} TARGET ${bundle_target}
@@ -219,10 +220,8 @@ function(install_ladybird_resources destination component)
     install(FILES ${32x32_ICONS} DESTINATION "${destination}/icons/32x32" COMPONENT ${component})
     install(FILES ${48x48_ICONS} DESTINATION "${destination}/icons/48x48" COMPONENT ${component})
     install(FILES ${THEMES} DESTINATION "${destination}/themes" COMPONENT ${component})
-    if (LADYBIRD_ICU_DATA_FILE)
-        install(FILES ${LADYBIRD_ICU_DATA_FILE} DESTINATION "${destination}/icu" COMPONENT ${component})
-    endif()
-    install(FILES ${INTERNAL_RESOURCES} DESTINATION "${destination}/ladybird" COMPONENT ${component})
+    install(FILES ${INTERNAL_RESOURCES} "${LADYBIRD_LICENSES_FILE}" DESTINATION "${destination}/ladybird"
+        COMPONENT ${component})
     install(FILES ${ABOUT_PAGES} DESTINATION "${destination}/ladybird/about-pages" COMPONENT ${component})
     install(FILES ${DERPBIRD_ASSETS} DESTINATION "${destination}/ladybird/about-pages/derpbird-assets" COMPONENT ${component})
     install(FILES ${ABOUT_SETTINGS_RESOURCES} DESTINATION "${destination}/ladybird/about-pages/settings" COMPONENT ${component})

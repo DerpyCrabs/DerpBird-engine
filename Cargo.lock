@@ -630,6 +630,7 @@ dependencies = [
  "libgfx_rust",
  "libipc_rust",
  "rustc-demangle",
+ "serde_json",
 ]
 
 [[package]]
@@ -1917,6 +1918,7 @@ dependencies = [
  "libgfx_rust",
  "libipc_rust",
  "rustc-demangle",
+ "serde_json",
 ]
 
 [[package]]
@@ -1933,6 +1935,19 @@ version = "0.1.0"
 dependencies = [
  "ak",
  "subtle",
+]
+
+[[package]]
+name = "libgc_rust"
+version = "0.1.0"
+dependencies = [
+ "ak",
+ "cbindgen",
+ "crossbeam-deque",
+ "ladybird_allocator",
+ "libc",
+ "rustc-demangle",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1972,7 +1987,20 @@ name = "libipc_rust"
 version = "0.1.0"
 dependencies = [
  "ak",
+ "cbindgen",
+ "ladybird_allocator",
  "libc",
+ "libipc_rust_macros",
+ "rustc-demangle",
+]
+
+[[package]]
+name = "libipc_rust_macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1997,6 +2025,14 @@ dependencies = [
  "iced-x86",
  "libc",
  "libjs_runtime_macros",
+]
+
+[[package]]
+name = "libjs_parser"
+version = "0.1.0"
+dependencies = [
+ "ak",
+ "libunicode_rust",
 ]
 
 [[package]]
@@ -2026,6 +2062,7 @@ dependencies = [
  "libcompress_rust",
  "libjs_abi",
  "libjs_jit",
+ "libjs_parser",
  "libjs_runtime_macros",
  "libregex_rust",
  "libunicode_rust",
@@ -2120,6 +2157,7 @@ dependencies = [
 name = "libwasm_jit"
 version = "0.1.0"
 dependencies = [
+ "ak",
  "fARM64",
  "iced-x86",
  "libc",

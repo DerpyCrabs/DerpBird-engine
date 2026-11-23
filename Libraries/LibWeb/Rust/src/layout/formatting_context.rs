@@ -98,7 +98,11 @@ pub(super) enum SizeDimension {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TableWrapperInlineSizeMode {
-    ClampToAvailableInlineSize,
+    /// An auto-width table shrinks to fit the available inline size, but never below its minimum inline size, and the
+    /// wrapper is as wide as the table box, even when that's wider than the available inline size: A table that
+    /// doesn't fit there reports its real size, so that its captions are laid out as wide as it is, and a table too
+    /// wide for the space next to floats is placed below them.
+    ShrinkToAvailableInlineSize,
     UseTableUsedInlineSizeIfNotAuto,
     /// The wrapper is as wide as the table box, even when that's wider than the available inline size, as for an
     /// absolutely positioned table.
@@ -465,6 +469,15 @@ impl PlacedChild {
     /// The child, whose laid out contents its parent moves by `shift` in the frame of the run placing it.
     pub(crate) fn with_contents_shift(mut self, shift: FfiCssPixelPoint) -> Self {
         self.contents_shift = shift;
+        self
+    }
+
+    /// The child, a block-level box of a block container's flow, with the margin that flow leaves past its block end.
+    pub(crate) fn with_block_end_margin_collapsed_in_flow(mut self, margin: CssPixels) -> Self {
+        self.facts_decided_by_parent
+            .fragment_facts
+            .show
+            .block_end_margin_collapsed_in_flow = Some(margin);
         self
     }
 
@@ -1468,10 +1481,10 @@ pub(crate) fn formatting_context_type_created_by_node_data(
         });
     }
     let display = style.map(|style| style.display());
-    // NB: A flex fieldset lays out its legend and anonymous content box in a block formatting context.
-    //     Flex layout applies only to the anonymous content box.
+    // NB: A flex or grid fieldset lays out its legend and anonymous content box in a block formatting context.
+    //     Flex or grid layout applies only to the anonymous content box.
     if data.kind.get() == crate::layout::node_data::NodeKind::FieldSetBox
-        && display.is_some_and(|display| display.is_flex_inside())
+        && display.is_some_and(|display| display.is_flex_inside() || display.is_grid_inside())
     {
         return Some(FormattingContextType::Block);
     }
@@ -2590,7 +2603,7 @@ fn lay_out_run_root_and_contents<'pass>(
             own_root_after_body.content_inline_size,
             own_frame.writing_mode(),
         );
-        result = result_in_parent_frame(result, own_root_after_body, parent_frame, own_frame);
+        result = result_in_parent_frame(&pass, run.box_, result, own_root_after_body, parent_frame, own_frame);
     }
     root.set(own_root_after_body.in_frame(own_frame, parent_frame));
 
@@ -2686,6 +2699,8 @@ fn lay_out_run_root_and_contents<'pass>(
             result.orthogonal_flow_baselines = orthogonal_flow_baselines(
                 shifted_baselines,
                 root_in_own_frame_left_by_run.content_block_size,
+                &pass,
+                run.box_,
                 parent_frame,
                 own_frame,
             );
@@ -2927,6 +2942,8 @@ fn body_input_in_own_frame(
 
 /// Maps what the layout of a run root's contents in its own frame found into its parent's frame.
 fn result_in_parent_frame(
+    pass: &LayoutPass<'_>,
+    root: Node,
     mut result: ChildLayoutResult,
     root_in_own_frame: used_values::RootInputCells,
     parent_frame: geometry::Frame,
@@ -2942,6 +2959,8 @@ fn result_in_parent_frame(
         result.orthogonal_flow_baselines = orthogonal_flow_baselines(
             result.baselines,
             root_in_own_frame.content_block_size,
+            pass,
+            root,
             parent_frame,
             own_frame,
         );
@@ -2966,6 +2985,8 @@ fn result_in_parent_frame(
 fn orthogonal_flow_baselines(
     baselines: DerivedBaselines,
     content_block_size: CssPixels,
+    pass: &LayoutPass<'_>,
+    root: Node,
     parent_frame: geometry::Frame,
     own_frame: geometry::Frame,
 ) -> Option<DerivedBaselines> {
@@ -2974,8 +2995,16 @@ fn orthogonal_flow_baselines(
         own_frame.side_in(geometry::Side::Top, parent_frame),
         geometry::Side::Left
     );
+    // NB: Only lines in a vertical typographic mode have a dominant baseline other than the alphabetic one, so only
+    //     then is the block whose lines give the baseline looked for.
+    let distance_to_dominant_baseline = if dominant_baseline_is_central(StyleValues::for_node(pass, root)) {
+        distance_from_alphabetic_to_dominant_baseline(style_of_first_baseline_line_root(pass, root))
+    } else {
+        CssPixels::default()
+    };
     let along_parent_horizontal_axis = |baseline: Option<CssPixels>| {
         baseline.map(|baseline| {
+            let baseline = baseline - distance_to_dominant_baseline;
             if block_start_is_left {
                 baseline
             } else {
@@ -2989,6 +3018,64 @@ fn orthogonal_flow_baselines(
         last: along_parent_horizontal_axis(baselines.last),
     };
     (orthogonal_flow_baselines != DerivedBaselines::default()).then_some(orthogonal_flow_baselines)
+}
+
+/// The style of the block container whose lines give `node` its first baseline: `node` itself, where its children are
+/// inline, or else the first in-flow descendant in document order that gives it baselines and has a line of content. So,
+/// the dominant baseline of text in a nested block is found from that block's font, and an empty block before it is
+/// passed over, as it gives no baseline.
+fn style_of_first_baseline_line_root<'pass>(pass: &LayoutPass<'pass>, node: Node) -> StyleValues<'pass> {
+    // NB: An explicit stack rather than recursion, as the boxes can nest arbitrarily deep.
+    let mut candidates = vec![node];
+    while let Some(current) = candidates.pop() {
+        let facts = NodeFacts::new(pass, current);
+        if !facts.is_block_container() {
+            // NB: A box that establishes another kind of formatting context gives the baselines of its own contents.
+            return StyleValues::for_node(pass, current);
+        }
+        if facts.children_are_inline() {
+            if pass
+                .children(current)
+                .any(|child| !pass.can_skip_is_anonymous_text_run(child))
+            {
+                return StyleValues::for_node(pass, current);
+            }
+            continue;
+        }
+        let first_candidate = candidates.len();
+        candidates.extend(pass.children(current).filter(|&child| {
+            NodeFacts::new(pass, child).is_box()
+                && !pass.can_skip_is_anonymous_text_run(child)
+                && child_gives_container_baselines(pass, current, child)
+        }));
+        candidates[first_candidate..].reverse();
+    }
+    StyleValues::for_node(pass, node)
+}
+
+/// How far a box's dominant baseline lies from the alphabetic baseline its lines record, toward the top of its frame.
+/// https://drafts.csswg.org/css-inline-3/#valdef-dominant-baseline-auto
+/// If in horizontal typographic mode, the dominant baseline is alphabetic. If in vertical typographic mode and
+/// text-orientation is mixed or upright, the dominant baseline is central.
+/// https://drafts.csswg.org/css-inline-3/#central
+/// central: Use the central baseline (halfway between the ascent and descent).
+fn distance_from_alphabetic_to_dominant_baseline(style: StyleValues<'_>) -> CssPixels {
+    if !dominant_baseline_is_central(style) {
+        return CssPixels::default();
+    }
+    // NB: A line puts the ascent of its text toward the top of its frame, and counts the font's metrics in whole
+    //     pixels.
+    let ascent = line_builder::font_metric_in_whole_pixels(style.font_ascent());
+    let descent = line_builder::font_metric_in_whole_pixels(style.font_descent());
+    (ascent - descent) / 2
+}
+
+/// Whether the lines of a box with `style` have the central baseline as their dominant one, rather than the alphabetic.
+fn dominant_baseline_is_central(style: StyleValues<'_>) -> bool {
+    matches!(
+        style.writing_mode(),
+        writing_mode::VERTICAL_RL | writing_mode::VERTICAL_LR
+    ) && style.text_orientation() != text_orientation::SIDEWAYS
 }
 
 fn finalize_atomic_root_block_size(
@@ -3711,6 +3798,7 @@ pub(crate) struct LayoutStageFacts {
     pub(crate) viewport_inline_size: CssPixels,
     pub(crate) viewport_block_size: CssPixels,
     pub(crate) document_in_quirks_mode: bool,
+    pub(crate) document_in_limited_quirks_mode: bool,
 }
 
 /// What a layout stage computes from: the arena and the layout stage's scratch, borrowed for the
@@ -4150,6 +4238,7 @@ mod baseline_tests {
                 viewport_inline_size: CssPixels::from_integer(800),
                 viewport_block_size: CssPixels::from_integer(600),
                 document_in_quirks_mode: false,
+                document_in_limited_quirks_mode: false,
             },
         );
         RunState::with_root(pass, parent, Node::INVALID, None, |_, pass| {
