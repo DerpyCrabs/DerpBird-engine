@@ -91,7 +91,7 @@ private:
     virtual void resolve_request_header_policy(u64, u64, bool, bool) override;
     virtual void resolve_canonical_url_policy(u64, u64, bool, bool) override;
     virtual void resolve_response_header_policy(u64 request_id, u64 generation, u8 policy, bool background) override;
-    virtual void start_request(u64 request_id, ByteString, URL::URL, Vector<HTTP::Header>, ByteBuffer, HTTP::CacheMode, Optional<HTTP::NetworkIsolationKey>, HTTP::Cookie::IncludeCredentials, bool create_transfer_lease, Optional<u32> address_selection_hint, bool notify_on_cache_miss, i32 originating_process_id, u64 originating_page_id, HTTP::Cookie::SameSiteContext same_site_context, bool suppress_response_cookies, u8 query_response_policy) override;
+    virtual void start_request(u64 request_id, ByteString, URL::URL, Vector<HTTP::Header>, ByteBuffer, HTTP::CacheMode, Optional<HTTP::NetworkIsolationKey>, HTTP::Cookie::IncludeCredentials, bool create_transfer_lease, Optional<u32> address_selection_hint, bool notify_on_cache_miss, u64 originating_page_id, HTTP::Cookie::SameSiteContext same_site_context, bool suppress_response_cookies, u8 query_response_policy) override;
     virtual void adopt_request(int source_client_id, u64 source_request_id, u64 target_request_id, bool preserve_transfer_lease, Optional<int> owner_client_id) override;
     virtual void release_request_transfer_lease(int source_client_id, u64 source_request_id) override;
     virtual Messages::RequestServer::StopRequestResponse stop_request(u64 request_id) override;

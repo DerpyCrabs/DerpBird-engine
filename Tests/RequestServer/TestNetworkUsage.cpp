@@ -55,7 +55,7 @@ struct TestServer {
     {
         auto message = make<Messages::RequestServer::StartRequest>(
             request_id, ByteString { "GET" }, move(url), Vector<HTTP::Header> {}, ByteBuffer {},
-            HTTP::CacheMode::NoStore, Optional<HTTP::NetworkIsolationKey> {}, HTTP::Cookie::IncludeCredentials::No, false, Optional<u32> {}, false, originating_page_id, HTTP::Cookie::SameSiteContext {});
+            HTTP::CacheMode::NoStore, Optional<HTTP::NetworkIsolationKey> {}, HTTP::Cookie::IncludeCredentials::No, false, Optional<u32> {}, false, originating_page_id, HTTP::Cookie::SameSiteContext {}, false, 0);
         VERIFY(!MUST(static_cast<RequestServerEndpoint::Stub&>(*connection).handle(move(message))));
     }
 
@@ -63,7 +63,7 @@ struct TestServer {
     {
         auto message = make<Messages::RequestServer::WebsocketConnect>(
             websocket_id, move(url), Optional<HTTP::NetworkIsolationKey> {}, ByteString { "http://127.0.0.1" }, Vector<ByteString> {},
-            Vector<ByteString> {}, Vector<HTTP::Header> {}, originating_page_id, HTTP::Cookie::SameSiteContext {});
+            Vector<ByteString> {}, Vector<HTTP::Header> {}, originating_page_id, HTTP::Cookie::SameSiteContext {}, 0);
         VERIFY(!MUST(static_cast<RequestServerEndpoint::Stub&>(*connection).handle(move(message))));
     }
 

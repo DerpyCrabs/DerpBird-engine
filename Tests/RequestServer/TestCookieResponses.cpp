@@ -188,7 +188,7 @@ public:
     void start_request(u64 request_id, Optional<URL::URL> target_url = {}, ByteString method = "GET"sv, Vector<HTTP::Header> headers = {}, Optional<HTTP::NetworkIsolationKey> network_isolation_key = {}, bool query_policy = false, HTTP::Cookie::SameSiteContext same_site_context = {})
     {
         auto url = target_url.value_or(URL::Parser::basic_parse("http://localhost"sv).release_value());
-        auto message = make<Messages::RequestServer::StartRequest>(request_id, move(method), move(url), move(headers), ByteBuffer {}, HTTP::CacheMode::Default, move(network_isolation_key), HTTP::Cookie::IncludeCredentials::Yes, true, Optional<u32> {}, false, 0, 0, same_site_context, false, query_policy);
+        auto message = make<Messages::RequestServer::StartRequest>(request_id, move(method), move(url), move(headers), ByteBuffer {}, HTTP::CacheMode::Default, move(network_isolation_key), HTTP::Cookie::IncludeCredentials::Yes, true, Optional<u32> {}, false, 0, same_site_context, false, query_policy);
         auto response = dispatch(move(message));
         VERIFY(!response);
     }

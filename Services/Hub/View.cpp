@@ -286,10 +286,7 @@ void View::forward_callbacks_to_ui(bool is_tab)
         auto input_id = ConnectionFromUI::input_id_of(event.browser_data.ptr());
         if (!input_id.has_value())
             return;
-        auto input_id = ConnectionFromUI::input_id_of(*event.browser_data);
-        if (!input_id.has_value()) return;
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_finish_handling_key_event(view_id(), *input_id, event.clone_without_browser_data());
         }
     };
@@ -299,10 +296,7 @@ void View::forward_callbacks_to_ui(bool is_tab)
         auto input_id = ConnectionFromUI::input_id_of(event.browser_data.ptr());
         if (!input_id.has_value())
             return;
-        auto input_id = ConnectionFromUI::input_id_of(*event.browser_data);
-        if (!input_id.has_value()) return;
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_finish_handling_mouse_event(view_id(), *input_id, event.clone_without_browser_data(), result);
         }
     };
@@ -312,10 +306,7 @@ void View::forward_callbacks_to_ui(bool is_tab)
         auto input_id = ConnectionFromUI::input_id_of(event.browser_data.ptr());
         if (!input_id.has_value())
             return;
-        auto input_id = ConnectionFromUI::input_id_of(*event.browser_data);
-        if (!input_id.has_value()) return;
         if (auto* ui = ConnectionFromUI::the()) {
-            push_state_to_ui();
             ui->async_view_finish_handling_drag_event(view_id(), *input_id, event.clone_without_browser_data());
         }
     };

@@ -327,7 +327,7 @@ void ConnectionFromClient::resolve_response_header_policy(u64 request_id, u64 ge
     if (request.has_value()) (*request)->resolve_response_header_policy({}, generation, policy);
 }
 
-void ConnectionFromClient::start_request(u64 request_id, ByteString method, URL::URL url, Vector<HTTP::Header> request_headers, ByteBuffer request_body, HTTP::CacheMode cache_mode, Optional<HTTP::NetworkIsolationKey> network_isolation_key, HTTP::Cookie::IncludeCredentials include_credentials, bool create_transfer_lease, Optional<u32> address_selection_hint, bool notify_on_cache_miss, i32 originating_process_id, u64 originating_page_id, HTTP::Cookie::SameSiteContext same_site_context, bool suppress_response_cookies, u8 query_response_policy)
+void ConnectionFromClient::start_request(u64 request_id, ByteString method, URL::URL url, Vector<HTTP::Header> request_headers, ByteBuffer request_body, HTTP::CacheMode cache_mode, Optional<HTTP::NetworkIsolationKey> network_isolation_key, HTTP::Cookie::IncludeCredentials include_credentials, bool create_transfer_lease, Optional<u32> address_selection_hint, bool notify_on_cache_miss, u64 originating_page_id, HTTP::Cookie::SameSiteContext same_site_context, bool suppress_response_cookies, u8 query_response_policy)
 {
     note_event_tick("ipc-start-request"sv);
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: start_request({}, {})", request_id, url);
