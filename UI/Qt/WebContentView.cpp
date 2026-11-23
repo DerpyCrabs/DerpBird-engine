@@ -360,6 +360,7 @@ WebContentView::WebContentView(QWidget* window, Optional<u64> hub_view_id, WebCo
             schedule_repaint();
 #endif
         }
+        emit ready_to_paint();
     };
 
     on_cursor_change = [this](auto cursor) {
