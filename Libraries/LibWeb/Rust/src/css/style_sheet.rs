@@ -703,7 +703,6 @@ pub unsafe extern "C" fn rust_style_sheets_visit_font_face_rules(
     }
 }
 
-/// Publish the layer order of the host's ordered, active author sheets.
 /// Publish one cascade origin's layer order independently of the other origins.
 ///
 /// # Safety

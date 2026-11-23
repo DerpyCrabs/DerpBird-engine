@@ -396,7 +396,7 @@ impl ContextState {
         }
     }
 
-    pub fn frame_inputs_for_screenshot(&mut self, now: MonotonicTime) -> ScreenshotInputs {
+    pub fn frame_inputs_for_screenshot(&mut self, now: MonotonicTime, document_origin: bool) -> ScreenshotInputs {
         assert!(self.scene.display_list().is_some());
         // Screenshot requests can arrive between display ticks, so sample animations and scrollbar visibility at capture
         // time.
@@ -404,8 +404,16 @@ impl ContextState {
         self.advance_visual_animations(capture_time);
         self.update_scrollbar_visibility(now);
         let scrollbar_fades_changed = self.advance_scrollbar_fades(capture_time);
+        let mut frame_inputs = self.frame_inputs_as_presented_now(capture_time);
+        if document_origin {
+            if let Some(index) = self.async_scroll_tree.viewport_scroll_node_index() {
+                frame_inputs.presented_scroll_state_snapshot.set_device_offset_for_index(index, Default::default());
+                resolve_sticky_offsets(&frame_inputs.visual_context_tree, &mut frame_inputs.presented_scroll_state_snapshot);
+            }
+            frame_inputs.scrollbars.clear();
+        }
         ScreenshotInputs {
-            frame_inputs: self.frame_inputs_as_presented_now(capture_time),
+            frame_inputs,
             scrollbar_fades_changed,
         }
     }

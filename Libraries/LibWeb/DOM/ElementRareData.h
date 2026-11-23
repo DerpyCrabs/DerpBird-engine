@@ -32,7 +32,6 @@ struct Element::RareData
     bool derpbird_userscript_insertion_active { false };
     RefPtr<DerpBirdInsertionAuthority> derpbird_insertion_authority;
 
-    mutable Optional<Utf16FlyString> html_uppercased_qualified_name;
     GC::Ptr<CSS::StylePropertyMap> attribute_style_map;
     GC::Ptr<DOMTokenList> class_list;
     GC::Ptr<DOMTokenList> part_list;

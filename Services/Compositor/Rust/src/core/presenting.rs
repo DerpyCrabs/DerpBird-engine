@@ -1282,21 +1282,7 @@ impl CompositorCore {
         let Some(display_list) = context.borrow().display_list() else {
             return false;
         };
-        let mut screenshot_inputs = context.borrow_mut().frame_inputs_for_screenshot(now);
-        // Change only this snapshot: the live page's scroll position and viewport are untouched.
-        if document_origin {
-            let inputs = &mut screenshot_inputs.frame_inputs;
-            if let Some(index) = inputs.viewport_scroll_node_index {
-                inputs
-                    .presented_scroll_state_snapshot
-                    .set_device_offset_for_index(index, Default::default());
-                libcompositing_rust::scrolling::resolve_sticky_offsets(
-                    &inputs.visual_context_tree,
-                    &mut inputs.presented_scroll_state_snapshot,
-                );
-            }
-            inputs.scrollbars.clear();
-        }
+        let screenshot_inputs = context.borrow_mut().frame_inputs_for_screenshot(now, document_origin);
         let nested_contexts = ContextsNestedIn {
             core: self,
             parent_context_id: context_id,
