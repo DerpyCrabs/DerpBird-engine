@@ -10,4 +10,9 @@ macro(vcpkg_from_github)
     _vcpkg_from_github(${ARGN} ${ladybird_curl_patches})
 endmacro()
 
+# Qt Network loads the system libproxy, which imports versioned OpenSSL curl symbols.
+if(VCPKG_TARGET_IS_LINUX)
+    list(APPEND VCPKG_CMAKE_CONFIGURE_OPTIONS -DCURL_LIBCURL_VERSIONED_SYMBOLS=ON)
+endif()
+
 include("${CURRENT_PORT_DIR}/portfile.cmake")
