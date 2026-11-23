@@ -115,6 +115,7 @@ if (LINUX AND NOT ANDROID)
         target_sources(ladybird_impl PRIVATE "${agent_protocol_header}")
         target_include_directories(ladybird_impl PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
         target_compile_definitions(ladybird_impl PUBLIC DERPBIRD_HAS_WAYLAND_APP_ID)
+        target_link_libraries(ladybird_impl PRIVATE Qt::GuiPrivate)
     endif()
 
     if (WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_FOUND)

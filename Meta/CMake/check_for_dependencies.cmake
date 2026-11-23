@@ -151,7 +151,7 @@ if (ENABLE_GUI_TARGETS AND NOT (ANDROID OR VCPKG_TARGET_ANDROID))
         list(APPEND LADYBIRD_QT_COMPONENTS Positioning)
     endif()
 
-    if (APPLE OR HAS_DIRECTX)
+    if (APPLE OR (LINUX AND NOT ANDROID) OR HAS_DIRECTX)
         # The native presentation paths use platform GPU buffer handles directly instead of copying frames through CPU
         # memory.
         list(APPEND LADYBIRD_QT_COMPONENTS GuiPrivate)
