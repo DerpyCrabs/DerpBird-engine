@@ -44,7 +44,7 @@ inline ErrorOr<Utf16String> replace_derpbird_json_response(Utf16String input, St
     if (context_result.is_error()) return Error::from_string_literal("Unable to create JSON filtering realm");
     auto context = context_result.release_value();
     ScopeGuard pop_context = [&] { vm.pop_execution_context(); };
-    auto& realm = *context->realm;
+    auto& realm = *context->realm();
     auto& global = realm.global_object();
     global.define_direct_property("__input"_utf16_fly_string, JS::PrimitiveString::create(vm, move(input)), JS::default_attributes);
     global.define_direct_property("__kind"_utf16_fly_string, JS::PrimitiveString::create(vm, Utf16String::from_utf8(kind)), JS::default_attributes);

@@ -55,7 +55,7 @@ public:
             [&](JS::Realm& realm) -> GC::Ref<JS::Object> {
                 return context->window_proxy_for(*world, realm)->object();
             });
-        auto& realm = *execution->realm;
+        auto& realm = *execution->realm();
         auto intrinsics = realm.create<Bindings::Intrinsics>(realm);
         realm.set_host_defined(vm.heap().allocate<Bindings::HostDefined>(intrinsics, *world, window->principal_realm()));
         Bindings::cache_global_object_wrapper(realm);
