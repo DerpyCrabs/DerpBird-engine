@@ -171,6 +171,7 @@ public:
     void set_url_is_hidden(bool url_is_hidden) { m_location_edit->set_url_is_hidden(url_is_hidden); }
 
 public:
+    void show_site_settings_popover();
     void show_private_session_popover();
     void show_bookmark_popover();
     void close_popovers();
@@ -209,7 +210,6 @@ private:
     virtual void tab_settings_changed() override;
     virtual void config_variable_changed(WebView::ConfigVariableID) override;
 
-    void show_site_settings_popover();
     void refresh_site_settings_popover();
     void show_zoom_popover(QAction& zoom_level);
     void show_translation_menu();

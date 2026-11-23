@@ -78,7 +78,7 @@ private:
             next();
             return;
         }
-        surface.view->take_frame_snapshot({}, [self = shared_from_this(), surface](Optional<Gfx::ShareableBitmap> frame) {
+        surface.view->take_frame_snapshot([self = shared_from_this(), surface](Optional<Gfx::ShareableBitmap> frame) {
             if (!self->m_window || !surface.view || !surface.view->isVisibleTo(self->m_window)
                 || QRect(surface.view->mapTo(self->m_window, QPoint()), surface.view->size()) != surface.rect
                 || !frame.has_value() || !frame->is_valid() || !frame->bitmap()) { self->fail(); return; }
