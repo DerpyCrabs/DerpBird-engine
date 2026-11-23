@@ -97,7 +97,7 @@ void MediaControls::create_shadow_tree()
         m_dom->container->class_list()->add("picture-in-picture-player"_utf16);
 
     if (m_dom->download_inline && (!m_media_element->paused() || m_media_element->played()->length()))
-        MUST(m_dom->container->class_list()->add("started"_utf16));
+        m_dom->container->class_list()->add("started"_utf16);
     update_download_button();
     // Initialize state
     update_play_pause_icon();
@@ -215,7 +215,7 @@ void MediaControls::set_up_event_listeners()
     add_event_listener(media_realm, media_element, HTML::EventNames::playing, [](MediaControls& self) {
         self.update_play_pause_icon();
         self.update_placeholder_visibility();
-        MUST(self.m_dom->container->class_list()->add("started"_utf16));
+        self.m_dom->container->class_list()->add("started"_utf16);
         self.request_timeline_update();
         return true;
     });
@@ -262,7 +262,7 @@ void MediaControls::set_up_event_listeners()
         return true;
     });
     add_event_listener(media_realm, media_element, HTML::EventNames::emptied, [](MediaControls& self) {
-        MUST(self.m_dom->container->class_list()->remove("started"_utf16));
+        self.m_dom->container->class_list()->remove("started"_utf16);
         self.update_download_button();
         self.update_placeholder_visibility();
         self.update_timeline();
@@ -606,7 +606,7 @@ void MediaControls::update_download_button()
     bool downloadable = !source.is_empty() && url.has_value() && url->scheme().is_one_of("http"sv, "https"sv)
         && !url->serialize_path().ends_with(".m3u8"sv, CaseSensitivity::CaseInsensitive)
         && !url->serialize_path().ends_with(".mpd"sv, CaseSensitivity::CaseInsensitive);
-    MUST(m_dom->container->class_list()->toggle("downloadable"_utf16, downloadable));
+    m_dom->container->class_list()->toggle("downloadable"_utf16, downloadable);
     if (downloadable)
         m_dom->download_inline->set_attribute_value(AttributeNames::href, source);
     else
