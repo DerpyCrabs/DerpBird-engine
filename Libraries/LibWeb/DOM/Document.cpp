@@ -2346,15 +2346,15 @@ void Document::set_url(URL::URL const& url)
     // subscribed. Queue it after navigation bookkeeping; never run author code
     // synchronously from set_url(). Revoked worlds remove their observer flag.
     bool observes_url = false;
-    for (auto observer : m_document_observers)
-        observes_url |= observer->observes_derpbird_url_changes();
+    for (auto& observer : m_document_observers)
+        observes_url |= observer.observes_derpbird_url_changes();
     if (observes_url && is_fully_active()) {
         HTML::queue_global_task(HTML::Task::Source::DOMManipulation, HTML::relevant_global_object(*this),
             GC::create_function(heap(), GC::captures(GC::Ref { *this }), [](auto& document) {
                 if (!document->is_fully_active()) return;
                 bool subscribed = false;
-                for (auto observer : document->m_document_observers)
-                    subscribed |= observer->observes_derpbird_url_changes();
+                for (auto& observer : document->m_document_observers)
+                    subscribed |= observer.observes_derpbird_url_changes();
                 if (!subscribed) return;
                 if (auto window = document->window())
                     window->dispatch_event(DOM::Event::create(HTML::relevant_global_object(*window), "urlchange"_fly_string));
