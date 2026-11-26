@@ -1467,12 +1467,7 @@ void Request::resolve_connection_host(ByteString host)
                 self.transition_to_state(State::Error);
                 return;
             }
-            // A system resolver can append its second address family later.
-            // Pin exactly the records whose canonical owners we check below.
-            auto snapshot = make_ref_counted<DNS::LookupResult>(DNS::Messages::DomainName::from_string(host));
-            for (auto const& record : dns_result->records())
-                snapshot->add_record(record);
-            self.m_dns_result = move(snapshot);
+            self.m_dns_result = move(dns_result);
             self.check_canonical_urls_before_connect();
         }));
 }

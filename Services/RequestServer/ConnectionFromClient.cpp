@@ -1079,13 +1079,11 @@ void ConnectionFromClient::look_up_websocket_host(u64 websocket_id, u64 originat
             if (!self->m_pending_websockets.remove(websocket_id))
                 return;
 
-            auto snapshot = make_ref_counted<DNS::LookupResult>(DNS::Messages::DomainName::from_string(host));
-            for (auto const& record : dns_result->records()) snapshot->add_record(record);
             Vector<URL::URL> aliases;
             Vector<String> addresses;
             auto policy_flags = self->m_websocket_policy_enabled.take(websocket_id).value_or(0);
             if (policy_flags & 8) {
-                for (auto const& address : snapshot->cached_addresses()) {
+                for (auto const& address : dns_result->cached_addresses()) {
                     if (addresses.size() >= 256) {
                         self->fail_websocket(websocket_id, Requests::WebSocket::Error::CouldNotEstablishConnection);
                         return;
@@ -1094,7 +1092,7 @@ void ConnectionFromClient::look_up_websocket_host(u64 websocket_id, u64 originat
                 }
             }
             if (policy_flags & 2) {
-                for (auto const& owner : snapshot->canonical_address_names()) {
+                for (auto const& owner : dns_result->canonical_address_names()) {
                     auto name = owner.view();
                     if (!name.is_ascii()) {
                         self->fail_websocket(websocket_id, Requests::WebSocket::Error::CouldNotEstablishConnection);
@@ -1111,9 +1109,9 @@ void ConnectionFromClient::look_up_websocket_host(u64 websocket_id, u64 originat
                     aliases.append(move(alias));
                 }
             }
-            auto connect = [weak_self, websocket_id, originating_page_id, url = move(url), origin = move(origin), protocols = move(protocols), extensions = move(extensions), headers = move(additional_request_headers), proxy = move(proxy), snapshot = move(snapshot)]() mutable {
+            auto connect = [weak_self, websocket_id, originating_page_id, url = move(url), origin = move(origin), protocols = move(protocols), extensions = move(extensions), headers = move(additional_request_headers), proxy = move(proxy), dns_result]() mutable {
                 if (auto self = weak_self.strong_ref())
-                    self->open_websocket(websocket_id, originating_page_id, move(url), move(origin), move(protocols), move(extensions), move(headers), move(proxy), move(snapshot));
+                    self->open_websocket(websocket_id, originating_page_id, move(url), move(origin), move(protocols), move(extensions), move(headers), move(proxy), dns_result);
             };
             if (aliases.is_empty() && addresses.is_empty()) { connect(); return; }
             self->m_pending_websockets.set(websocket_id);
