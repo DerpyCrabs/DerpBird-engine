@@ -55,7 +55,6 @@ private:
     explicit DocumentObserver(Document&);
 
     virtual void visit_edges(GC::Cell::Visitor&) override;
-    virtual void finalize() override;
 
     bool m_observes_derpbird_url_changes { false };
     GC::Ref<Document> m_document;

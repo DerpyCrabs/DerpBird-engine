@@ -10,7 +10,15 @@ class QWidget;
 class QWindow;
 struct wl_surface;
 
+namespace QNativeInterface {
+
+struct QWaylandApplication;
+
+}
+
 namespace Ladybird {
+
+QNativeInterface::QWaylandApplication* wayland_application();
 
 // The surface of an existing native Wayland window. This does not create a platform window.
 wl_surface* wayland_surface_for_window(QWindow const&);

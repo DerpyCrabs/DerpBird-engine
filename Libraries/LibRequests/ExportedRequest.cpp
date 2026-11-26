@@ -23,6 +23,7 @@ ErrorOr<void> encode(Encoder& encoder, Requests::ExportedRequest const& request)
     TRY(encoder.encode(request.response_headers));
     TRY(encoder.encode(request.canonical_host_names));
     TRY(encoder.encode(request.policy_ip_addresses));
+    TRY(encoder.encode(request.may_rely_on_certificate_exception));
     TRY(encoder.encode(request.body));
     TRY(encoder.encode(request.status));
     return {};
@@ -44,6 +45,7 @@ ErrorOr<Requests::ExportedRequest> decode(Decoder& decoder)
     if (request.canonical_host_names.byte_count() > 4096) return Error::from_string_literal("Oversized canonical provenance");
     request.policy_ip_addresses = TRY(decoder.decode<String>());
     if (request.policy_ip_addresses.byte_count() > 16384) return Error::from_string_literal("Oversized address provenance");
+    request.may_rely_on_certificate_exception = TRY(decoder.decode<bool>());
     request.body = TRY(decoder.decode<IPC::File>());
     request.status = TRY(decoder.decode<IPC::File>());
     return request;

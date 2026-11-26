@@ -35,6 +35,9 @@ struct ExportedRequest {
     // Live response provenance only; never persisted in the HTTP cache.
     String policy_ip_addresses;
 
+    // The exporter could only reach the server through a certificate exception, so the response must not be cached.
+    bool may_rely_on_certificate_exception { false };
+
     IPC::File body;
     IPC::File status;
 };

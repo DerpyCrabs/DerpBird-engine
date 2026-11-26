@@ -1095,9 +1095,7 @@ void ConnectionFromClient::look_up_websocket_host(u64 websocket_id, u64 originat
             }
             if (policy_flags & 2) {
                 for (auto const& owner : snapshot->canonical_address_names()) {
-                    auto text = owner.to_canonical_string();
-                    auto name = text.view();
-                    if (name.ends_with('.')) name = name.substring_view(0, name.length() - 1);
+                    auto name = owner.view();
                     if (!name.is_ascii()) {
                         self->fail_websocket(websocket_id, Requests::WebSocket::Error::CouldNotEstablishConnection);
                         return;
@@ -1161,7 +1159,7 @@ void ConnectionFromClient::open_websocket(u64 websocket_id, u64 originating_page
     if (auto const& path = default_certificate_path(); !path.is_empty())
         connection_info.set_root_certificates_path(path);
 
-    auto impl = WebSocketImplCurl::create(m_websocket_curl.handle);
+    auto impl = WebSocketImplCurl::create(m_websocket_curl.handle, m_is_private);
     impl->set_proxy(move(proxy));
     impl->set_performance_origin(client_id(), originating_page_id);
     auto connection = WebSocket::WebSocket::create(move(connection_info), move(impl));

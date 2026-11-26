@@ -221,8 +221,11 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
     request->set_redirect_mode(Fetch::Infrastructure::Request::RedirectMode::Error);
 
     // FIXME: Fetch request as per the remaining steps of https://websockets.spec.whatwg.org/#concept-websocket-establish
-    // AD-HOC: Until the opening handshake goes through fetch, run the blocking checks and the HSTS upgrade of main
-    //         fetch here.
+    // AD-HOC: Until the opening handshake goes through fetch, append `Accept-Language` and run the blocking checks
+    //         and the HSTS upgrade of main fetch here.
+    auto loader_config = current_loader_config();
+    Fetch::Fetching::append_accept_language_header_if_missing(*request, loader_config->config);
+
     request->set_policy_container(client.policy_container()->clone());
     request->set_client_snapshot(Fetch::Fetching::snapshot_client_context(client));
     auto report_violation = ContentSecurityPolicy::violation_reporter_for_request(client.realm(), request);
@@ -255,10 +258,8 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
     for (auto const& protocol : protocols)
         TRY(protocol_byte_strings.try_append(protocol.to_utf8().to_byte_string()));
 
-    auto additional_headers = HTTP::HeaderList::create();
-
-    auto user_agent = Fetch::Infrastructure::default_user_agent_value(current_loader_config()->config, request);
-    additional_headers->append({ "User-Agent"sv, user_agent.to_byte_string() });
+    auto user_agent = Fetch::Infrastructure::default_user_agent_value(loader_config->config, request);
+    request->header_list()->append({ "User-Agent"sv, user_agent.to_byte_string() });
 
     if (ResourceLoader::proxy_autoconfig_url().has_value()) {
         dbgln("FIXME: Evaluate the PAC file to find the proxy for {}; failing the WebSocket connection", url_record);
@@ -283,7 +284,7 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
             return Error::from_string_literal("WebSocket blocked by content filter");
         }
     }
-    m_websocket = request_client->websocket_connect(connection_url, move(network_isolation_key), origin_string, protocol_byte_strings, {}, additional_headers, originating_page_id, request->same_site_context(), blocking ? (2 | (ContentBlocker::the().has_ip_address_filters() ? 8 : 0)) : 0);
+    m_websocket = request_client->websocket_connect(connection_url, move(network_isolation_key), origin_string, protocol_byte_strings, {}, *request->header_list(), originating_page_id, { .status = request->same_site_status(), .is_safe_method = true }, blocking ? (2 | (ContentBlocker::the().has_ip_address_filters() ? 8 : 0)) : 0);
     m_websocket->canonical_url_policy = [page = GC::Weak<Page> { &page }, source, top_level, connection_url](Vector<URL::URL> const& aliases, Vector<String> const& addresses) {
         if (!page) return false;
         if (!page->content_blocking_enabled_for_url(top_level)) return true;

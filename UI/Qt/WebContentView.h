@@ -476,6 +476,7 @@ private:
     friend struct VulkanWindowRenderer;
 
     void create_vulkan_window();
+    void release_vulkan_window_surface_for_move();
     void destroy_vulkan_window();
     void update_vulkan_window_mask();
     void update_vulkan_alpha_blending_support();
@@ -503,6 +504,7 @@ private:
     void update_page_surface(PageSurfaceContent);
     void hide_page_surface();
     bool page_surface_can_show_frames() const;
+    void give_up_on_page_surface();
     void fall_back_from_page_surface();
     void destroy_page_surface();
     void release_retired_backing_stores_no_longer_painted();

@@ -254,6 +254,8 @@ private:
     String policy_ip_addresses() const;
     void query_request_headers();
     void complete_request_header_policy(u64 generation, bool allowed);
+    bool configure_certificate_verification();
+    bool may_rely_on_certificate_exception() const;
     void handle_connect_state();
     void handle_fetch_state();
     void handle_read_imported_state();
@@ -454,6 +456,7 @@ private:
         RefPtr<Core::Notifier> body_notifier;
         RefPtr<Core::Notifier> status_notifier;
         bool body_ended { false };
+        bool may_rely_on_certificate_exception { false };
         ByteBuffer status_bytes;
         Optional<Requests::RequestTimingInfo> timing_info;
         Optional<Requests::NetworkError> network_error;

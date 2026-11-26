@@ -94,6 +94,8 @@ set(TEST_SOURCES
     TestPictureInPictureWindow.cpp
     TestPlatformFeatures.cpp
     TestProfile.cpp
+    TestRecentLossCounter.cpp
+    TestScrollbarSettings.cpp
     TestSessionHistory.cpp
     TestSessionHistoryTraversalQueue.cpp
     TestSiteCompatibilityDataLoading.cpp
@@ -117,7 +119,6 @@ if (APPLE OR LINUX)
         TestCrashReportReview.cpp
         TestCrashReportStore.cpp
         TestFontService.cpp
-        TestLocalFileRoot.cpp
         TestOpenLocalFileForRenderer.cpp
         TestRendererFontService.cpp
     )
@@ -158,6 +159,7 @@ if (NOT WIN32)
         TestAutocomplete.cpp
         TestBeforeUnload.cpp
         TestBrowserHistoryTraversal.cpp
+        TestChildFrameReports.cpp
         TestCompositorStartup.cpp
         TestCrashOverlay.cpp
         TestCrashReportSubmission.cpp
@@ -165,6 +167,7 @@ if (NOT WIN32)
         TestFavicon.cpp
         TestFileDownloader.cpp
         TestFocusWithoutSystemFocus.cpp
+        TestFormValidationMessage.cpp
         TestGamepadExposure.cpp
         TestImageDecoderIsolation.cpp
         TestInputMethodState.cpp
@@ -184,6 +187,7 @@ if (NOT WIN32)
         TestRendererViolationReports.cpp
         TestRequestServerClientSessions.cpp
         TestRequestServerDiskCaches.cpp
+        TestRequestServerRelaunchFailure.cpp
         TestShadowTreeTooltipsAndLinks.cpp
         TestSharedWorkerHost.cpp
         TestSpareWebContentProcess.cpp

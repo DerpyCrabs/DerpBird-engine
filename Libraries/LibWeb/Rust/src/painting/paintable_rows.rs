@@ -1062,8 +1062,6 @@ impl LayoutNodeArena {
     }
 
     pub(crate) fn paintable_row_cleared(&mut self, reset: PaintableRowReset) {
-        // NB: The overflow index may keep listing this box. Overflow measurement passes over boxes without a row, and
-        //     populating the row again notes the box anew.
         self.reset_paintable_row(true, reset);
     }
 
@@ -1127,6 +1125,9 @@ impl LayoutNodeArena {
             }
         }
         content.index_inline_boxes();
+        drop(side);
+        // The replacement gathered its paint order inputs while this content still named the old box.
+        self.refresh_paint_order_inputs(new_node);
     }
 
     pub(crate) fn push_propagated_text_decoration_damage(&mut self, root: NodeSlotId) {

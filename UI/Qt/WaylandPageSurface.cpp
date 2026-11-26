@@ -45,13 +45,17 @@ static u32 opaque_drm_format(u32 drm_format)
 OwnPtr<WaylandPageSurface> WaylandPageSurface::create()
 {
     static Optional<Globals> const globals = []() -> Optional<Globals> {
-        auto* wayland_application = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>();
+        auto* application = wayland_application();
+        auto* compositor = application ? application->compositor() : nullptr;
+        if (!compositor)
+            return {};
+
         auto registry = WaylandRegistry::create();
-        if (!registry || !wayland_application->compositor())
+        if (!registry)
             return {};
 
         Globals globals {
-            .compositor = wayland_application->compositor(),
+            .compositor = compositor,
             .subcompositor = registry->bind<wl_subcompositor>(wl_subcompositor_interface, 1),
             .viewporter = registry->bind<wp_viewporter>(wp_viewporter_interface, 1),
             .dmabuf = registry->bind<zwp_linux_dmabuf_v1>(zwp_linux_dmabuf_v1_interface, 3),
@@ -244,13 +248,13 @@ WaylandPageSurface::Buffer* WaylandPageSurface::buffer_for(Frame const& frame)
     buffer->page_id = frame.page_id;
     buffer->bitmap_id = frame.bitmap_id;
     buffer->drm_format = drm_format;
-    buffer->modifier = frame.dmabuf.modifier;
+    buffer->modifier = frame.modifier;
 
     buffer->params = zwp_linux_dmabuf_v1_create_params(m_globals.dmabuf);
     for (size_t plane_index = 0; plane_index < frame.dmabuf.planes.size(); ++plane_index) {
         auto const& plane = frame.dmabuf.planes[plane_index];
         zwp_linux_buffer_params_v1_add(buffer->params, frame.dmabuf.objects[plane.object_index].fd(), plane_index, plane.offset, plane.pitch,
-            static_cast<u32>(frame.dmabuf.modifier >> 32), static_cast<u32>(frame.dmabuf.modifier & 0xffffffff));
+            static_cast<u32>(frame.modifier >> 32), static_cast<u32>(frame.modifier & 0xffffffff));
     }
     static zwp_linux_buffer_params_v1_listener const params_listener {
         .created = buffer_created,
