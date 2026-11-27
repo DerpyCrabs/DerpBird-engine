@@ -5,6 +5,8 @@
  */
 
 #include <UI/Qt/DerpBirdChrome.h>
+#include <UI/Qt/DerpBirdBookmarkDialog.h>
+#include <QEventLoop>
 #include <UI/Qt/DerpBirdCredentialManager.h>
 #include <UI/Qt/DerpBirdStyleStore.h>
 #include <LibWebView/Profile.h>
@@ -1000,6 +1002,8 @@ ErrorOr<void> Application::connect_to_hub(Main::Arguments const& arguments)
 
     m_browser_options.urls = move(state.urls);
     m_browser_options.raw_urls = move(state.raw_urls);
+    if (state.standalone_app)
+        m_browser_options.new_window = WebView::NewWindow::App;
     m_browser_options.devtools_port = state.devtools_port;
     if (state.devtools_enabled)
         m_devtools_port = state.devtools_port;
@@ -1269,8 +1273,78 @@ void Application::set_shows_compositor_layers(bool shows)
     m_compositor_layers_window->raise();
 }
 
+// Menu actions and download completions can arrive while no browser window has focus.
+BrowserWindow* Application::shell_dialog_window()
+{
+    if (!qEnvironmentVariableIsSet("DERPBIRD_UI"))
+        return nullptr;
+    auto& app = Application::the();
+    if (auto* active = app.active_window_if_any(); active && active->derpbird_chrome())
+        return active;
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (auto* window = as_if<BrowserWindow>(widget); window && window->isVisible() && window->derpbird_chrome())
+            return window;
+    }
+    return &app.new_window({ Application::settings().new_tab_page_url() }, app.configuration_for_new_window());
+}
+
 void Application::show_process_manager()
 {
+    if (auto* active = shell_dialog_window()) {
+        auto* chrome = active->derpbird_chrome();
+        auto& dialog = chrome->window_dialog();
+        if (dialog.is_open()) return;
+        auto* timer = new QTimer(chrome);
+        dialog.show("processes", "Task manager", {}, {}, "Done", [timer](bool, auto const&) { timer->stop(); timer->deleteLater(); });
+        auto snapshots = [this] {
+#ifdef LADYBIRD_HUB_IN_OWN_PROCESS
+            return process_snapshots();
+#else
+            return WebView::process_snapshots(WebView::Application::process_manager());
+#endif
+        };
+        auto terminable = [](auto type) { return !first_is_one_of(type, WebView::ProcessType::Browser, WebView::ProcessType::UI, WebView::ProcessType::Hub); };
+        auto refresh = [chrome, snapshots, terminable] {
+            JsonArray rows;
+            for (auto const& process : snapshots()) {
+                JsonObject row;
+                row.set("id"sv, process.child_id);
+                row.set("pid"sv, process.pid);
+                row.set("name"sv, WebView::process_name_from_type(process.type));
+                row.set("cpu"sv, static_cast<double>(process.cpu_percent));
+                row.set("bytes"sv, process.memory_usage_bytes);
+                row.set("canEnd"sv, terminable(process.type));
+                JsonArray pages;
+                if (process.site_url.has_value()) pages.must_append(process.site_url->serialize());
+                for (auto const& tab : process.tabs) pages.must_append(tab.title.is_empty() ? tab.page.url.serialize() : tab.title.to_utf8());
+                for (auto const& frame : process.frames) pages.must_append(frame.url.serialize());
+                row.set("pages"sv, move(pages));
+                rows.must_append(move(row));
+            }
+            chrome->window_dialog().configure("processes"sv, move(rows));
+            chrome->queue_snapshot();
+        };
+        dialog.on_edit = [chrome, snapshots, terminable, refresh](QString const& text) {
+            bool ok = false;
+            auto id = text.toULongLong(&ok);
+            if (!ok) return;
+            for (auto const& process : snapshots()) {
+                if (process.child_id != id || !terminable(process.type)) continue;
+#ifdef LADYBIRD_HUB_IN_OWN_PROCESS
+                bool ended = HubConnection::the().terminate_process(id);
+#else
+                bool ended = WebView::end_process(WebView::Application::process_manager(), id);
+#endif
+                if (!ended) chrome->window_dialog().configure("message"sv, "Could not end the selected process."sv);
+                break;
+            }
+            refresh();
+        };
+        QObject::connect(timer, &QTimer::timeout, chrome, refresh);
+        timer->start(1000);
+        refresh();
+        return;
+    }
     if (!m_process_manager_window) {
         m_process_manager_window = make<ProcessManagerWindow>(ProcessManagerWindow::Source {
 #ifdef LADYBIRD_HUB_IN_OWN_PROCESS
@@ -1526,19 +1600,23 @@ Optional<String> Application::system_font_family() const
 
 BrowserWindow& Application::new_window(Vector<URL::URL> const& initial_urls, WindowConfiguration const& configuration, BrowserWindow::IsPopupWindow is_popup_window, WebView::IsPrivate is_private, Optional<u64> hub_view_id, ShowWindow show_window, Optional<Web::HTML::PreparedNavigationDescriptor> initial_navigation, QString agent_id)
 {
-    auto* window = new BrowserWindow(initial_urls, is_popup_window, is_private, hub_view_id, {}, agent_id);
+    auto* window = new BrowserWindow(initial_urls, is_popup_window, is_private, hub_view_id, {}, agent_id, configuration.app_id);
 
     if (!agent_id.isEmpty()) {
         window->setWindowRole("derpbird-agent");
         window->setAttribute(Qt::WA_ShowWithoutActivating);
         window->setWindowTitle("DerpBird");
 #ifdef LADYBIRD_HAS_WAYLAND_CLIENT
-        set_wayland_agent_window_identity(*window);
+        set_wayland_window_identity(*window, "org.derpbird.Agent");
 #endif
 #if defined(AK_OS_LINUX)
         set_x11_agent_window_identity(*window);
 #endif
     }
+#ifdef LADYBIRD_HAS_WAYLAND_CLIENT
+    if (!configuration.app_id.isEmpty())
+        set_wayland_window_identity(*window, configuration.app_id.toUtf8());
+#endif
     auto should_focus_location_editor = agent_id.isEmpty() && initial_urls.size() == 1 && initial_urls.first() == Application::settings().new_tab_page_url();
     if (should_focus_location_editor) {
         if (auto* tab = window->current_tab())
@@ -1863,11 +1941,11 @@ void Application::open_startup_tabs(BrowserWindow& window, Vector<URL::URL> cons
 
 BrowserWindow* Application::non_private_window_if_any() const
 {
-    if (m_active_window && m_active_window->is_private() == WebView::IsPrivate::No && m_active_window->property("derpbirdAgentId").toString().isEmpty())
+    if (m_active_window && m_active_window->is_private() == WebView::IsPrivate::No && m_active_window->property("derpbirdAgentId").toString().isEmpty() && !m_active_window->is_app_window())
         return m_active_window;
 
     for (auto* widget : QApplication::topLevelWidgets()) {
-        if (auto* window = as_if<BrowserWindow>(widget); window && window->is_private() == WebView::IsPrivate::No && window->property("derpbirdAgentId").toString().isEmpty())
+        if (auto* window = as_if<BrowserWindow>(widget); window && window->is_private() == WebView::IsPrivate::No && window->property("derpbirdAgentId").toString().isEmpty() && !window->is_app_window())
             return window;
     }
 
@@ -2022,7 +2100,7 @@ void Application::focus_location_editor()
 
 void Application::reopen_recently_closed_tab(BrowserWindow* target_window, Optional<SessionWindowId> unit_id, ReopenClosedWindow reopen_closed_window)
 {
-    if (target_window && !target_window->property("derpbirdAgentId").toString().isEmpty())
+    if (target_window && (target_window->is_app_window() || !target_window->property("derpbirdAgentId").toString().isEmpty()))
         return;
     auto is_private = target_window ? target_window->is_private() : WebView::IsPrivate::No;
     auto& session = target_window ? target_window->session() : session_store(WebView::IsPrivate::No);
@@ -2105,6 +2183,7 @@ void Application::update_feedback_buttons()
 void Application::open_file()
 {
     if (!m_active_window) {
+        if (auto* window = shell_dialog_window()) { window->open_file(); return; }
         auto filename = QFileDialog::getOpenFileUrl(nullptr, "Open file", QDir::homePath(), "All Files (*.*)");
         if (filename.isValid())
             new_window({ ak_url_from_qurl(filename) });
@@ -2241,6 +2320,23 @@ bool Application::confirm_stop_active_downloads(QWidget* parent)
     auto& downloader = RemoteDownloads::the();
 
     if (downloader.has_unresumable_downloads()) {
+        auto* window = parent ? as_if<BrowserWindow>(parent) : shell_dialog_window();
+        if (window && window->derpbird_chrome()) {
+            auto& prompt = window->derpbird_chrome()->window_dialog();
+            if (prompt.is_open()) return false;
+            QEventLoop wait;
+            bool confirmed = false;
+            QObject::connect(window, &QObject::destroyed, &wait, &QEventLoop::quit);
+            prompt.show("downloads", "Cancel active downloads?", "Closing will cancel downloads that cannot be resumed.", {}, "Cancel downloads", [&](bool accepted, auto const&) {
+                confirmed = accepted;
+                wait.quit();
+            });
+            wait.exec();
+            if (!confirmed) return false;
+            downloader.cancel_unresumable_downloads();
+            downloader.pause_active_downloads();
+            return true;
+        }
         QMessageBox dialog(parent ? parent : active_window_if_any());
         dialog.setWindowTitle("Ladybird");
         dialog.setIcon(QMessageBox::Warning);
@@ -2427,7 +2523,7 @@ Tab* Application::activate_tab_with_url(URL::URL const& url, URL::ExcludeFragmen
 {
     auto is_private = m_active_window ? m_active_window->is_private() : WebView::IsPrivate::No;
     for (auto* window : visible_browser_windows_active_first(m_active_window)) {
-        if (window->is_private() != is_private)
+        if (window->is_private() != is_private || window->is_app_window() || !window->property("derpbirdAgentId").toString().isEmpty())
             continue;
 
         auto* tab = window->activate_tab_with_url(url, exclude_fragment);
@@ -2469,11 +2565,11 @@ BrowserWindow* Application::window_of_view(u64 view_id) const
 BrowserWindow* Application::window_for_new_tab(Optional<u64> source_view_id, WebView::IsPrivate is_private) const
 {
     if (source_view_id.has_value()) {
-        if (auto* window = window_of_view(*source_view_id); window && window->is_private() == is_private)
+        if (auto* window = window_of_view(*source_view_id); window && window->is_private() == is_private && !window->is_app_window())
             return window;
     }
     for (auto* window : visible_browser_windows_active_first(m_active_window)) {
-        if (window->is_private() == is_private)
+        if (window->is_private() == is_private && !window->is_app_window() && window->property("derpbirdAgentId").toString().isEmpty())
             return window;
     }
     return nullptr;
@@ -2505,17 +2601,19 @@ void Application::open_urls_in_new_tabs(ReadonlySpan<URL::URL> urls) const
     if (urls.is_empty())
         return;
 
-    if (!m_active_window) {
+    auto is_private = m_active_window ? m_active_window->is_private() : WebView::IsPrivate::No;
+    auto* target = window_for_new_tab({}, is_private);
+    if (!target) {
         Vector<URL::URL> initial_urls;
         initial_urls.ensure_capacity(urls.size());
         for (auto const& url : urls)
             initial_urls.append(url);
 
-        const_cast<Application&>(*this).new_window(initial_urls);
+        const_cast<Application&>(*this).new_window(initial_urls, {}, BrowserWindow::IsPopupWindow::No, is_private);
         return;
     }
 
-    auto& window = active_window();
+    auto& window = *target;
     auto deferred_tab_updates = window.tab_widget().defer_tab_updates();
     auto* previous_tab = window.current_tab();
     for (auto const& url : urls) {
@@ -2586,6 +2684,12 @@ void Application::display_download_confirmation_dialog(StringView download_name,
 {
     auto message = MUST(String::formatted("{} saved to: {}", download_name, path));
 
+    if (auto* window = shell_dialog_window()) {
+        window->derpbird_chrome()->window_dialog().show("download", "Download complete", qstring_from_ak_string(message), {}, "Open folder", [path](bool open, auto const&) {
+            if (open) QDesktopServices::openUrl(QUrl::fromLocalFile(qstring_from_ak_string(LexicalPath { path }.dirname())));
+        });
+        return;
+    }
     auto* dialog = create_message_box(QMessageBox::Information, message, active_window_if_any());
 
     auto* open_folder_button = dialog->addButton(QMessageBox::Open);
@@ -2599,6 +2703,10 @@ void Application::display_download_confirmation_dialog(StringView download_name,
 
 void Application::display_error_dialog(StringView error_message) const
 {
+    if (auto* window = shell_dialog_window()) {
+        window->derpbird_chrome()->window_dialog().show("alert", "DerpBird", qstring_from_ak_string(error_message), {}, {}, [](bool, auto const&) {});
+        return;
+    }
     create_message_box(QMessageBox::Warning, error_message, active_window_if_any())->open();
 }
 
@@ -2628,6 +2736,13 @@ void Application::display_update_check_result(WebView::UpdateCheckResult::Kind k
 {
     static constexpr auto current_version = BROWSER_VERSION ""sv;
 
+    if (qEnvironmentVariableIsSet("DERPBIRD_UI") && (kind == WebView::UpdateCheckResult::Kind::UpToDate || kind == WebView::UpdateCheckResult::Kind::DevelopmentBuild)) {
+        auto* window = shell_dialog_window();
+        auto message = kind == WebView::UpdateCheckResult::Kind::UpToDate
+            ? QStringLiteral("You are running the latest version.") : QStringLiteral("Development builds do not check for updates.");
+        window->derpbird_chrome()->window_dialog().show("alert", "DerpBird updates", message, {}, {}, [](bool, auto const&) {});
+        return;
+    }
     switch (kind) {
     case WebView::UpdateCheckResult::Kind::UpToDate:
         create_message_box(QMessageBox::Information, MUST(String::formatted("Ladybird {} is the newest version.", current_version)), active_window_if_any())->open();
@@ -2947,6 +3062,36 @@ void Application::show_bookmark_context_menu(Gfx::IntPoint content_position, Opt
     }
 }
 
+static NonnullRefPtr<Application::BookmarkPromise> web_bookmark_dialog(DerpBirdChrome& chrome, BookmarkDialog::Type type, Optional<String const&> name, Optional<URL::URL const&> url, Optional<String> favicon, Optional<String const&> folder, Optional<String const&> excluded = {})
+{
+    auto promise = Application::BookmarkPromise::construct();
+    bool is_folder = type == BookmarkDialog::Type::AddFolder || type == BookmarkDialog::Type::EditFolder;
+    QString title;
+    switch (type) {
+    case BookmarkDialog::Type::AddBookmark: title = "Add bookmark"; break;
+    case BookmarkDialog::Type::EditBookmark: title = "Edit bookmark"; break;
+    case BookmarkDialog::Type::AddFolder: title = "Add folder"; break;
+    case BookmarkDialog::Type::EditFolder: title = "Edit folder"; break;
+    }
+    show_web_bookmark_dialog(chrome.window_dialog(), title, is_folder, qstring_from_ak_string(name.value_or(String {})), url.has_value() ? qstring_from_ak_string(url->serialize()) : QString {}, Application::bookmark_store().root_items(), folder, excluded, {},
+        [promise, is_folder, favicon = move(favicon)](bool accepted, QString const& text) mutable {
+            if (!accepted) { promise->reject(Error::from_errno(ECANCELED)); return; }
+            auto fields = QJsonDocument::fromJson(text.toUtf8()).object();
+            Optional<String> name;
+            Optional<String> folder;
+            if (auto value = fields.value("name").toString(); !value.isEmpty()) name = ak_string_from_qstring(value);
+            if (auto value = fields.value("folder").toString(); !value.isEmpty()) folder = ak_string_from_qstring(value);
+            if (is_folder) {
+                promise->resolve(Application::BookmarkDialogResult { .data = BookmarkItem::Folder { move(name), {} }, .target_folder_id = move(folder) });
+            } else if (auto url = WebView::sanitize_url(ak_string_from_qstring(fields.value("url").toString())); url.has_value()) {
+                promise->resolve(Application::BookmarkDialogResult { .data = BookmarkItem::Bookmark { url.release_value(), move(name), move(favicon) }, .target_folder_id = move(folder) });
+            } else {
+                promise->reject(Error::from_errno(EINVAL));
+            }
+        });
+    return promise;
+}
+
 static NonnullRefPtr<Application::BookmarkPromise> display_add_or_edit_bookmark_dialog(
     QWidget* parent,
     BookmarkDialog::Type dialog_type,
@@ -2955,6 +3100,8 @@ static NonnullRefPtr<Application::BookmarkPromise> display_add_or_edit_bookmark_
     Optional<String> current_favicon_hash,
     Optional<String const&> selected_folder_id = {})
 {
+    if (auto* window = Application::shell_dialog_window())
+        return web_bookmark_dialog(*window->derpbird_chrome(), dialog_type, current_title, current_url, move(current_favicon_hash), selected_folder_id);
     auto const& folders = Application::bookmark_store().root_items();
 
     auto* dialog = new BookmarkDialog(parent, dialog_type, current_url, current_title, selected_folder_id, folders);
@@ -3022,6 +3169,8 @@ static NonnullRefPtr<Application::BookmarkPromise> display_add_or_edit_bookmark_
     Optional<String const&> selected_folder_id,
     Optional<String const&> excluded_folder_id = {})
 {
+    if (auto* window = Application::shell_dialog_window())
+        return web_bookmark_dialog(*window->derpbird_chrome(), dialog_type, current_title, {}, {}, selected_folder_id, excluded_folder_id);
     auto* dialog = new BookmarkDialog(parent, dialog_type, {}, current_title, selected_folder_id, Application::bookmark_store().root_items(), excluded_folder_id);
     auto promise = Application::BookmarkPromise::construct();
 

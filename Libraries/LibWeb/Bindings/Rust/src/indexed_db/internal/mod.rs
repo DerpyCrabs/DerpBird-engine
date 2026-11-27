@@ -16,4 +16,5 @@ pub(crate) mod mutation_log;
 pub(crate) mod object_store;
 pub(crate) mod record_range;
 pub(crate) mod request_list;
+pub(crate) mod snapshot;
 pub(crate) mod storage;

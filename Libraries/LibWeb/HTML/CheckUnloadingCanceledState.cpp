@@ -68,8 +68,18 @@ void CheckUnloadingCanceledState::adopt_for_close(GC::Ref<GC::Function<void(bool
     ++m_phase2_generation;
 }
 
-void CheckUnloadingCanceledState::start(Vector<GC::Root<LocalNavigable>> const& navigables_that_need_before_unload, RefPtr<SessionHistoryEntry> target_entry)
+bool CheckUnloadingCanceledState::can_present_background_close_prompt(Page const& page)
 {
+    auto* traversable = as_if<LocalTraversableNavigable>(page.top_level_traversable().ptr());
+    if (!traversable)
+        return false;
+    auto check = traversable->active_beforeunload_check({});
+    return check && check->m_window_close == WindowClose::Yes;
+}
+
+void CheckUnloadingCanceledState::start(Vector<GC::Root<LocalNavigable>> const& navigables_that_need_before_unload, RefPtr<SessionHistoryEntry> target_entry, WindowClose window_close)
+{
+    m_window_close = window_close;
     // 1. Let documentsToFireBeforeunload be the active document of each item in navigablesThatNeedBeforeUnload.
     for (auto& navigable : navigables_that_need_before_unload)
         m_phase2_documents.append(*navigable->active_document());

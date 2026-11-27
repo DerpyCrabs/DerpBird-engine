@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibURL/Parser.h>
 #include <AK/Platform.h>
 #include <AK/StdLibExtras.h>
 #include <AK/TypeCasts.h>
@@ -20,6 +21,7 @@
 #include <LibWebView/URL.h>
 #include <UI/Qt/Application.h>
 #include <UI/Qt/BrowserWindow.h>
+#include <UI/Qt/DerpBirdAppDownloads.h>
 #include <UI/Qt/DerpBirdChrome.h>
 #include <UI/Qt/ChromeLayout.h>
 #include <UI/Qt/ChromeStyle.h>
@@ -344,12 +346,15 @@ static QIcon const& app_icon(WebView::IsPrivate is_private)
     return cached_icon;
 }
 
-BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window, WebView::IsPrivate is_private, Optional<u64> hub_view_id, Optional<SessionWindowId> restored_session_window_id, QString agent_id)
+BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window, WebView::IsPrivate is_private, Optional<u64> hub_view_id, Optional<SessionWindowId> restored_session_window_id, QString agent_id, QString app_id)
     : WebView::SettingsObserver(Application::settings())
     , m_is_private(is_private)
     , m_tabs_container(new TabWidget(is_private, this))
+    , m_app_id(std::move(app_id))
     , m_is_popup_window(is_popup_window)
 {
+    if (is_app_window() && !initial_urls.is_empty())
+        m_app_scope = URL::Parser::basic_parse("."sv, initial_urls.first());
     if (!agent_id.isEmpty())
         setProperty("derpbirdAgentId", agent_id);
 
@@ -469,7 +474,12 @@ BrowserWindow::BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow
     m_devtools_banner->hide();
     main_layout->addWidget(m_devtools_banner);
 
-    if (qEnvironmentVariableIsSet("DERPBIRD_UI")) {
+    if (is_app_window()) {
+        new DerpBirdAppDownloads(*this, *main_widget);
+        m_tabs_container->set_tab_bar_visible(false);
+        setWindowFlag(Qt::FramelessWindowHint, false);
+        update_window_border();
+    } else if (qEnvironmentVariableIsSet("DERPBIRD_UI")) {
         main_layout->removeWidget(m_tabs_container);
         m_derpbird_chrome = new DerpBirdChrome(*this);
         main_layout->insertWidget(0, m_derpbird_chrome, 1);
@@ -973,14 +983,7 @@ void BrowserWindow::initialize_tab_view(Tab* tab)
         }
     });
 
-    auto group_with_source = [this, tab](Tab& new_tab) {
-        if (m_derpbird_chrome && !tab->is_pinned()) {
-            auto result = m_derpbird_chrome->move_tree_tab(new_tab, *tab, "inside"sv);
-            if (result.is_error())
-                dbgln("Cannot group tab opened from page: {}", result.error());
-        }
-    };
-    tab->view().on_open_new_view = [this, group_with_source](auto activate_tab, Web::HTML::WebViewHints hints, u64 hub_view_id) {
+    tab->view().on_open_new_view = [this, tab](auto activate_tab, Web::HTML::WebViewHints hints, u64 hub_view_id) {
         if (hints.popup) {
             auto cascaded_configuration = Application::the().configuration_for_new_window();
             WindowConfiguration configuration {
@@ -991,8 +994,16 @@ void BrowserWindow::initialize_tab_view(Tab* tab)
             window.place_popup_window(hints, *screen());
             return;
         }
-        auto& new_tab = create_new_tab(activate_tab, hub_view_id);
-        group_with_source(new_tab);
+        if (is_app_window()) {
+            Application::the().open_view_in_new_tab(hub_view_id, tab->view().view_id(), m_is_private, activate_tab);
+            return;
+        }
+        bool defer_activation = m_derpbird_chrome && hints.wait_for_navigation_commit && activate_tab == Web::HTML::ActivateTab::Yes;
+        auto& new_tab = create_new_tab(defer_activation ? Web::HTML::ActivateTab::No : activate_tab, hub_view_id);
+        if (m_derpbird_chrome)
+            m_derpbird_chrome->group_tab_from_view(new_tab, tab->view().view_id());
+        if (defer_activation && current_tab() == tab)
+            m_tab_to_activate_on_commit = &new_tab;
     };
 }
 
@@ -1124,10 +1135,20 @@ void BrowserWindow::acknowledge_failed_downloads()
     toolbar().update_downloads_button();
 }
 
+void BrowserWindow::did_commit_navigation(Tab& tab)
+{
+    if (m_tab_to_activate_on_commit == &tab) {
+        m_tab_to_activate_on_commit.clear();
+        activate_tab(tab_index(&tab));
+    }
+}
+
 void BrowserWindow::set_current_tab(Tab* tab)
 {
     if (tab == m_current_tab)
         return;
+
+    m_tab_to_activate_on_commit.clear();
 
     // A restored tab loads only once it's selected.
     if (tab)
@@ -1235,7 +1256,8 @@ bool BrowserWindow::close_tab(int index, SessionStore::KeepForReopening keep_for
     }
 
     auto* tab = m_tabs_container->tab(index);
-    if (tab == m_current_tab && tab->derpbird_script_parent()) {
+    auto* successor = tab == m_current_tab && m_derpbird_chrome ? m_derpbird_chrome->successor_for_close(*tab) : nullptr;
+    if (!m_derpbird_chrome && tab == m_current_tab && tab->derpbird_script_parent()) {
         auto parent_index = tab_index(tab->derpbird_script_parent());
         if (parent_index >= 0) activate_tab(parent_index);
     }
@@ -1243,6 +1265,8 @@ bool BrowserWindow::close_tab(int index, SessionStore::KeepForReopening keep_for
         auto detached = m_derpbird_chrome->detach_tree_tab(*tab);
         if (detached.is_error()) { dbgln("Cannot update tab tree: {}", detached.error()); return false; }
     }
+    if (successor && tab == m_current_tab)
+        activate_tab(tab_index(successor));
     m_tabs_container->remove_tab(index);
     if (auto session_tab_id = tab->session_tab_id(); session_tab_id.has_value()) {
         SessionStore::TabClosed closed {
@@ -1296,6 +1320,7 @@ void BrowserWindow::discard_tab(Tab& tab)
         .discarded_tab_state_id = discarded_tab_state_id,
     };
     auto* discarded_tab = new Tab(this, AK::move(deferred_tab));
+    discarded_tab->setProperty("derpbirdOpener", tab.property("derpbirdOpener"));
     discarded_tab->set_needs_attention(tab.needs_attention());
     // NB: The tab that stands in for the discarded one takes its place among the tabs that the window and other tabs
     //     refer to, such as the background tabs opened from the current tab, which new ones open after.
@@ -1402,7 +1427,7 @@ void BrowserWindow::activate_first_unpinned_tab()
 
 void BrowserWindow::register_window_with_session_store()
 {
-    if (!property("derpbirdAgentId").toString().isEmpty())
+    if (is_app_window() || !property("derpbirdAgentId").toString().isEmpty())
         return;
     if (auto session_window_id = session().window_opened(); session_window_id.is_error())
         dbgln("Unable to register the new window with the session store: {}", session_window_id.error());
@@ -1559,7 +1584,7 @@ void BrowserWindow::create_menu_bar_window_controls()
 
 void BrowserWindow::update_menu_bar_visibility()
 {
-    auto show_menu_bar = show_menu_bar_option_available() && Application::settings().appearance().show_menu_bar;
+    auto show_menu_bar = !is_app_window() && show_menu_bar_option_available() && Application::settings().appearance().show_menu_bar;
 
     // Update the controls first so the menu bar measures its corner widgets with the controls visible when shown.
     if (m_menu_bar_window_controls)
@@ -1840,7 +1865,7 @@ void BrowserWindow::exit_fullscreen()
     if (!current_tab())
         return;
 
-    m_tabs_container->set_tab_bar_visible(true);
+    m_tabs_container->set_tab_bar_visible(!is_app_window());
 
     // A full-screen window is no longer maximized, so it has to ask to be maximized again. On macOS, the window is
     // zoomed again as it leaves full screen, and asking for the normal state would then unzoom it.
@@ -2350,15 +2375,15 @@ void BrowserWindow::request_close_preflight(Function<void(bool approved)> on_com
     begin_window_close_preflight(AK::move(on_complete));
 }
 
-void BrowserWindow::raise_for_close_prompt()
+bool BrowserWindow::raise_for_close_prompt(Tab& tab)
 {
-    // Only an application-wide check carries a completion; a close the user started on this window is already in front.
-    if (!m_window_close_coordinator.is_running() || !m_window_close_preflight_on_complete)
-        return;
-
-    // A page's beforeunload prompt shows inside this window, which may sit behind other windows or in the Dock while a
-    // close check asks it, so the window comes to the front first, where the user can see the prompt.
-    bring_to_front();
+    if (!m_window_close_coordinator.is_running() || m_window_close_current_preflight_tab != &tab)
+        return false;
+    if (m_current_tab != &tab)
+        activate_tab(tab_index(&tab));
+    if (m_window_close_preflight_on_complete)
+        bring_to_front();
+    return true;
 }
 
 void BrowserWindow::bring_to_front()
@@ -2408,6 +2433,41 @@ void BrowserWindow::report_session_window_geometry()
     session().window_geometry_changed(*m_session_window_id, window_geometry);
 }
 
+WindowCloseCoordinator::Preflight BrowserWindow::close_check_for_tab(QPointer<Tab> tab)
+{
+    return [this, tab](Function<void(bool)> on_complete) mutable {
+        if (!tab) {
+            on_complete(true);
+            return;
+        }
+
+        auto index = tab_index(tab);
+        if (index < 0) {
+            on_complete(true);
+            return;
+        }
+
+        m_window_close_current_document_changed = false;
+        m_window_close_current_preflight_tab = tab;
+        auto weak_this = QPointer<BrowserWindow>(this);
+        auto request = ++m_window_close_check_id;
+        tab->request_window_close_preflight([weak_this, tab, request, on_complete = AK::move(on_complete)](bool approved) mutable {
+            // NB: The coordinator that would take this answer went away with the window.
+            if (!weak_this || weak_this->m_window_close_check_id != request || !weak_this->m_window_close_coordinator.is_running())
+                return;
+            if (weak_this->m_window_close_current_preflight_tab == tab)
+                weak_this->m_window_close_current_preflight_tab = nullptr;
+            if (weak_this->m_window_close_current_document_changed) {
+                on_complete(true); // The replacement document has its own check in the queue.
+                return;
+            }
+            if (approved && tab && !weak_this->m_window_close_approved_tabs.contains([&](auto const& approved_tab) { return approved_tab == tab; }))
+                weak_this->m_window_close_approved_tabs.append(tab);
+            on_complete(approved);
+        });
+    };
+}
+
 void BrowserWindow::begin_window_close_preflight(Function<void(bool approved)> on_complete)
 {
     m_window_close_active_tab_index = static_cast<i64>(max(m_tabs_container->current_index(), 0));
@@ -2425,34 +2485,8 @@ void BrowserWindow::begin_window_close_preflight(Function<void(bool approved)> o
 
     Vector<WindowCloseCoordinator::Preflight> preflights;
     preflights.ensure_capacity(tabs.size());
-    for (auto tab : tabs) {
-        preflights.append([this, tab](Function<void(bool)> on_complete) mutable {
-            if (!tab) {
-                on_complete(true);
-                return;
-            }
-
-            auto index = tab_index(tab);
-            if (index < 0) {
-                on_complete(true);
-                return;
-            }
-
-            activate_tab(index);
-            m_window_close_current_preflight_tab = tab;
-            auto weak_this = QPointer<BrowserWindow>(this);
-            tab->request_window_close_preflight([weak_this, tab, on_complete = AK::move(on_complete)](bool approved) mutable {
-                // NB: The coordinator that would take this answer went away with the window.
-                if (!weak_this)
-                    return;
-                if (weak_this->m_window_close_current_preflight_tab == tab)
-                    weak_this->m_window_close_current_preflight_tab = nullptr;
-                if (approved && tab && !weak_this->m_window_close_approved_tabs.contains([&](auto const& approved_tab) { return approved_tab == tab; }))
-                    weak_this->m_window_close_approved_tabs.append(tab);
-                on_complete(approved);
-            });
-        });
-    }
+    for (auto tab : tabs)
+        preflights.append(close_check_for_tab(tab));
 
     // With a completion, approval only marks the window as approved (so that a later close() goes straight through),
     // and the caller decides when to close it.
@@ -2484,11 +2518,6 @@ void BrowserWindow::begin_window_close_preflight(Function<void(bool approved)> o
         [weak_this] {
             if (!weak_this)
                 return;
-            if (auto* original_tab = weak_this->m_window_close_original_active_tab.data()) {
-                auto index = weak_this->tab_index(original_tab);
-                if (index >= 0)
-                    weak_this->activate_tab(index);
-            }
             weak_this->m_window_close_active_tab_index.clear();
             weak_this->m_window_close_original_active_tab = nullptr;
             weak_this->m_window_close_current_preflight_tab = nullptr;
@@ -2538,6 +2567,16 @@ void BrowserWindow::on_tab_load_start(Tab& tab)
     if (!m_window_close_coordinator.is_running() && !m_window_close_approved)
         return;
 
+    if (m_window_close_coordinator.is_running()) {
+        if (m_window_close_current_preflight_tab == &tab) {
+            if (m_window_close_current_document_changed) return;
+            m_window_close_current_document_changed = true;
+        } else if (!m_window_close_approved_tabs.remove_first_matching([&](auto const& approved) { return approved == &tab; })) {
+            return;
+        }
+        m_window_close_coordinator.recheck(close_check_for_tab(&tab));
+        return;
+    }
     if (m_window_close_current_preflight_tab == &tab || m_window_close_approved_tabs.contains([&](auto const& approved_tab) { return approved_tab == &tab; }))
         cancel_window_close_preflight();
 }

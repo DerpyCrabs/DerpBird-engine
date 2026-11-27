@@ -71,6 +71,8 @@ public:
 
     Function<PermissionPromptPopover*(WebView::PermissionPromptRequest const&)> create_popover;
 
+    Function<void(WebView::PermissionPromptRequest const&, WebView::PermissionPromptCallback)> show_web;
+    Function<void()> hide_web;
     void enqueue(WebView::PermissionPromptRequest, WebView::PermissionPromptCallback);
     void cancel(WebView::PermissionPromptRequest const&);
     void ignore_all();
@@ -89,6 +91,8 @@ private:
     void show_next();
 
     Vector<Pending> m_pending;
+    Optional<WebView::PermissionPromptRequest> m_web_request;
+    void present_web();
     PermissionPromptPopover* m_current { nullptr };
     WebView::PermissionPromptCallback m_current_callback;
     bool m_suspended { false };

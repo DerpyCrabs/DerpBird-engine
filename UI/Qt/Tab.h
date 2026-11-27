@@ -48,7 +48,7 @@ namespace Ladybird {
 class BookmarkPopover;
 class BrowserWindow;
 enum class ChromeIcon;
-class JavaScriptDialog;
+class DerpBirdDialog;
 class MessagePopover;
 
 class HyperlinkLabel final : public QLabel {
@@ -86,6 +86,7 @@ public:
     Tab(BrowserWindow* window, Optional<u64> hub_view_id = {});
     Tab(BrowserWindow* window, DeferredTab);
     virtual ~Tab() override;
+    DerpBirdDialog* shell_dialog() const;
     bool has_file_picker() const { return !m_file_picker_dialog.isNull(); }
     ErrorOr<void> complete_file_picker(QStringList const& paths);
 
@@ -272,7 +273,8 @@ private:
     WebView::TabPerformanceStats m_performance_stats;
     Optional<Compositing::CompositorLayersDescription> m_compositor_layers;
 
-    JavaScriptDialog* m_javascript_dialog { nullptr };
+    OwnPtr<DerpBirdDialog> m_javascript_dialog;
+    OwnPtr<DerpBirdDialog> m_permission_dialog;
     Function<void(bool)> m_before_unload_completion;
     QPointer<QColorDialog> m_color_picker_dialog;
     QPointer<QDialog> m_date_picker_dialog;

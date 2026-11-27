@@ -24,6 +24,7 @@ struct PictureInPictureWindowHints {
 
 struct WebViewHints {
     bool popup = false;
+    bool wait_for_navigation_commit = false;
     Optional<PictureInPictureWindowHints> picture_in_picture_window;
     Optional<DevicePixels> width;
     Optional<DevicePixels> height;

@@ -24,6 +24,9 @@
 #include <UI/Qt/BookmarkPopover.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/DerpBirdChrome.h>
+#include <UI/Qt/DerpBirdBookmarkDialog.h>
+#include <LibWebView/URL.h>
+#include <UI/Qt/DerpBirdDialog.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/HubConnection.h>
 #include <UI/Qt/Icon.h>
@@ -212,6 +215,7 @@ void Tab::initialize(Optional<u64> hub_view_id)
         .screen_shows_high_dynamic_range = m_window->screen_shows_high_dynamic_range(),
         .owner_view_id = {},
         .is_tab = true,
+        .app_scope = m_window->app_scope(),
     };
 
     m_view = new WebContentView(this, hub_view_id, AK::move(view_initial_state));
@@ -219,8 +223,20 @@ void Tab::initialize(Optional<u64> hub_view_id)
     // where the window stands now.
     m_view->set_window_position({ m_window->x(), m_window->y() });
     m_view->set_window_size({ m_window->width(), m_window->height() });
-    m_javascript_dialog = new JavaScriptDialog(m_view);
-    m_javascript_dialog->on_page_dim_change = [this](qreal dim) { m_view->set_page_dim(dim); };
+    m_javascript_dialog = make<DerpBirdDialog>();
+    if (qEnvironmentVariableIsSet("DERPBIRD_UI") && !m_window->is_app_window()) {
+        m_javascript_dialog->changed = [this] {
+            update_permission_prompts();
+            if (auto* chrome = m_window->derpbird_chrome()) chrome->queue_snapshot();
+        };
+    } else {
+        auto* dialog = new JavaScriptDialog(m_view);
+        m_javascript_dialog->legacy = dialog;
+        dialog->on_complete = [this](auto type, bool accepted, auto const& text) {
+            m_javascript_dialog->on_complete(type, accepted, text);
+        };
+        dialog->on_page_dim_change = [this](qreal dim) { m_view->set_page_dim(dim); };
+    }
 
     // The window's toolbar holds the address field while it shows this tab.
     m_location_edit = new LocationEdit(this, Application::settings(), make<SuggestionProvider>(m_window->is_private()));
@@ -367,6 +383,7 @@ void Tab::initialize(Optional<u64> hub_view_id)
     };
 
     view().on_top_level_navigation_commit = [this] {
+        m_window->did_commit_navigation(*this);
         m_is_waiting_for_response = false;
         m_suppress_javascript_dialogs_until_navigation = false;
         m_javascript_dialogs_shown_by_document = 0;
@@ -441,9 +458,9 @@ void Tab::initialize(Optional<u64> hub_view_id)
     view().on_request_before_unload = [this](auto const& source, auto on_complete) {
         hide_hover_label();
         m_before_unload_completion = AK::move(on_complete);
-        m_window->raise_for_close_prompt();
+        bool closing_window = m_window->raise_for_close_prompt(*this);
         m_javascript_dialog->set_title_icon(tab_icon());
-        m_javascript_dialog->show_before_unload(qstring_from_ak_string(source));
+        m_javascript_dialog->show_before_unload(qstring_from_ak_string(source), closing_window);
     };
 
     view().on_request_confirm = [this, javascript_dialog_title, offer_to_block_further_dialogs](auto const& message) {
@@ -551,6 +568,11 @@ void Tab::initialize(Optional<u64> hub_view_id)
         auto details = MUST(String::formatted("URL: '{}'", url));
         auto open_button_text = handler_name.is_empty() ? "Open"_string : MUST(String::formatted("Open {}", application_name));
 
+        if (m_window->derpbird_chrome()) {
+            m_javascript_dialog->show("external", qstring_from_ak_string(title), qstring_from_ak_string(message) + "\n" + qstring_from_ak_string(details), {}, qstring_from_ak_string(open_button_text),
+                [done = AK::move(on_complete)](bool accepted, auto const&) mutable { done(accepted); });
+            return;
+        }
         auto* dialog = new QMessageBox(&view());
         m_external_url_confirmation_dialog = dialog;
         dialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -573,6 +595,33 @@ void Tab::initialize(Optional<u64> hub_view_id)
         dialog->open();
     };
 
+    if (qEnvironmentVariableIsSet("DERPBIRD_UI")) {
+        m_permission_dialog = make<DerpBirdDialog>();
+        m_permission_dialog->changed = [this] { if (auto* chrome = m_window->derpbird_chrome()) chrome->queue_snapshot(); };
+        m_permission_prompts.hide_web = [this] { m_permission_dialog->reset(); };
+        m_permission_prompts.show_web = [this](auto const& request, auto done) {
+            using Outcome = Web::Permissions::PromptOutcome;
+            using Name = Web::Permissions::PermissionName;
+            auto feature = request.name == Name::Geolocation ? "use your location" : request.name == Name::Microphone ? "use your microphone" : "send notifications";
+            auto origin = request.is_file ? QStringLiteral("This file") : request.top_level_origin.is_opaque() ? QStringLiteral("This page") : qstring_from_ak_string(request.top_level_origin.serialize());
+            bool notice = request.kind == WebView::PermissionPromptKind::SystemDeniedNotice;
+            bool once = request.name != Name::Notifications;
+            auto title = notice ? QStringLiteral("System permission required") : QStringLiteral("Allow %1 to %2?").arg(origin, feature);
+            QString message;
+            if (notice) message = QStringLiteral("System privacy settings prevent DerpBird from using this feature.");
+            else if (request.show_os_hint) message = QStringLiteral("Your system will also ask for permission.");
+            m_permission_dialog->show(notice ? "permission-notice" : "permission", title, message, {}, notice ? "Open settings" : once ? "Allow while visiting" : "Allow",
+                [notice, once, done = AK::move(done)](bool accepted, QString const& choice) mutable {
+                    if (notice && accepted) {
+                        if (auto* authorizer = Application::the().microphone_authorizer()) authorizer->open_system_settings();
+                    }
+                    auto outcome = !accepted || notice ? Outcome::Dismissed : choice == "block" ? Outcome::Block : choice == "once" && once ? Outcome::AllowOnce : Outcome::AllowAlways;
+                    done(outcome);
+                });
+            m_permission_dialog->configure("once"sv, once);
+            view().did_show_permission_prompt(request);
+        };
+    }
     m_permission_prompts.create_popover = [this](WebView::PermissionPromptRequest const& request) {
         auto* popover = new PermissionPromptPopover(this, request);
         popover->update_chrome_style(palette());
@@ -623,14 +672,25 @@ void Tab::initialize(Optional<u64> hub_view_id)
     };
 
     view().on_request_accept_dialog = [this]() {
-        m_javascript_dialog->accept();
+        if (m_javascript_dialog->type().has_value()) m_javascript_dialog->accept();
     };
 
     view().on_request_dismiss_dialog = [this]() {
-        m_javascript_dialog->dismiss();
+        if (m_javascript_dialog->type().has_value()) m_javascript_dialog->dismiss();
     };
 
     view().on_request_color_picker = [this](Color current_color) {
+        if (m_window->derpbird_chrome()) {
+            if (m_javascript_dialog->is_open()) { view().color_picker_update({}, Web::HTML::ColorPickerUpdateState::Closed); return; }
+            m_javascript_dialog->show("color", "Choose a color", {}, qstring_from_ak_string(current_color.to_string_without_alpha()), "Apply", [this](bool accepted, auto const& value) {
+                view().color_picker_update(accepted ? Color::from_string(ak_string_from_qstring(value)) : Optional<Color> {}, Web::HTML::ColorPickerUpdateState::Closed);
+            });
+            m_javascript_dialog->on_edit = [this](QString const& text) {
+                if (auto color = Color::from_string(ak_string_from_qstring(text)); color.has_value())
+                    view().color_picker_update(color, Web::HTML::ColorPickerUpdateState::Update);
+            };
+            return;
+        }
         m_color_picker_dialog = new QColorDialog(QColor(current_color.red(), current_color.green(), current_color.blue()), &view());
 
         auto& dialog = *m_color_picker_dialog;
@@ -655,6 +715,18 @@ void Tab::initialize(Optional<u64> hub_view_id)
     };
 
     view().on_request_date_picker = [this](Utf16String const& input_type, Utf16String const& value, Utf16String const& minimum, Utf16String const& maximum) {
+        if (m_window->derpbird_chrome()) {
+            auto& dialog = *m_javascript_dialog;
+            if (dialog.is_open()) { view().date_picker_closed({}); return; }
+            auto kind = qstring_from_utf16_string(input_type);
+            dialog.show(kind, kind == "time" ? "Choose a time" : "Choose a date", {}, qstring_from_utf16_string(value), "Apply", [this](bool accepted, QString const& text) {
+                if (accepted) view().date_picker_closed(utf16_string_from_qstring(text));
+                else view().date_picker_closed({});
+            });
+            dialog.configure("minimum"sv, minimum.to_utf8());
+            dialog.configure("maximum"sv, maximum.to_utf8());
+            return;
+        }
         if (m_date_picker_dialog) {
             view().date_picker_closed({});
             return;
@@ -887,6 +959,12 @@ void Tab::initialize(Optional<u64> hub_view_id)
     view().on_screen_wake_lock_state_changed = [this](auto wake_lock_state) {
         set_screen_wake_lock_state(wake_lock_state);
     };
+}
+
+DerpBirdDialog* Tab::shell_dialog() const
+{
+    if (m_javascript_dialog && m_javascript_dialog->is_open()) return m_javascript_dialog.ptr();
+    return m_permission_dialog.ptr();
 }
 
 ErrorOr<void> Tab::complete_file_picker(QStringList const& paths)
@@ -1363,7 +1441,7 @@ void Tab::showEvent(QShowEvent* event)
 // comes up over an inactive window is closed by the next click or activation anywhere else.
 void Tab::update_permission_prompts()
 {
-    if (isVisible() && isActiveWindow())
+    if (isVisible() && isActiveWindow() && !(m_javascript_dialog && m_javascript_dialog->is_open()))
         m_permission_prompts.resume();
     else
         m_permission_prompts.suspend();
@@ -1573,6 +1651,29 @@ void Tab::show_bookmark_popover()
     if (!bookmark.has_value())
         return;
 
+    if (m_window->derpbird_chrome()) {
+        auto id = bookmark->id;
+        auto url = bookmark->bookmark().url;
+        show_web_bookmark_dialog(*m_javascript_dialog, just_added == BookmarkPopover::JustAdded::Yes ? "Bookmark added" : "Edit bookmark", false,
+            qstring_from_ak_string(bookmark->bookmark().title.value_or(String {})), qstring_from_ak_string(url.serialize()), store.root_items(), {}, {}, id,
+            [id](bool accepted, QString const& text) {
+                if (!accepted) return;
+                auto& store = Application::bookmark_store();
+                if (!store.find_item_by_id(id).has_value()) return;
+                auto fields = QJsonDocument::fromJson(text.toUtf8()).object();
+                if (fields.value("remove").toBool()) { store.remove_item(id); return; }
+                auto url = WebView::sanitize_url(ak_string_from_qstring(fields.value("url").toString()));
+                if (!url.has_value()) return;
+                auto name = ak_string_from_qstring(fields.value("name").toString());
+                store.edit_bookmark(id, url.release_value(), name.is_empty() ? Optional<String> {} : Optional<String> { name });
+                if (fields.value("moved").toBool()) {
+                    Optional<String> target;
+                    if (auto folder = fields.value("folder").toString(); !folder.isEmpty()) target = ak_string_from_qstring(folder);
+                    store.move_item(id, target, NumericLimits<size_t>::max());
+                }
+            });
+        return;
+    }
     if (!m_bookmark_popover) {
         m_bookmark_popover = new BookmarkPopover(this);
         m_bookmark_popover->on_remove = [this](Function<void()> const& remove) {
@@ -1794,7 +1895,9 @@ void Tab::request_window_close_preflight(Function<void(bool)> on_complete)
 
     m_suppress_javascript_dialogs_until_navigation = true;
 
-    if (m_javascript_dialog->type() != JavaScriptDialog::Type::BeforeUnload)
+    if (m_javascript_dialog->type() == JavaScriptDialog::Type::BeforeUnload)
+        m_window->raise_for_close_prompt(*this);
+    else
         m_javascript_dialog->dismiss();
 
     if (!view().needs_beforeunload_check()) {

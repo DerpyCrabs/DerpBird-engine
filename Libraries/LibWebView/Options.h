@@ -30,6 +30,7 @@ enum class HeadlessMode {
 enum class NewWindow {
     No,
     Yes,
+    App,
 };
 
 enum class AllowPopups {

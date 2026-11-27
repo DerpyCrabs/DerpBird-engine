@@ -847,10 +847,10 @@ void HubConnection::app_open_new_tab(Vector<URL::URL> urls)
         application.on_new_tab(urls);
 }
 
-void HubConnection::app_open_new_window(Vector<URL::URL> urls)
+void HubConnection::app_open_new_window(Vector<URL::URL> urls, bool app_window)
 {
     if (auto& application = Application::the(); application.on_new_window)
-        application.on_new_window(urls);
+        application.on_new_window(urls, app_window);
 }
 
 void HubConnection::web_ui_opened(u64 web_ui_id, String host, WebView::IsPrivate is_private)

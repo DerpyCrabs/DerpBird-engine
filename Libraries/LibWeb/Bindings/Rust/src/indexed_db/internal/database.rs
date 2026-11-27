@@ -44,6 +44,9 @@ pub(crate) struct Database {
 
     // A database has a version. When a database is first created, its version is 0 (zero).
     version: Cell<u64>,
+    pub(crate) disk_revision: Cell<Option<i64>>,
+    #[gc(untraced)]
+    pub(crate) legacy_snapshot: RefCell<Vec<u8>>,
 
     // A database has at most one associated upgrade transaction, which is either null or an upgrade transaction, and is initially null.
     upgrade_transaction: Cell<Option<Ref<IDBTransaction>>>,
@@ -67,6 +70,8 @@ impl Database {
             pending_connection_wait: GcRefCell::new(None),
             name: name.clone(),
             version: Cell::new(0),
+            disk_revision: Cell::new(None),
+            legacy_snapshot: RefCell::new(Vec::new()),
             upgrade_transaction: Cell::new(None),
             object_stores: GcRefCell::new(Vec::new()),
         })
@@ -163,12 +168,6 @@ impl Database {
 
     pub(crate) fn for_key_and_name(vm: &Vm, key: &StorageKey, name: &Utf16String) -> Option<DatabaseRef> {
         storage(vm).database(key, name)
-    }
-
-    pub(crate) fn create_for_key_and_name(vm: &Vm, key: &StorageKey, name: &Utf16String) -> DatabaseRef {
-        let value = Database::create(vm, name);
-        storage(vm).set_database(vm, key, name, value);
-        value
     }
 
     pub(crate) fn delete_for_key_and_name(vm: &Vm, key: &StorageKey, name: &Utf16String) {

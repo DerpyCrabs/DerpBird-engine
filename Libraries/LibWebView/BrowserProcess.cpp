@@ -392,6 +392,9 @@ static BrowserProcess::Handover hand_over(UIProcessClient& client, Vector<ByteSt
     auto deadline = MonotonicTime::now() + timeout;
     bool done = false;
     switch (new_window) {
+    case NewWindow::App:
+        done = client.send_sync_until<Messages::UIProcessServer::CreateAppWindow>(deadline, raw_urls);
+        break;
     case NewWindow::Yes:
         done = client.send_sync_until<Messages::UIProcessServer::CreateNewWindow>(deadline, raw_urls);
         break;
@@ -495,9 +498,9 @@ void BrowserProcess::accept_transport(NonnullOwnPtr<IPC::Transport> transport)
             this->on_new_tab(raw_urls);
     };
 
-    client->on_new_window = [this](auto raw_urls) {
+    client->on_new_window = [this](auto raw_urls, bool app_window) {
         if (this->on_new_window)
-            this->on_new_window(raw_urls);
+            this->on_new_window(raw_urls, app_window);
     };
 }
 
@@ -577,7 +580,13 @@ void UIProcessConnectionFromClient::create_new_tab(Vector<ByteString> urls)
 void UIProcessConnectionFromClient::create_new_window(Vector<ByteString> urls)
 {
     if (on_new_window)
-        on_new_window(sanitize_urls(urls));
+        on_new_window(sanitize_urls(urls), false);
+}
+
+void UIProcessConnectionFromClient::create_app_window(Vector<ByteString> urls)
+{
+    if (on_new_window)
+        on_new_window(sanitize_urls(urls), true);
 }
 
 }

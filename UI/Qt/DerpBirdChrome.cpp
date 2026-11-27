@@ -15,7 +15,6 @@
 #include <UI/Qt/DerpBirdFilePicker.h>
 #include <UI/Qt/DerpBirdProxy.h>
 #include <UI/Qt/DerpBirdPageSources.h>
-#include <QFileDialog>
 #include <QRegion>
 #include <QLayout>
 #include <QScopedValueRollback>
@@ -30,6 +29,7 @@
 #include <UI/Qt/Application.h>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/DerpBirdChrome.h>
+#include <UI/Qt/DerpBirdDialog.h>
 #include <UI/Qt/DerpBirdAutomation.h>
 #include <UI/Qt/DerpBirdWindowScreenshot.h>
 #include <QToolTip>
@@ -43,6 +43,10 @@
 #include <memory>
 #include <LibWebCommon/WebView/PageInfo.h>
 #include <UI/Qt/DerpBirdSourceDownload.h>
+#include <QDrag>
+#include <QMimeData>
+#include <QProcess>
+#include <QFileInfo>
 #include <UI/Qt/NavigationPolicy.h>
 #include <UI/Qt/StringUtils.h>
 #include <UI/Qt/Tab.h>
@@ -94,6 +98,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
         m_shell_preferences->remove("theme");
     }
     connect(&SystemAppearance::the(), &SystemAppearance::interface_appearance_changed, this, [this] { queue_snapshot(); });
+    m_window_dialog.changed = [this] { queue_snapshot(); };
     load_workspaces();
     // Browser commands must also work while focus belongs to a web page.
     // The native menu/toolbar is hidden when this chrome is active.
@@ -103,6 +108,9 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
         request.set("page"sv, "history"sv);
         if (auto result = command(request); result.is_error())
             warnln("Unable to open history: {}", result.error());
+    });
+    new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M), &window, [] {
+        Application::the().show_process_manager();
     });
     new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_D), &window, [this] {
         if (auto* tab = m_window.current_tab()) {
@@ -242,20 +250,27 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
                 if (type == "import.passwords"sv) {
                     if (m_password_import) { completion(Error::from_string_literal("Password import is already running")); return; }
                     m_password_import = true;
-                    auto* picker = new QFileDialog(&m_window, "Import Chrome passwords", QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation), "Password CSV (*.csv)");
-                    picker->setFileMode(QFileDialog::ExistingFile);
-                    picker->setAttribute(Qt::WA_DeleteOnClose);
                     auto done = std::make_shared<decltype(completion)>(AK::move(completion));
-                    connect(picker, &QFileDialog::finished, this, [this, picker, done](int result) mutable {
-                        if (result != QDialog::Accepted || picker->selectedFiles().isEmpty()) {
-                            m_password_import = false; JsonObject cancelled; cancelled.set("cancelled"sv, true); (*done)(JsonValue { AK::move(cancelled) }); return;
+                    auto* picker = new QFileDialog(&m_window, "Import Chrome passwords", QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation), "CSV files (*.csv)");
+                    picker->setAttribute(Qt::WA_DeleteOnClose);
+                    picker->setFileMode(QFileDialog::ExistingFile);
+                    connect(picker, &QDialog::finished, this, [this, picker, done](int result) mutable {
+                        auto paths = result == QDialog::Accepted ? picker->selectedFiles() : QStringList {};
+                        if (paths.isEmpty()) {
+                            m_password_import = false;
+                            JsonObject cancelled;
+                            cancelled.set("cancelled"sv, true);
+                            (*done)(JsonValue { AK::move(cancelled) });
+                            return;
                         }
-                        JsonObject request; request.set("type"sv, "credentials.import-csv"sv);
-                        request.set("path"sv, ak_string_from_qstring(picker->selectedFiles().first()));
+                        JsonObject request;
+                        request.set("type"sv, "credentials.import-csv"sv);
+                        request.set("path"sv, ak_string_from_qstring(paths.first()));
                         Application::the().derpbird_credentials_request(JsonValue { AK::move(request) }, false,
                             [self = QPointer(this), done](auto result) mutable { if (self) self->m_password_import = false; (*done)(AK::move(result)); });
                     });
-                    picker->open(); return;
+                    picker->open();
+                    return;
                 }
                 if (type == "import.chrome"sv) {
                     if (m_import) { completion(Error::from_string_literal("Import is already running")); return; }
@@ -571,6 +586,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     };
     m_shell->on_load_start = [this] {
         m_file_picker->cancel();
+        if (m_window_dialog.is_open()) m_window_dialog.dismiss();
         if (m_source_download) m_source_download->cancel();
         m_credential_proposal.clear();
         m_pending_surface_state.clear();
@@ -580,6 +596,7 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
     connect(m_shell, &WebContentView::crash_overlay_changed, this, [this] {
         if (m_shell->crash_overlay_active()) {
             m_file_picker->dismiss();
+            if (m_window_dialog.is_open()) m_window_dialog.dismiss();
             if (m_source_download) m_source_download->cancel();
             m_pending_surface_state.clear();
             m_surface_state.invalidate();
@@ -707,6 +724,8 @@ DerpBirdChrome::DerpBirdChrome(BrowserWindow& window)
 
 DerpBirdChrome::~DerpBirdChrome()
 {
+    m_window_dialog.changed = {};
+    if (m_window_dialog.is_open()) m_window_dialog.dismiss();
     DerpBirdAutomation::the().remove_window(m_automation_window_id);
     if (m_request_log_view) m_request_log_view->set_request_logging(false);
     if (m_autocomplete) { m_autocomplete->on_autocomplete_query_complete = nullptr; m_autocomplete->cancel_pending_query(); }
@@ -1003,12 +1022,70 @@ void DerpBirdChrome::normalize_tree_order()
     m_reordering_tree = false;
 }
 
+Tab* DerpBirdChrome::successor_for_close(Tab& closing) const
+{
+    auto workspace = tab_workspace(closing);
+    auto* script_parent = closing.derpbird_script_parent();
+    if (script_parent && m_window.tab_index(script_parent) >= 0 && tab_workspace(*script_parent) == workspace)
+        return script_parent;
+
+    auto opener_of = [this](Tab& tab) -> Tab* {
+        auto id = tab.property("derpbirdOpener").toLongLong();
+        if (auto* opener = m_tree_tabs.value(id).data())
+            return opener;
+        return tree_parent(tab);
+    };
+    auto* opener = opener_of(closing);
+    auto opener_id = closing.property("derpbirdOpener").toLongLong();
+    auto index = m_window.tab_index(&closing);
+    Tab* best = nullptr;
+    int best_rank = 5;
+    // Within each preference, search right first, then left.
+    auto consider = [&](Tab* candidate) {
+        if (tab_workspace(*candidate) != workspace) return;
+        auto* source = opener_of(*candidate);
+        int rank = 4;
+        if (source == &closing) rank = 0;
+        else if ((opener && source == opener) || (opener_id && candidate->property("derpbirdOpener").toLongLong() == opener_id)) rank = 1;
+        else if (candidate == opener) rank = 2;
+        else if (tree_parent(*candidate) == &closing || tree_parent(closing) == candidate) rank = 3;
+        // Session IDs follow creation order, even after a drag or the opener closing.
+        bool earlier_relative = rank == best_rank && rank <= 1 && candidate->session_tab_id().has_value() && best->session_tab_id().has_value()
+            && *candidate->session_tab_id() < *best->session_tab_id();
+        if (rank < best_rank || earlier_relative) {
+            best = candidate;
+            best_rank = rank;
+        }
+    };
+    for (int i = index + 1; i < m_window.tab_count(); ++i) consider(m_window.tab_at(i));
+    for (int i = index - 1; i >= 0; --i) consider(m_window.tab_at(i));
+    return best;
+}
+
 void DerpBirdChrome::group_tab_from_view(Tab& child, Optional<u64> source_view_id)
 {
     if (!source_view_id.has_value()) return;
     for (int i = 0; i < m_window.tab_count(); ++i) {
         auto* source = m_window.tab_at(i);
-        if (source == &child || !source->is_loaded() || source->view().view_id() != *source_view_id || source->is_pinned()) continue;
+        if (source == &child || !source->is_loaded() || source->view().view_id() != *source_view_id) continue;
+        child.setProperty("derpbirdOpener", static_cast<qlonglong>(source->session_tab_id().value_or(0)));
+        if (source->is_pinned()) {
+            // Pinned tabs cannot be tree parents. Keep their reading queue at the
+            // start of the unpinned strip, moving past each sibling's whole group.
+            int destination = m_window.pinned_tab_count();
+            for (int j = destination; j < m_window.tab_count(); ++j) {
+                auto* candidate = m_window.tab_at(j);
+                if (candidate == &child) continue;
+                if (!tree_parent(*candidate) && candidate->property("derpbirdOpener") != child.property("derpbirdOpener"))
+                    break;
+                destination = j + 1;
+            }
+            int from = m_window.tab_index(&child);
+            m_reordering_tree = true;
+            m_window.move_tab(from, from < destination ? destination - 1 : destination);
+            m_reordering_tree = false;
+            return;
+        }
         if (auto result = move_tree_tab(child, *source, "inside"sv); result.is_error())
             warnln("Cannot group tab opened from page: {}", result.error());
         return;
@@ -1064,8 +1141,9 @@ void DerpBirdChrome::download_updated(RemoteDownloads::Download const& download)
     if (download.is_private == m_window.is_private()) queue_snapshot();
 }
 
-void DerpBirdChrome::download_removed(u64, WebView::IsPrivate session)
+void DerpBirdChrome::download_removed(u64 id, WebView::IsPrivate session)
 {
+    m_download_thumbnails.remove(id);
     if (session == m_window.is_private()) queue_snapshot();
 }
 
@@ -1146,6 +1224,10 @@ JsonValue DerpBirdChrome::snapshot()
         tabs.must_append(AK::move(entry));
     }
     auto state = settings_snapshot();
+    if (m_window_dialog.is_open())
+        state.set("dialog"sv, m_window_dialog.state());
+    else if (auto* tab = m_window.current_tab(); tab && tab->shell_dialog() && tab->shell_dialog()->is_open())
+        state.set("dialog"sv, tab->shell_dialog()->state());
     state.set("addressSuggestions"sv, m_address_suggestions);
     StringBuilder dynamic_rules;
     for (auto line : Application::settings().custom_content_blocker_filters().bytes_as_string_view().split_view('\n')) {
@@ -1183,6 +1265,11 @@ JsonValue DerpBirdChrome::snapshot()
         entry.set("id"sv, String::number(file.id));
         entry.set("name"sv, String::from_utf8_with_replacement_character(file.destination.basename(), String::WithBOMHandling::No));
         entry.set("path"sv, String::from_utf8_with_replacement_character(file.destination.string().view(), String::WithBOMHandling::No));
+        if (auto thumbnail = m_download_thumbnails.value(file.id); !thumbnail.is_empty()) entry.set("thumbnail"sv, thumbnail);
+        if (file.created_time > UnixDateTime {})
+            entry.set("startedAt"sv, file.created_time.milliseconds_since_epoch());
+        if (file.finished_time != UnixDateTime {})
+            entry.set("finishedAt"sv, file.finished_time.milliseconds_since_epoch());
         entry.set("received"sv, file.downloaded_size);
         if (file.total_size.has_value()) entry.set("total"sv, *file.total_size);
         entry.set("resumable"sv, file.can_resume);
@@ -1248,6 +1335,20 @@ void DerpBirdChrome::queue_snapshot()
     QTimer::singleShot(0, this, [this] {
         m_snapshot_queued = false;
         auto state = snapshot();
+        auto dialog = state.as_object().get_object("dialog"sv);
+        auto id = dialog.has_value() ? dialog->get_string("id"sv).value_or(String {}) : String {};
+        if (id != m_focused_dialog) {
+            if (dialog.has_value()) {
+                if (m_focused_dialog.is_empty())
+                    m_dialog_previous_focus = QApplication::focusWidget();
+                m_shell->setFocus(Qt::OtherFocusReason);
+            } else {
+                if (m_dialog_previous_focus && m_dialog_previous_focus->isVisible() && m_shell->hasFocus())
+                    m_dialog_previous_focus->setFocus(Qt::OtherFocusReason);
+                m_dialog_previous_focus = nullptr;
+            }
+            m_focused_dialog = AK::move(id);
+        }
         if (m_focus_address_pending) {
             m_focus_address_pending = false;
             state.as_object().set("focusAddress"sv, true);
@@ -1445,6 +1546,22 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         return Error::from_string_literal("Invalid command");
     auto const& data = value.as_object();
     auto type = data.get_string("type"sv).value_or(String {});
+    if (type.is_one_of("dialog.answer"sv, "dialog.edit"sv)) {
+        auto* tab = m_window.current_tab();
+        auto* dialog = m_window_dialog.is_open() ? &m_window_dialog : (tab ? tab->shell_dialog() : nullptr);
+        auto id = data.get_string("id"sv);
+        auto accepted = data.get_bool("accepted"sv);
+        if (!dialog || !id.has_value() || !dialog->matches(*id))
+            return Error::from_string_literal("Dialog has closed");
+        if (type == "dialog.edit"sv) {
+            auto text = data.get_string("value"sv);
+            if (text.has_value()) dialog->edit(qstring_from_ak_string(*text));
+            return {};
+        }
+        if (!accepted.has_value()) return Error::from_string_literal("Missing dialog answer");
+        dialog->respond(*accepted, qstring_from_ak_string(data.get_string("value"sv).value_or(String {})), data.get_bool("block"sv).value_or(false));
+        return {};
+    }
     if (type == "automation.set-enabled"sv) {
         auto enabled = data.get_bool("enabled"sv);
         if (!enabled.has_value()) return Error::from_string_literal("Missing automation state");
@@ -1555,7 +1672,35 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         else if (action == "cancel"sv && WebView::FileDownloader::status_is_active(file->status)) downloads.cancel_download(*id);
         else if (action == "open"sv && file->status == Status::Completed) downloads.open(*id);
         else if (action == "reveal"sv && file->status == Status::Completed) downloads.show_in_folder(*id);
-        else return Error::from_string_literal("Unknown download action");
+        else if (file->status == Status::Completed && (action == "drag"sv || action == "thumbnail"sv)) {
+            auto bytes = file->destination.string().view();
+            auto path = QString::fromUtf8(bytes.characters_without_null_termination(), bytes.length());
+            if (!QFileInfo(path).isFile()) return {};
+            if (action == "drag"sv) {
+                auto* drag = new QDrag(&m_window);
+                auto* mime = new QMimeData;
+                mime->setUrls({ QUrl::fromLocalFile(path) });
+                drag->setMimeData(mime);
+                drag->exec(Qt::CopyAction);
+                drag->deleteLater();
+            } else if (!m_download_thumbnails.contains(*id)) {
+                m_download_thumbnails.insert(*id, String {});
+                auto* process = new QProcess(this);
+                connect(process, &QProcess::finished, this, [this, process, id = *id](int code, QProcess::ExitStatus status) {
+                    auto png = process->readAllStandardOutput();
+                    if (status == QProcess::NormalExit && !code && !png.isEmpty() && m_download_thumbnails.contains(id)) {
+                        m_download_thumbnails[id] = ak_string_from_qstring("data:image/png;base64," + QString::fromLatin1(png.toBase64()));
+                        queue_snapshot();
+                    }
+                    process->deleteLater();
+                });
+                connect(process, &QProcess::errorOccurred, process, [process](QProcess::ProcessError error) {
+                    if (error == QProcess::FailedToStart) process->deleteLater();
+                });
+                QTimer::singleShot(10000, process, [process] { process->kill(); });
+                process->start("ffmpeg", { "-nostdin", "-loglevel", "error", "-protocol_whitelist", "file", "-format_whitelist", "png_pipe,jpeg_pipe,gif,webp_pipe,bmp_pipe,mov,matroska,avi", "-threads", "1", "-i", path, "-map", "0:v:0", "-frames:v", "1", "-vf", "scale=64:64:force_original_aspect_ratio=decrease", "-threads", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1" });
+            }
+        } else return Error::from_string_literal("Unknown download action");
         return {};
     }
     if (type == "browser.open-page"sv) {
@@ -1799,6 +1944,7 @@ ErrorOr<void> DerpBirdChrome::command(JsonValue const& value)
         auto* parent = tree_parent(*tab);
         if (!parent) parent = tab;
         auto& child = m_window.new_tab_from_url(Application::settings().new_tab_page_url(), Web::HTML::ActivateTab::Yes, BrowserWindow::TabLocation::end());
+        child.setProperty("derpbirdOpener", static_cast<qlonglong>(tab->session_tab_id().value_or(0)));
         return move_tree_tab(child, *parent, "inside"sv);
     }
     if (type == "tab.close-group"sv) {

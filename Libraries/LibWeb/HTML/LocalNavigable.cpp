@@ -1954,6 +1954,8 @@ LocalNavigable::ChosenNavigable LocalNavigable::choose_a_navigable(Utf16View nam
         auto request_new_web_view = [&] {
             TokenizedFeature::Map empty_window_features;
             auto hints = web_view_hints_from_tokenised_features(window_features.has_value() ? *window_features : empty_window_features);
+            // The response may become a download instead of a document.
+            hints.wait_for_navigation_commit = popup_url.has_value() && popup_url->scheme().is_one_of("http"sv, "https"sv, "blob"sv);
             return page().client().page_did_request_new_web_view(activate_tab, hints, id(), Utf16String::from_utf16(name), no_opener, active_document()->base_url());
         };
 
@@ -4705,7 +4707,7 @@ void LocalTraversableNavigable::request_close_preflight(GC::Ref<GC::Function<voi
         if (auto* local_navigable = as_if<LocalNavigable>(navigable.ptr()))
             local_navigables.append(*local_navigable);
     }
-    state->start(local_navigables, {});
+    state->start(local_navigables, {}, CheckUnloadingCanceledState::WindowClose::Yes);
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#finalize-a-cross-document-navigation

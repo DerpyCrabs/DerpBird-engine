@@ -117,6 +117,7 @@ struct WebContentViewInitialState {
     bool screen_shows_high_dynamic_range { false };
     Optional<u64> owner_view_id;
     bool is_tab { true };
+    Optional<URL::URL> app_scope {};
 };
 
 class WebContentView final

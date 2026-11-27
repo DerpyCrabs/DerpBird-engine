@@ -825,6 +825,7 @@ public:
     virtual bool has_transparent_background() const { return false; }
     virtual CSS::PreferredColorScheme preferred_color_scheme() const = 0;
     // Whether the screen the page is shown on can show colors brighter than SDR white.
+    virtual bool standalone_display() const { return false; }
     virtual bool screen_shows_high_dynamic_range() const { return false; }
     virtual CSS::PreferredContrast preferred_contrast() const = 0;
     virtual CSS::PreferredMotion preferred_motion() const = 0;
@@ -940,6 +941,9 @@ public:
     virtual void page_did_store_hsts_policy_for_testing(String const&, HTTP::HSTS::ParsedHSTSPolicy const&) { }
     virtual void page_did_request_clear_storage_for_testing(StorageAPI::StorageEndpointType, HTML::EnvironmentSettingsObject const&) { }
     virtual bool page_did_is_known_hsts_host(String const&) { return false; }
+    virtual i64 indexed_db_catalog(HTML::EnvironmentId const&, Vector<ByteBuffer>&) { return -2; }
+    virtual i64 read_indexed_db(HTML::EnvironmentId const&, ByteBuffer const&, ByteBuffer&) { return -2; }
+    virtual bool commit_indexed_db(HTML::EnvironmentId const&, ByteBuffer const&, i64, ByteBuffer const&) { return false; }
     virtual u64 page_did_request_storage_usage([[maybe_unused]] Web::HTML::EnvironmentId const& environment_id) { return {}; }
 
     virtual URL::BlobURLEntry::Token page_did_add_blob_url_entry(HTML::EnvironmentSettingsObject const&, [[maybe_unused]] Utf16String const& url, [[maybe_unused]] FileAPI::SerializedBlobURLEntry const& entry) { return 0; }

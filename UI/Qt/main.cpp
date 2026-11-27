@@ -12,6 +12,7 @@
 #include <LibWebView/URL.h>
 #include <LibWebView/Utilities.h>
 #include <UI/Qt/Application.h>
+#include <QCryptographicHash>
 #include <UI/Qt/BrowserWindow.h>
 #include <UI/Qt/ChromeStyle.h>
 #include <UI/Qt/HubConnection.h>
@@ -120,7 +121,15 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             window.raise();
         };
 
-        app->on_new_window = [&](auto const& urls) {
+        app->on_new_window = [&](auto const& urls, bool app_window) {
+            if (app_window && urls.size() == 1) {
+                auto serialized = urls.first().serialize();
+                auto digest = QCryptographicHash::hash(QByteArray(serialized.bytes_as_string_view().characters_without_null_termination(), serialized.bytes_as_string_view().length()), QCryptographicHash::Sha256);
+                auto config = app->configuration_for_new_window();
+                config.app_id = "org.derpbird.App." + digest.toHex().left(32);
+                app->new_window(urls, config);
+                return;
+            }
             if (!app->non_private_window_if_any())
                 app->on_new_tab(urls);
             else
@@ -129,7 +138,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
         auto configuration = app->configuration_for_new_window();
         auto agent_id = qEnvironmentVariable("DERPBIRD_AGENT_WINDOW");
-        if (!agent_id.isEmpty()) {
+        if (browser_options.new_window == WebView::NewWindow::App) {
+            app->on_new_window(browser_options.urls, true);
+        } else if (!agent_id.isEmpty()) {
             app->new_window(browser_options.urls, configuration, Ladybird::BrowserWindow::IsPopupWindow::No, WebView::IsPrivate::No, {}, Ladybird::ShowWindow::Yes, {}, agent_id);
         } else if (auto* restored_window = app->restore_previous_session(configuration)) {
             // A whole restored session replaces the usual startup tab, so only the URLs the user passed open with it.

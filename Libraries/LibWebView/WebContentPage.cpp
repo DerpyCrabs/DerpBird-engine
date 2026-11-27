@@ -793,6 +793,12 @@ void WebContentPage::did_request_navigation_of_navigable(Web::HTML::CrossProcess
     //    3. Set initiatorOriginSnapshot to sourceDocument's origin.
     navigation.initiator_origin_snapshot = source_document.origin();
 
+    if (target->is_top_level_traversable() && view().is_outside_app_scope(navigation.url)
+        && navigation.user_involvement == Web::HTML::UserNavigationInvolvement::Activation
+        && view().take_input_to_open_link_in_new_tab({}, *this)) {
+        view().open_navigation_in_new_tab(move(navigation), Web::HTML::ActivateTab::Yes);
+        return;
+    }
     target->begin_navigation(move(navigation), move(source_page));
 }
 
@@ -1149,7 +1155,7 @@ void WebContentPage::did_click_link(Web::HTML::PreparedNavigationDescriptor navi
     }
 }
 
-void WebContentPage::did_middle_click_link(Web::HTML::PreparedNavigationDescriptor navigation, ByteString, unsigned)
+void WebContentPage::did_middle_click_link(Web::HTML::PreparedNavigationDescriptor navigation, ByteString, unsigned modifiers)
 {
     auto verified_navigation = navigation_from_page(client(), move(navigation));
     if (!verified_navigation.has_value())
@@ -1164,7 +1170,8 @@ void WebContentPage::did_middle_click_link(Web::HTML::PreparedNavigationDescript
     //     That click opens the link whatever activation the page used up for other things.
     if (!view().take_input_to_open_link_in_new_tab({}, *this))
         return;
-    view().open_navigation_in_new_tab(verified_navigation.release_value(), Web::HTML::ActivateTab::No);
+    auto activate = modifiers & Web::UIEvents::Mod_Shift ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No;
+    view().open_navigation_in_new_tab(verified_navigation.release_value(), activate);
 }
 
 void WebContentPage::did_request_external_url(URL::URL url, URL::Origin initiator_origin, bool has_transient_activation)
@@ -2822,6 +2829,14 @@ void WebContentPage::did_request_navigation_start(Web::HTML::CrossProcessId navi
     }
 
     auto retry = prepare_navigation_to_retry(*start_request);
+    if (target_navigable->is_top_level_traversable() && view().is_outside_app_scope(url)
+        && start_request->csp_navigation_type != Web::ContentSecurityPolicy::Directives::NavigationType::FormSubmission
+        && start_request->user_involvement == Web::HTML::UserNavigationInvolvement::Activation
+        && view().take_input_to_open_link_in_new_tab({}, *this)) {
+        async_cancel_navigation_params_creation(navigable_id, navigation_id);
+        view().open_navigation_in_new_tab(move(retry), Web::HTML::ActivateTab::Yes);
+        return;
+    }
     target_navigable->set_ongoing_navigation(CanonicalNavigation::Start {
         .url = move(url),
         .navigation_id = navigation_id,
@@ -3067,7 +3082,7 @@ Messages::WebContentClient::DidStartDownloadWithoutRequestResponse WebContentPag
         return { Optional<u64> {} };
 
     auto& file_downloader = Application::the().file_downloader();
-    auto download_id = file_downloader.start_download(client().is_private(), url, destination.release_value(), total_size);
+    auto download_id = file_downloader.start_download(client().is_private(), url, destination.release_value(), total_size, FileDownloader::MayReplaceDestination::No, view().view_id());
     if (!is_download_in_progress(file_downloader, download_id))
         return { Optional<u64> {} };
 
@@ -3144,7 +3159,7 @@ Messages::WebContentClient::DidStartDownloadResponse WebContentPage::did_start_d
 
     auto& file_downloader = Application::the().file_downloader();
     auto download_id = file_downloader.adopt_download(client().is_private(), url, destination.release_value(), total_size, same_site_context, request_server_client_id, request_server_request_id, *owner_client_id, initial_data.bytes(),
-        move(on_response_finished));
+        move(on_response_finished), view().view_id());
     if (!is_download_in_progress(file_downloader, download_id))
         return { Optional<u64> {} };
 
@@ -3715,6 +3730,48 @@ void WebContentPage::register_dedicated_worker(Web::HTML::WorkerAgentStartReques
 {
     auto outside_settings = hosted_environment(request.outside_settings.id);
     WorkerAgentManager::the().register_dedicated_worker(client(), m_id, outside_settings, move(request), move(worker_transport));
+}
+
+Messages::WebContentClient::IndexedDbCatalogResponse WebContentPage::indexed_db_catalog(Web::HTML::EnvironmentId environment_id)
+{
+    auto key = canonical_storage_key(environment_id);
+    auto* jar = client().session().storage_jar.ptr();
+    if (!key.has_value() || !jar)
+        return { -1, {} };
+    if (client().is_private() == IsPrivate::Yes)
+        return { -2, {} };
+    auto entries = jar->indexed_db_catalog(*key);
+    if (entries.is_error())
+        return { -1, {} };
+    return { 0, entries.release_value() };
+}
+
+Messages::WebContentClient::ReadIndexedDbResponse WebContentPage::read_indexed_db(Web::HTML::EnvironmentId environment_id, ByteBuffer name)
+{
+    auto key = canonical_storage_key(environment_id);
+    auto* jar = client().session().storage_jar.ptr();
+    if (!key.has_value() || !jar)
+        return { -1, {} };
+    if (client().is_private() == IsPrivate::Yes)
+        return { -2, {} };
+    auto value = jar->read_indexed_db(*key, name);
+    if (value.is_error())
+        return { -1, {} };
+    if (!value.value().has_value())
+        return { 0, {} };
+    return { value.value()->revision, move(value.value()->bytes) };
+}
+
+Messages::WebContentClient::CommitIndexedDbResponse WebContentPage::commit_indexed_db(Web::HTML::EnvironmentId environment_id, ByteBuffer name, i64 revision, ByteBuffer snapshot)
+{
+    auto key = canonical_storage_key(environment_id);
+    auto* jar = client().session().storage_jar.ptr();
+    if (!key.has_value() || !jar)
+        return false;
+    if (client().is_private() == IsPrivate::Yes || revision < 0)
+        return false;
+    auto result = jar->commit_indexed_db(*key, name, revision, snapshot);
+    return !result.is_error() && result.value();
 }
 
 Messages::WebContentClient::DidRequestStorageUsageResponse WebContentPage::did_request_storage_usage(Web::HTML::EnvironmentId environment_id)

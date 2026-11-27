@@ -39,6 +39,9 @@ void web_indexed_db_queue_a_database_task(void* cell, void (*steps)(JSVM*, void*
 void web_indexed_db_run_in_parallel(void* cell, void (*steps)(JSVM*, void*));
 void* web_indexed_db_current_event_loop();
 void web_indexed_db_enqueue_check_pending_connection_wait(void* database);
+i64 web_indexed_db_catalog(void* realm, void* target, void (*receive)(void*, ReadonlyBytes));
+i64 web_indexed_db_read(void* realm, ReadonlyBytes name, void* target, void (*receive)(void*, ReadonlyBytes));
+bool web_indexed_db_commit(void* realm, ReadonlyBytes name, i64 revision, ReadonlyBytes snapshot);
 bool web_indexed_db_devtools_client_is_active(void* realm);
 IndexedDB::TransactionChanges* web_indexed_db_create_transaction_changes();
 void web_indexed_db_append_transaction_change(IndexedDB::TransactionChanges*, u8 kind, FlatPtr database_name, FlatPtr object_store_name, JsonValue* key);
@@ -108,6 +111,48 @@ static GC::Ptr<DOM::Document> responsible_document(void* realm)
 {
     auto& js_realm = *static_cast<JS::Realm*>(realm);
     return HTML::relevant_settings_object(js_realm.global_object()).responsible_document();
+}
+
+i64 web_indexed_db_catalog(void* realm, void* target, void (*receive)(void*, ReadonlyBytes))
+{
+    auto document = responsible_document(realm);
+    if (!document)
+        return -2;
+    auto& environment = HTML::relevant_settings_object(static_cast<JS::Realm*>(realm)->global_object());
+    Vector<ByteBuffer> entries;
+    auto status = document->page().client().indexed_db_catalog(environment.id, entries);
+    for (auto const& entry : entries)
+        receive(target, entry.bytes());
+    return status;
+}
+
+i64 web_indexed_db_read(void* realm, ReadonlyBytes name, void* target, void (*receive)(void*, ReadonlyBytes))
+{
+    auto document = responsible_document(realm);
+    if (!document)
+        return -2;
+    auto& environment = HTML::relevant_settings_object(static_cast<JS::Realm*>(realm)->global_object());
+    auto database_name = ByteBuffer::copy(name);
+    if (database_name.is_error())
+        return -1;
+    ByteBuffer snapshot;
+    auto revision = document->page().client().read_indexed_db(environment.id, database_name.value(), snapshot);
+    if (revision > 0)
+        receive(target, snapshot.bytes());
+    return revision;
+}
+
+bool web_indexed_db_commit(void* realm, ReadonlyBytes name, i64 revision, ReadonlyBytes snapshot)
+{
+    auto document = responsible_document(realm);
+    if (!document)
+        return false;
+    auto& environment = HTML::relevant_settings_object(static_cast<JS::Realm*>(realm)->global_object());
+    auto database_name = ByteBuffer::copy(name);
+    auto data = ByteBuffer::copy(snapshot);
+    if (database_name.is_error() || data.is_error())
+        return false;
+    return document->page().client().commit_indexed_db(environment.id, database_name.value(), revision, data.value());
 }
 
 bool web_indexed_db_devtools_client_is_active(void* realm)

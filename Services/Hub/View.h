@@ -29,6 +29,7 @@ public:
         bool websites_prefer_dark { false };
         // The view of a tab can open others and ask the user about things, unlike that of a Picture-in-Picture window.
         bool is_tab { true };
+        Optional<URL::URL> app_scope {};
         bool scales_frames_to_fit { false };
     };
 

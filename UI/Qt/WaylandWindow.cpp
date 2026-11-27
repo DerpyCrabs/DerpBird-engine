@@ -42,7 +42,7 @@ QNativeInterface::QWaylandApplication* wayland_application()
     return qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>();
 }
 
-void set_wayland_agent_window_identity(QWidget& widget)
+void set_wayland_window_identity(QWidget& widget, QByteArray app_id)
 {
 #ifdef DERPBIRD_HAS_WAYLAND_APP_ID
     if (!wayland_application())
@@ -52,9 +52,9 @@ void set_wayland_agent_window_identity(QWidget& widget)
     auto* native = window->nativeInterface<QNativeInterface::Private::QWaylandWindow>();
     if (!native)
         return;
-    auto apply = [native] {
+    auto apply = [native, app_id] {
         if (auto* toplevel = native->surfaceRole<xdg_toplevel>())
-            xdg_toplevel_set_app_id(toplevel, "org.derpbird.Agent");
+            xdg_toplevel_set_app_id(toplevel, app_id.constData());
     };
     // Qt emits this after its default app_id, before the initial surface commit.
     // Keep the connection for hide/show surface recreation as well.
@@ -62,6 +62,7 @@ void set_wayland_agent_window_identity(QWidget& widget)
     apply();
 #else
     Q_UNUSED(widget);
+    Q_UNUSED(app_id);
 #endif
 }
 

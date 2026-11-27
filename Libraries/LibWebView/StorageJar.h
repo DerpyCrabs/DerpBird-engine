@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <AK/ByteBuffer.h>
 #include <AK/Function.h>
 #include <AK/HashMap.h>
 #include <AK/String.h>
@@ -92,10 +93,28 @@ public:
     u64 bottle_usage(StorageEndpointType storage_endpoint, String const& storage_key);
     Requests::CacheSizes estimate_storage_size_accessed_since(UnixDateTime since) const;
 
+    struct IndexedDBSnapshot {
+        i64 revision;
+        ByteBuffer bytes;
+    };
+    ErrorOr<Vector<ByteBuffer>> indexed_db_catalog(String const& storage_key);
+    ErrorOr<Optional<IndexedDBSnapshot>> read_indexed_db(String const& storage_key, ReadonlyBytes database_name);
+    ErrorOr<bool> commit_indexed_db(String const& storage_key, ReadonlyBytes database_name, i64 expected_revision, ReadonlyBytes snapshot);
+
     void clone_from(StorageJar const&);
 
 private:
     struct Statements {
+        Database::StatementID indexed_db_catalog { 0 };
+        Database::StatementID read_indexed_db { 0 };
+        Database::StatementID store_size { 0 };
+        Database::StatementID put_indexed_db_store { 0 };
+        Database::StatementID clear_indexed_db_stores { 0 };
+        Database::StatementID insert_indexed_db { 0 };
+        Database::StatementID update_indexed_db { 0 };
+        Database::StatementID clear_indexed_db_origin { 0 };
+        Database::StatementID clear_indexed_db_since { 0 };
+        Database::StatementID indexed_db_usage { 0 };
         Database::StatementID get_item { 0 };
         Database::StatementID set_item { 0 };
         Database::StatementID delete_item { 0 };

@@ -155,7 +155,9 @@ public:
         int m_index { 0 };
     };
 
-    BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window = IsPopupWindow::No, WebView::IsPrivate = WebView::IsPrivate::No, Optional<u64> hub_view_id = {}, Optional<SessionWindowId> restored_session_window_id = {}, QString agent_id = {});
+    BrowserWindow(Vector<URL::URL> const& initial_urls, IsPopupWindow is_popup_window = IsPopupWindow::No, WebView::IsPrivate = WebView::IsPrivate::No, Optional<u64> hub_view_id = {}, Optional<SessionWindowId> restored_session_window_id = {}, QString agent_id = {}, QString app_id = {});
+    Optional<URL::URL> const& app_scope() const { return m_app_scope; }
+    bool is_app_window() const { return !m_app_id.isEmpty(); }
     virtual ~BrowserWindow() override;
 
     DerpBirdChrome* derpbird_chrome() const { return m_derpbird_chrome; }
@@ -190,6 +192,7 @@ public:
     void update_tab_audio_button(Tab&);
     // Opens a window's restored tabs, keeping the session rows the store re-adopted for them.
     void restore_tabs(Vector<RestoredSessionTab> const&, i64 active_tab_index);
+    void did_commit_navigation(Tab&);
     Tab* current_tab() const { return m_current_tab; }
 
     enum class PageCardSlot : u8 {
@@ -205,7 +208,7 @@ public:
     // a close() goes straight through.
     void request_close_preflight(Function<void(bool approved)> on_complete);
     // Brings the window forward for a page's beforeunload prompt during an application-wide close check.
-    void raise_for_close_prompt();
+    bool raise_for_close_prompt(Tab&);
     // Unminimizes, raises and activates the window, so the user sees it in front.
     void bring_to_front();
     // The tab showing this view, if it's one of this window's.
@@ -304,6 +307,7 @@ private:
     void update_window_title(QString const&);
     void register_window_with_session_store();
     void sync_session_tab_order();
+    WindowCloseCoordinator::Preflight close_check_for_tab(QPointer<Tab>);
     void begin_window_close_preflight(Function<void(bool approved)> on_complete = {});
 
     void set_current_tab(Tab* tab);
@@ -348,6 +352,7 @@ private:
 
     TabWidget* m_tabs_container { nullptr };
     Tab* m_current_tab { nullptr };
+    QPointer<Tab> m_tab_to_activate_on_commit;
     Array<QPointer<PageCard>, 3> m_page_cards;
     QPointer<WebContentView> m_page_cards_view;
     Vector<QPointer<Tab>> m_background_tabs_from_current_tab;
@@ -366,6 +371,8 @@ private:
     QAction* m_always_on_top_action { nullptr };
     QActionGroup* m_tab_layout_actions { nullptr };
 
+    QString m_app_id;
+    Optional<URL::URL> m_app_scope;
     IsPopupWindow m_is_popup_window { IsPopupWindow::No };
 
     Optional<SessionWindowId> m_session_window_id;
@@ -379,6 +386,8 @@ private:
     Vector<QPointer<Tab>> m_window_close_approved_tabs;
     WindowCloseCoordinator m_window_close_coordinator;
     Function<void(bool approved)> m_window_close_preflight_on_complete;
+    u64 m_window_close_check_id { 0 };
+    bool m_window_close_current_document_changed { false };
     bool m_window_close_approved { false };
     bool m_window_close_accepted { false };
 

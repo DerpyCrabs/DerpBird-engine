@@ -24,7 +24,7 @@ use crate::indexed_db::internal::algorithms::{
     DeleteResult, OpenResult, convert_a_value_to_a_key, delete_a_database, fire_a_version_change_event,
     open_a_database_connection, queue_a_database_task, set_idb_request_result,
 };
-use crate::indexed_db::internal::database::{Database, DatabaseRef};
+use crate::indexed_db::internal::database::Database;
 use crate::indexed_db::internal::function::{NoCells, create_function, create_function_with};
 use crate::indexed_db::internal::key::Key;
 use crate::storage_api::storage_key::obtain_a_storage_key;
@@ -286,7 +286,19 @@ impl IDBFactory {
                     crate::bindings::interface::with_temporary_execution_context_and_callbacks(realm, || {
                         // 1. Let databases be the set of databases in storageKey.
                         //    If this cannot be determined for any reason, then queue a database task to reject p with an appropriate error (e.g. an "UnknownError" DOMException) and terminate these steps.
-                        let databases = Database::for_key(vm, &storage_key.0);
+                        let databases = match crate::indexed_db::cpp::stored_database_infos(realm) {
+                            Ok(Some(entries)) => entries,
+                            Ok(None) => Database::for_key(vm, &storage_key.0).values().iter().map(|db| {
+                                let version = db.upgrade_transaction().map_or_else(|| db.version(), |tx| tx.original_version());
+                                (db.name(), version)
+                            }).collect(),
+                            Err(()) => {
+                                let error = Exception::Dom("UnknownError", Utf16String::from_utf8("Could not list stored databases"))
+                                    .throw(&CallContext::new(vm, realm));
+                                reject_promise(vm, promise, error.value());
+                                return;
+                            }
+                        };
 
                         // 2. Let result be a new list.
                         // 3. For each db of databases:
@@ -297,7 +309,7 @@ impl IDBFactory {
                         //     5. Append info to result.
                         // 4. Queue a database task to resolve p with result.
                         // AD-HOC: p is resolved directly in a deferred invocation, not in a database task.
-                        resolve_database_info_list_promise(vm, realm, promise, &databases.values());
+                        resolve_database_info_list_promise(vm, realm, promise, &databases);
                     });
                 },
             ),
@@ -309,19 +321,12 @@ impl IDBFactory {
 }
 
 // NB: The generated conversion of IDBDatabaseInfo is only built with the bindings, so the dictionaries are built here.
-fn resolve_database_info_list_promise(vm: &Vm, realm: Gc<Realm>, promise: WebIdlPromise, databases: &[DatabaseRef]) {
+fn resolve_database_info_list_promise(vm: &Vm, realm: Gc<Realm>, promise: WebIdlPromise, databases: &[(Utf16String, u64)]) {
     let result = Array::create(vm, realm, 0, None).must();
 
     let mut result_index: u64 = 0;
-    for db in databases {
-        // INTEROP: A database's version is not reported until its upgrade transaction commits, so that databases()
-        //          does not pick up changes that have not been committed.
-        let mut version = db.version();
-        if let Some(upgrade_transaction) = db.upgrade_transaction() {
-            version = upgrade_transaction.original_version();
-        }
-
-        if version == 0 {
+    for (name, version) in databases {
+        if *version == 0 {
             continue;
         }
 
@@ -329,7 +334,7 @@ fn resolve_database_info_list_promise(vm: &Vm, realm: Gc<Realm>, promise: WebIdl
         info.create_data_property(
             vm,
             &PropertyKey::from_utf8("name"),
-            Value::from_string(PrimitiveString::create(vm, db.name())),
+            Value::from_string(PrimitiveString::create(vm, name.clone())),
             None,
             None,
         )
@@ -341,7 +346,7 @@ fn resolve_database_info_list_promise(vm: &Vm, realm: Gc<Realm>, promise: WebIdl
         info.create_data_property(
             vm,
             &PropertyKey::from_utf8("version"),
-            Value::from_f64(version as f64),
+            Value::from_f64(*version as f64),
             None,
             None,
         )

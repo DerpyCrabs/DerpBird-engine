@@ -128,6 +128,10 @@ ErrorOr<Database::MigrationOutcome> DownloadStore::migrate_schema(Database::Data
                 ALTER TABLE Downloads ADD COLUMN safe_method INTEGER NOT NULL DEFAULT 0;
             )#"sv,
         },
+        {
+            .version = 6u,
+            .sql = "ALTER TABLE DownloadHistory ADD COLUMN finished_time INTEGER NOT NULL DEFAULT 0;"sv,
+        },
     });
 
     return database.migrate("Downloads"sv, migrations, mode);
@@ -191,14 +195,14 @@ ErrorOr<NonnullOwnPtr<DownloadStore>> DownloadStore::create(Database::Database& 
     )#"sv));
 
     statements.save_history = TRY(database.prepare_statement(R"#(
-        INSERT INTO DownloadHistory (id, url, destination, status, downloaded_size, total_size, error, created_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO DownloadHistory (id, url, destination, status, downloaded_size, total_size, error, created_time, finished_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET url=excluded.url, destination=excluded.destination,
             status=excluded.status, downloaded_size=excluded.downloaded_size,
-            total_size=excluded.total_size, error=excluded.error;
+            total_size=excluded.total_size, error=excluded.error, finished_time=excluded.finished_time;
     )#"sv));
     statements.list_history = TRY(database.prepare_statement(
-        "SELECT id,url,destination,status,downloaded_size,total_size,error,created_time FROM DownloadHistory ORDER BY id ASC"sv));
+        "SELECT id,url,destination,status,downloaded_size,total_size,error,created_time,finished_time FROM DownloadHistory ORDER BY id ASC"sv));
     statements.delete_history = TRY(database.prepare_statement("DELETE FROM DownloadHistory WHERE id=?"sv));
     statements.trim_history = TRY(database.prepare_statement(
         "DELETE FROM DownloadHistory WHERE id IN (SELECT id FROM DownloadHistory ORDER BY created_time DESC,id DESC LIMIT -1 OFFSET 5000)"sv));
@@ -329,7 +333,7 @@ void DownloadStore::save_history(DownloadHistoryRecord const& record)
         || record.downloaded_size < 0 || record.total_size < -1)
         return;
     m_database->execute_statement(m_statements.save_history, {}, record.id, record.url,
-        record.destination, record.status, record.downloaded_size, record.total_size, record.error, record.created_time);
+        record.destination, record.status, record.downloaded_size, record.total_size, record.error, record.created_time, record.finished_time);
     m_database->execute_statement(m_statements.trim_history, {});
 }
 
@@ -347,7 +351,7 @@ Vector<DownloadHistoryRecord> DownloadStore::download_history()
             return {};
         records.append({ id.value(), m_database->result_column<String>(statement, 1),
             m_database->result_column<String>(statement, 2), static_cast<u8>(status.value()), size.value(), total.value(),
-            m_database->result_column<String>(statement, 6), m_database->result_column<UnixDateTime>(statement, 7) });
+            m_database->result_column<String>(statement, 6), m_database->result_column<UnixDateTime>(statement, 7), m_database->result_column<UnixDateTime>(statement, 8) });
         return {};
     });
     return records;

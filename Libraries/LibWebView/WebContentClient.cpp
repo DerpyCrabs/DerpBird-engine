@@ -1000,6 +1000,27 @@ Messages::WebContentClient::DidRequestCookieResponse WebContentClient::did_reque
     return cookie;
 }
 
+Messages::WebContentClient::IndexedDbCatalogResponse WebContentClient::indexed_db_catalog(Web::PageId page_id, Web::HTML::EnvironmentId environment_id)
+{
+    if (auto* page = this->page(page_id))
+        return page->indexed_db_catalog(move(environment_id));
+    return { -1, {} };
+}
+
+Messages::WebContentClient::ReadIndexedDbResponse WebContentClient::read_indexed_db(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, ByteBuffer name)
+{
+    if (auto* page = this->page(page_id))
+        return page->read_indexed_db(move(environment_id), move(name));
+    return { -1, {} };
+}
+
+Messages::WebContentClient::CommitIndexedDbResponse WebContentClient::commit_indexed_db(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, ByteBuffer name, i64 revision, ByteBuffer snapshot)
+{
+    if (auto* page = this->page(page_id))
+        return page->commit_indexed_db(move(environment_id), move(name), revision, move(snapshot));
+    return false;
+}
+
 Messages::WebContentClient::DidRequestStorageUsageResponse WebContentClient::did_request_storage_usage(Web::PageId page_id, Web::HTML::EnvironmentId environment_id)
 {
     if (auto* page = this->page(page_id))

@@ -189,6 +189,7 @@
 #include <LibWeb/HTML/History.h>
 #include <LibWeb/HTML/ListOfAvailableImages.h>
 #include <LibWeb/HTML/LocalNavigable.h>
+#include <LibWeb/HTML/CheckUnloadingCanceledState.h>
 #include <LibWeb/HTML/LocalTraversableNavigable.h>
 #include <LibWeb/HTML/Location.h>
 #include <LibWeb/HTML/MessageEvent.h>
@@ -11647,7 +11648,7 @@ bool Document::showing_an_unload_prompt_is_unlikely_to_be_annoying_deceptive_or_
     // FIXME: Revisit this approximation of "unlikely to be annoying, deceptive, or pointless".
     return is_active()
         && is_fully_active()
-        && visibility_state() == HTML::VisibilityState::Visible;
+        && (visibility_state() == HTML::VisibilityState::Visible || HTML::CheckUnloadingCanceledState::can_present_background_close_prompt(page()));
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#steps-to-fire-beforeunload

@@ -37,7 +37,9 @@ public:
     virtual void visit_edges(Visitor&) override;
 
     void adopt_for_close(GC::Ref<GC::Function<void(bool)>> callback);
-    void start(Vector<GC::Root<LocalNavigable>> const& navigables_that_need_before_unload, RefPtr<SessionHistoryEntry> target_entry);
+    enum class WindowClose { No, Yes };
+    static bool can_present_background_close_prompt(Page const&);
+    void start(Vector<GC::Root<LocalNavigable>> const& navigables_that_need_before_unload, RefPtr<SessionHistoryEntry> target_entry, WindowClose = WindowClose::No);
 
 private:
     bool document_was_already_fired(DOM::Document const&) const;
@@ -52,6 +54,7 @@ private:
 
     Result m_final_status { Result::Continue };
     UnloadPromptShown m_unload_prompt_shown { UnloadPromptShown::No };
+    WindowClose m_window_close { WindowClose::No };
     bool m_completed { false };
     GC::Ref<Page> m_page;
     GC::Ptr<LocalTraversableNavigable> m_owner;

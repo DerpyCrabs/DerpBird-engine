@@ -142,6 +142,7 @@ WebContentView::WebContentView(QWidget* window, Optional<u64> hub_view_id, WebCo
                                   .owner_view_id = initial_state.owner_view_id,
                                   .websites_prefer_dark = websites_prefer_dark(),
                                   .is_tab = initial_state.is_tab,
+                                  .app_scope = initial_state.app_scope,
                               })
 {
 #ifdef LADYBIRD_HAS_WAYLAND_GPU_QUERY

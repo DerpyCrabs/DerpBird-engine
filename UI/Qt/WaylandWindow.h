@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <QByteArray>
+
 class QWidget;
 class QWindow;
 struct wl_surface;
@@ -22,7 +24,7 @@ QNativeInterface::QWaylandApplication* wayland_application();
 
 // The surface of an existing native Wayland window. This does not create a platform window.
 wl_surface* wayland_surface_for_window(QWindow const&);
-void set_wayland_agent_window_identity(QWidget&);
+void set_wayland_window_identity(QWidget&, QByteArray app_id);
 
 // Whether the Wayland compositor can move a window with the pointer while it is dragged. It never can off Wayland.
 bool wayland_compositor_moves_dragged_windows();

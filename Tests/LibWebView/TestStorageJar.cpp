@@ -28,7 +28,76 @@ TEST_CASE(storage_round_trips_on_fresh_database)
     jar->set_item(WebView::StorageEndpointType::LocalStorage, "https://example.com"_string, "foo"_utf16, "bar"_utf16);
     EXPECT_EQ(jar->get_item(WebView::StorageEndpointType::LocalStorage, "https://example.com"_string, "foo"_utf16), Optional<Utf16String> { "bar"_utf16 });
 
-    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("WebStorage"sv)), Optional<u32> { 2u });
+    EXPECT_EQ(TRY_OR_FAIL(database->schema_version("WebStorage"sv)), Optional<u32> { 4u });
+}
+
+TEST_CASE(indexed_db_snapshot_revisions_and_origins)
+{
+    auto database = TRY_OR_FAIL(Database::Database::create_memory_backed());
+    TRY_OR_FAIL(WebView::StorageJar::migrate_schema(*database));
+    auto jar = TRY_OR_FAIL(WebView::StorageJar::create(*database));
+    auto origin = "https://example.com"_string;
+    auto other_origin = "https://other.example"_string;
+    auto name = "session"sv.bytes();
+    auto initial = "first"sv.bytes();
+    auto updated = "second"sv.bytes();
+    EXPECT(TRY_OR_FAIL(jar->commit_indexed_db(origin, name, 0, initial)));
+    EXPECT(!TRY_OR_FAIL(jar->commit_indexed_db(origin, name, 0, updated)));
+    EXPECT(TRY_OR_FAIL(jar->commit_indexed_db(origin, name, 1, updated)));
+    EXPECT(!TRY_OR_FAIL(jar->commit_indexed_db(origin, name, 1, initial)));
+    EXPECT(!TRY_OR_FAIL(jar->read_indexed_db(other_origin, name)).has_value());
+    auto reopened = TRY_OR_FAIL(WebView::StorageJar::create(*database));
+    auto snapshot = TRY_OR_FAIL(reopened->read_indexed_db(origin, name));
+    VERIFY(snapshot.has_value());
+    EXPECT_EQ(snapshot->revision, 2);
+    EXPECT(snapshot->bytes.bytes() == updated);
+    EXPECT_EQ(reopened->usage(origin), updated.size());
+    EXPECT_EQ(reopened->usage(other_origin), 0u);
+    EXPECT_EQ(reopened->bottle_usage(WebView::StorageEndpointType::IndexedDB, origin), updated.size());
+    EXPECT(TRY_OR_FAIL(reopened->commit_indexed_db(other_origin, name, 0, initial)));
+    reopened->clear_storage_key(WebView::StorageEndpointType::IndexedDB, origin);
+    EXPECT_EQ(reopened->usage(origin), 0u);
+    EXPECT_EQ(reopened->usage(other_origin), initial.size());
+    EXPECT(!TRY_OR_FAIL(jar->commit_indexed_db(origin, name, 2, updated)));
+    reopened->remove_items_accessed_since(UnixDateTime::earliest());
+    EXPECT_EQ(reopened->usage(other_origin), 0u);
+}
+
+TEST_CASE(indexed_db_store_replacements_are_atomic)
+{
+    auto database = TRY_OR_FAIL(Database::Database::create_memory_backed());
+    TRY_OR_FAIL(WebView::StorageJar::migrate_schema(*database));
+    auto jar = TRY_OR_FAIL(WebView::StorageJar::create(*database));
+    auto origin = "https://example.com"_string;
+    auto name = "test"sv.bytes();
+    auto header = "IDB\0\2\1\0\0\0\0\0\0\0\2\0\0\0"sv;
+    auto first = "\7\0\0\0\1\0\0\0a\0x"sv;
+    auto second = "\7\0\0\0\1\0\0\0b\0y"sv;
+    auto update = "\7\0\0\0\1\0\0\0a\0z"sv;
+    auto batch = MUST(ByteBuffer::copy(header.bytes()));
+    batch.append(1);
+    batch.append(first.bytes());
+    batch.append(second.bytes());
+    EXPECT(TRY_OR_FAIL(jar->commit_indexed_db(origin, name, 0, batch)));
+    batch.resize(header.length());
+    batch.append(0);
+    batch.append(update.bytes());
+    EXPECT(TRY_OR_FAIL(jar->commit_indexed_db(origin, name, 1, batch)));
+    EXPECT(!TRY_OR_FAIL(jar->commit_indexed_db(origin, name, 1, batch)));
+    batch[17] = 1;
+    batch.append(0xff);
+    EXPECT(jar->commit_indexed_db(origin, name, 2, batch).is_error());
+    auto snapshot = TRY_OR_FAIL(jar->read_indexed_db(origin, name));
+    VERIFY(snapshot.has_value());
+    auto expected = MUST(ByteBuffer::copy(header.bytes()));
+    expected.append(update.bytes().slice(4));
+    expected.append(second.bytes().slice(4));
+    EXPECT_EQ(snapshot->revision, 2);
+    EXPECT(snapshot->bytes == expected);
+    EXPECT_EQ(jar->usage(origin), expected.size());
+    jar->clear_storage_key(WebView::StorageEndpointType::IndexedDB, origin);
+    EXPECT_EQ(jar->usage(origin), 0u);
+    EXPECT(TRY_OR_FAIL(jar->read_indexed_db(origin, name))->bytes.is_empty());
 }
 
 TEST_CASE(newer_storage_schema_reports_database_too_new)

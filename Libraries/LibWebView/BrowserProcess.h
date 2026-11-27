@@ -32,12 +32,13 @@ public:
     virtual void die() override;
 
     Function<void(Vector<URL::URL> const&)> on_new_tab;
-    Function<void(Vector<URL::URL> const&)> on_new_window;
+    Function<void(Vector<URL::URL> const&, bool app_window)> on_new_window;
 
 private:
     UIProcessConnectionFromClient(NonnullOwnPtr<IPC::Transport>, int client_id);
 
     virtual void create_new_tab(Vector<ByteString> urls) override;
+    virtual void create_app_window(Vector<ByteString> urls) override;
     virtual void create_new_window(Vector<ByteString> urls) override;
 };
 
@@ -75,7 +76,7 @@ public:
     ErrorOr<ProcessDisposition> connect(Vector<ByteString> const& raw_urls, NewWindow new_window, StringView runtime_directory, StringView profile_identity, Optional<pid_t> ui_pid, Optional<UnixDateTime> replace_browser_from_before);
 
     Function<void(Vector<URL::URL> const&)> on_new_tab;
-    Function<void(Vector<URL::URL> const&)> on_new_window;
+    Function<void(Vector<URL::URL> const&, bool app_window)> on_new_window;
 
 private:
     void accept_transport(NonnullOwnPtr<IPC::Transport>);

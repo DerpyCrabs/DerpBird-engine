@@ -63,6 +63,7 @@ public:
         Optional<double> progress() const;
 
         u64 id { 0 };
+        Optional<u64> source_view_id {};
         IsPrivate is_private { IsPrivate::No };
         URL::URL url;
         LexicalPath destination;
@@ -76,6 +77,7 @@ public:
         Optional<u64> bytes_per_second;
         bool is_waiting_to_retry { false };
         UnixDateTime created_time;
+        UnixDateTime finished_time {};
 
         Optional<AK::Duration> estimated_time_remaining() const;
     };
@@ -89,11 +91,11 @@ public:
         Yes,
     };
 
-    u64 download_file(IsPrivate, URL::URL const&, LexicalPath, MayReplaceDestination = MayReplaceDestination::No, RefPtr<HTTP::HeaderList> request_headers = {});
+    u64 download_file(IsPrivate, URL::URL const&, LexicalPath, MayReplaceDestination = MayReplaceDestination::No, RefPtr<HTTP::HeaderList> request_headers = {}, Optional<u64> source_view_id = {});
     using ResponseFinished = Function<void(u64 decoded_body_size, Requests::RequestTimingInfo const*,
         Optional<StringView> error)>;
-    u64 adopt_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size, HTTP::Cookie::SameSiteContext, int request_server_client_id, u64 request_server_request_id, int owner_client_id, ReadonlyBytes initial_data = {}, ResponseFinished = {});
-    u64 start_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size = {}, MayReplaceDestination = MayReplaceDestination::No);
+    u64 adopt_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size, HTTP::Cookie::SameSiteContext, int request_server_client_id, u64 request_server_request_id, int owner_client_id, ReadonlyBytes initial_data = {}, ResponseFinished = {}, Optional<u64> source_view_id = {});
+    u64 start_download(IsPrivate, URL::URL const&, LexicalPath, Optional<u64> total_size = {}, MayReplaceDestination = MayReplaceDestination::No, Optional<u64> source_view_id = {});
     bool has_active_downloads() const;
     bool has_unresumable_downloads() const;
     void set_cancel_callback(u64 id, Function<void()>);
@@ -168,7 +170,7 @@ private:
     void discard_active_download(u64 id);
 
     void notify_download_added(Download const&);
-    void notify_download_updated(Download const&);
+    void notify_download_updated(Download&);
     void notify_download_removed(u64 id, IsPrivate);
 
     Vector<Download> m_downloads;

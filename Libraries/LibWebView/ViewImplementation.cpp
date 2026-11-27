@@ -4275,8 +4275,17 @@ bool ViewImplementation::is_running_webdriver_window_command_in(WebContentPage c
     return false;
 }
 
+bool ViewImplementation::is_outside_app_scope(URL::URL const& url) const
+{
+    if (!m_app_scope.has_value() || !(url.scheme() == "http"sv || url.scheme() == "https"sv))
+        return false;
+    return !m_app_scope->origin().is_same_origin(url.origin()) || !url.serialize_path().starts_with(m_app_scope->serialize_path());
+}
+
 void ViewImplementation::prepare_page_for_navigable(WebContentPage& page)
 {
+    if (m_app_scope.has_value())
+        page.async_set_standalone_display(true);
     page.async_set_zoom_level(m_zoom_level);
     if (m_window_position.has_value())
         page.async_set_window_position(m_window_position->to_type<Web::DevicePixels>());
@@ -6087,16 +6096,16 @@ void ViewImplementation::download_url(URL::URL const& url, PromptForPath prompt_
 
     if (prompt_for_path == PromptForPath::No) {
         if (auto download_path = Application::the().default_path_for_downloaded_file(suggested_filename); !download_path.is_error())
-            Application::the().file_downloader().download_file(is_private(), url, download_path.release_value(), FileDownloader::MayReplaceDestination::No);
+            Application::the().file_downloader().download_file(is_private(), url, download_path.release_value(), FileDownloader::MayReplaceDestination::No, {}, view_id());
         return;
     }
 
-    Application::the().path_for_downloaded_file(suggested_filename)->when_resolved([is_private = is_private(), url](auto const& download_path) {
+    Application::the().path_for_downloaded_file(suggested_filename)->when_resolved([is_private = is_private(), url, source_view_id = view_id()](auto const& download_path) {
         // NB: A file at a path the user chose was there when the user chose to replace it, as saving asks before replacing.
         auto may_replace_destination = FileSystem::exists(download_path.string())
             ? FileDownloader::MayReplaceDestination::Yes
             : FileDownloader::MayReplaceDestination::No;
-        Application::the().file_downloader().download_file(is_private, url, download_path, may_replace_destination);
+        Application::the().file_downloader().download_file(is_private, url, download_path, may_replace_destination, {}, source_view_id);
     });
 }
 

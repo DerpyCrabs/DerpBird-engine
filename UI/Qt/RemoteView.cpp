@@ -52,6 +52,7 @@ RemoteView::RemoteView(Optional<u64> view_id, Hub::View::InitialState initial_st
             .owner_view_id = initial_state.owner_view_id,
             .websites_prefer_dark = initial_state.websites_prefer_dark,
             .is_tab = initial_state.is_tab,
+            .app_scope = initial_state.app_scope,
         });
         m_view_id = view.view_id();
         m_state = view.take_state();

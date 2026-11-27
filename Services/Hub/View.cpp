@@ -111,6 +111,7 @@ View::View(InitialState initial_state)
     m_device_pixel_ratio = initial_state.device_pixel_ratio;
     m_maximum_frames_per_second = initial_state.maximum_frames_per_second;
     m_display_id = initial_state.display_id;
+    m_app_scope = move(initial_state.app_scope);
     m_screen_shows_high_dynamic_range = initial_state.screen_shows_high_dynamic_range;
     set_scales_frames_to_fit(initial_state.scales_frames_to_fit);
     m_backing_stores = make<BackingStoresInUI>(*this);

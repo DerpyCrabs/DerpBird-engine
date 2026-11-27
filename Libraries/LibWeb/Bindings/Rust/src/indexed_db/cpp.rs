@@ -26,6 +26,14 @@ unsafe extern "C" {
     fn web_indexed_db_wrap_dom_exception(realm: *mut c_void, exception: *mut c_void) -> *mut c_void;
     fn web_indexed_db_queue_a_database_task(cell: *mut c_void, steps: unsafe extern "C" fn(*mut c_void, *mut c_void));
     fn web_indexed_db_run_in_parallel(cell: *mut c_void, steps: unsafe extern "C" fn(*mut c_void, *mut c_void));
+    fn web_indexed_db_commit(realm: *mut c_void, name: ak::Span<'_, u8>, revision: i64, snapshot: ak::Span<'_, u8>) -> bool;
+    fn web_indexed_db_catalog(realm: *mut c_void, target: *mut c_void, receive: unsafe extern "C" fn(*mut c_void, ak::Span<'_, u8>)) -> i64;
+    fn web_indexed_db_read(
+        realm: *mut c_void,
+        name: ak::Span<'_, u8>,
+        target: *mut c_void,
+        receive: unsafe extern "C" fn(*mut c_void, ak::Span<'_, u8>),
+    ) -> i64;
     fn web_indexed_db_current_event_loop() -> *mut c_void;
     fn web_indexed_db_enqueue_check_pending_connection_wait(database: *mut c_void);
     fn web_indexed_db_devtools_client_is_active(realm: *mut c_void) -> bool;
@@ -44,6 +52,48 @@ unsafe extern "C" {
     fn web_indexed_db_json_null() -> *mut c_void;
     fn web_indexed_db_json_array() -> *mut c_void;
     fn web_indexed_db_json_array_append(array: *mut c_void, value: *mut c_void);
+}
+
+pub(crate) fn stored_database_infos(realm: Gc<Realm>) -> Result<Option<Vec<(Utf16String, u64)>>, ()> {
+    unsafe extern "C" fn receive(target: *mut c_void, bytes: ak::Span<'_, u8>) {
+        // SAFETY: target borrows the caller's result for the synchronous callback.
+        let entries = unsafe { &mut *target.cast::<Result<Vec<(Utf16String, u64)>, ()>>() };
+        if let Ok(list) = entries {
+            if let Some(entry) = crate::indexed_db::internal::snapshot::catalog_entry(bytes.as_slice()) {
+                list.push(entry);
+            } else {
+                *entries = Err(());
+            }
+        }
+    }
+    let mut entries: Result<Vec<(Utf16String, u64)>, ()> = Ok(Vec::new());
+    // SAFETY: All callback arguments are live until the read returns.
+    match unsafe { web_indexed_db_catalog(realm.as_ptr().cast(), (&raw mut entries).cast(), receive) } {
+        0 => entries.map(Some),
+        -2 => Ok(None),
+        _ => Err(()),
+    }
+}
+
+pub(crate) fn commit_database(realm: Gc<Realm>, name: &Utf16String, revision: i64, snapshot: &[u8]) -> bool {
+    let name: Vec<u8> = name.to_utf16().iter().flat_map(|unit| unit.to_le_bytes()).collect();
+    // SAFETY: The realm and both byte slices are live for the synchronous write.
+    unsafe { web_indexed_db_commit(realm.as_ptr().cast(), ak::Span::new(&name), revision, ak::Span::new(snapshot)) }
+}
+
+pub(crate) fn read_database(realm: Gc<Realm>, name: &Utf16String) -> (i64, Vec<u8>) {
+    unsafe extern "C" fn receive(target: *mut c_void, bytes: ak::Span<'_, u8>) {
+        // SAFETY: The synchronous caller lends its output vector for the callback.
+        unsafe { &mut *target.cast::<Vec<u8>>() }.extend_from_slice(bytes.as_slice());
+    }
+
+    let name: Vec<u8> = name.to_utf16().iter().flat_map(|unit| unit.to_le_bytes()).collect();
+    let mut bytes = Vec::new();
+    // SAFETY: All borrowed arguments stay live until the synchronous call returns.
+    let revision = unsafe {
+        web_indexed_db_read(realm.as_ptr().cast(), ak::Span::new(&name), (&raw mut bytes).cast(), receive)
+    };
+    (revision, bytes)
 }
 
 /// A WebIDL::DOMException of LibWeb.

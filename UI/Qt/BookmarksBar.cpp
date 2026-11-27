@@ -1343,7 +1343,7 @@ void BookmarksBar::paintEvent(QPaintEvent* event)
 
 bool BookmarksBar::handle_middle_mouse_click(QMouseEvent* event, QObject* item)
 {
-    auto activate_tab = event->modifiers().testFlag(Qt::ShiftModifier) ? Web::HTML::ActivateTab::No : Web::HTML::ActivateTab::Yes;
+    auto activate_tab = event->modifiers().testFlag(Qt::ShiftModifier) ? Web::HTML::ActivateTab::Yes : Web::HTML::ActivateTab::No;
 
     if (auto* button = as_if<QToolButton>(item)) {
         auto* action = button->defaultAction();

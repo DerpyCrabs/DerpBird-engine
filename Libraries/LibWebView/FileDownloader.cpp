@@ -215,9 +215,9 @@ static String status_to_error_string(Optional<Requests::NetworkError> const& net
     return MUST(String::formatted("Received error response code {} while downloading file", *response_code));
 }
 
-u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, LexicalPath destination, MayReplaceDestination may_replace_destination, RefPtr<HTTP::HeaderList> request_headers)
+u64 FileDownloader::download_file(IsPrivate is_private, URL::URL const& url, LexicalPath destination, MayReplaceDestination may_replace_destination, RefPtr<HTTP::HeaderList> request_headers, Optional<u64> source_view_id)
 {
-    auto download_id = start_download(is_private, url, move(destination), {}, may_replace_destination);
+    auto download_id = start_download(is_private, url, move(destination), {}, may_replace_destination, source_view_id);
     auto* active = active_download(download_id);
     if (!active)
         return download_id;
@@ -296,14 +296,14 @@ void FileDownloader::follow_download_redirect(u64 download_id, HTTP::HeaderList 
 }
 
 u64 FileDownloader::adopt_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, HTTP::Cookie::SameSiteContext same_site_context, int request_server_client_id, u64 request_server_request_id, int owner_client_id, ReadonlyBytes initial_data,
-    ResponseFinished on_response_finished)
+    ResponseFinished on_response_finished, Optional<u64> source_view_id)
 {
     ScopeGuard report_failure = [&] {
         if (on_response_finished)
             on_response_finished(0, nullptr,
                 "Unable to adopt the download response"sv);
     };
-    auto download_id = start_download(is_private, url, move(destination), total_size);
+    auto download_id = start_download(is_private, url, move(destination), total_size, MayReplaceDestination::No, source_view_id);
     auto* active = active_download(download_id);
     if (!active)
         return download_id;
@@ -960,12 +960,13 @@ void FileDownloader::restart_download_from_zero(u64 download_id, String reason_i
     start_download_request(download_id, active->effective_url);
 }
 
-u64 FileDownloader::start_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, MayReplaceDestination may_replace_destination)
+u64 FileDownloader::start_download(IsPrivate is_private, URL::URL const& url, LexicalPath destination, Optional<u64> total_size, MayReplaceDestination may_replace_destination, Optional<u64> source_view_id)
 {
     auto download_id = m_next_download_id++;
 
     m_downloads.append(Download {
         .id = download_id,
+        .source_view_id = source_view_id,
         .is_private = is_private,
         .url = url,
         .destination = move(destination),
@@ -1381,6 +1382,7 @@ void FileDownloader::adopt_download_store(Badge<Application>, DownloadStore& dow
             .error = {},
             .bytes_per_second = {},
             .created_time = record.created_time,
+            .finished_time = record.finished_time,
         };
         if (record.total_size >= 0) download.total_size = static_cast<u64>(record.total_size);
         if (!record.error.is_empty()) download.error = record.error;
@@ -1792,8 +1794,10 @@ void FileDownloader::notify_download_added(Download const& download)
         observer.download_added(download);
 }
 
-void FileDownloader::notify_download_updated(Download const& download)
+void FileDownloader::notify_download_updated(Download& download)
 {
+    if (download.status == DownloadStatus::Completed && download.finished_time == UnixDateTime {})
+        download.finished_time = UnixDateTime::now();
     static_assert(static_cast<u8>(DownloadStatus::Completed) == 2);
     static_assert(static_cast<u8>(DownloadStatus::Canceled) == 3);
     static_assert(static_cast<u8>(DownloadStatus::Failed) == 4);
@@ -1807,7 +1811,7 @@ void FileDownloader::notify_download_updated(Download const& download)
             static_cast<i64>(download.id), download.url.serialize(),
             MUST(String::from_byte_string(download.destination.string())), static_cast<u8>(download.status),
             static_cast<i64>(download.downloaded_size), download.total_size.has_value() ? static_cast<i64>(*download.total_size) : -1,
-            download.error.value_or(String {}), download.created_time });
+            download.error.value_or(String {}), download.created_time, download.finished_time });
     }
     RefPtr<AdoptedResponseObserver> response_observer;
     Optional<Download> finished_download;

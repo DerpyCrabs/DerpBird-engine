@@ -53,6 +53,7 @@ struct DownloadHistoryRecord {
     i64 total_size { -1 }; // Unknown size.
     String error;
     UnixDateTime created_time;
+    UnixDateTime finished_time {};
 };
 
 class WEBVIEW_API DownloadStore {

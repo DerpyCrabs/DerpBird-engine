@@ -233,7 +233,7 @@ PermissionPromptQueue::~PermissionPromptQueue()
 void PermissionPromptQueue::enqueue(WebView::PermissionPromptRequest request, WebView::PermissionPromptCallback on_outcome)
 {
     m_pending.append({ move(request), move(on_outcome) });
-    if (!m_current)
+    if (!m_current && !m_web_request.has_value())
         show_next();
 }
 
@@ -241,6 +241,13 @@ void PermissionPromptQueue::cancel(WebView::PermissionPromptRequest const& reque
 {
     m_pending.remove_all_matching([&](auto const& pending) { return pending.request.is_same_request_as(request); });
 
+    if (m_web_request.has_value() && m_web_request->is_same_request_as(request)) {
+        hide_web();
+        m_web_request.clear();
+        m_current_callback = {};
+        show_next();
+        return;
+    }
     if (!m_current || !m_current->request().is_same_request_as(request))
         return;
     auto* popover = exchange(m_current, nullptr);
@@ -254,6 +261,12 @@ void PermissionPromptQueue::cancel(WebView::PermissionPromptRequest const& reque
 void PermissionPromptQueue::ignore_all()
 {
     auto pending = move(m_pending);
+    if (m_web_request.has_value()) {
+        hide_web();
+        m_web_request.clear();
+        auto callback = move(m_current_callback);
+        callback(Web::Permissions::PromptOutcome::Ignored);
+    }
     if (m_current)
         m_current->ignore();
     for (auto& entry : pending)
@@ -262,6 +275,7 @@ void PermissionPromptQueue::ignore_all()
 
 void PermissionPromptQueue::suspend()
 {
+    if (!m_suspended && m_web_request.has_value()) hide_web();
     m_suspended = true;
     if (m_current)
         m_current->suspend();
@@ -269,17 +283,34 @@ void PermissionPromptQueue::suspend()
 
 void PermissionPromptQueue::resume()
 {
-    m_suspended = false;
+    bool was_suspended = exchange(m_suspended, false);
+    if (was_suspended && m_web_request.has_value()) present_web();
     if (m_current)
         m_current->resume();
 }
 
+void PermissionPromptQueue::present_web()
+{
+    show_web(*m_web_request, [this](auto outcome) {
+        m_web_request.clear();
+        auto callback = move(m_current_callback);
+        callback(outcome);
+        show_next();
+    });
+}
+
 void PermissionPromptQueue::show_next()
 {
-    if (m_pending.is_empty() || !create_popover)
+    if (m_pending.is_empty() || (!create_popover && !show_web))
         return;
 
     auto next = m_pending.take_first();
+    if (show_web) {
+        m_web_request = move(next.request);
+        m_current_callback = move(next.on_outcome);
+        if (!m_suspended) present_web();
+        return;
+    }
     m_current = create_popover(next.request);
     m_current_callback = move(next.on_outcome);
     m_current->on_outcome = [this](Web::Permissions::PromptOutcome outcome) {

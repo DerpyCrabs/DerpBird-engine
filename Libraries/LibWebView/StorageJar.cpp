@@ -34,6 +34,34 @@ ErrorOr<Database::MigrationOutcome> StorageJar::migrate_schema(Database::Databas
                 );
             )#"sv,
         },
+        {
+            .version = 3u,
+            .sql = R"#(
+                CREATE TABLE IndexedDBDatabases (
+                    storage_key TEXT NOT NULL,
+                    database_name BLOB NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision > 0),
+                    snapshot BLOB NOT NULL,
+                    last_access_time INTEGER NOT NULL,
+                    PRIMARY KEY(storage_key, database_name)
+                ) WITHOUT ROWID;
+            )#"sv,
+        },
+        {
+            .version = 4u,
+            .sql = R"#(
+                ALTER TABLE IndexedDBDatabases ADD COLUMN store_bytes INTEGER NOT NULL DEFAULT 0;
+                -- Keep the lookup index separate from potentially large data blobs.
+                CREATE TABLE IndexedDBStores (
+                    storage_key TEXT NOT NULL, database_name BLOB NOT NULL, name BLOB NOT NULL,
+                    data BLOB NOT NULL, PRIMARY KEY(storage_key, database_name, name)
+                );
+                CREATE TRIGGER indexed_db_clear_stores AFTER UPDATE OF snapshot ON IndexedDBDatabases
+                WHEN length(NEW.snapshot) = 0 BEGIN
+                    DELETE FROM IndexedDBStores WHERE storage_key = NEW.storage_key AND database_name = NEW.database_name;
+                END;
+            )#"sv,
+        },
     });
 
     return database.migrate("WebStorage"sv, migrations, mode);
@@ -42,7 +70,19 @@ ErrorOr<Database::MigrationOutcome> StorageJar::migrate_schema(Database::Databas
 ErrorOr<NonnullOwnPtr<StorageJar>> StorageJar::create(Database::Database& database)
 {
     Statements statements {};
+    // Only the format header and committed version are needed for IDBFactory.databases().
+    statements.indexed_db_catalog = TRY(database.prepare_statement("SELECT CAST(substr(snapshot, 1, 13) || database_name AS BLOB) FROM IndexedDBDatabases WHERE storage_key = ? AND length(snapshot) > 0"sv));
+    statements.read_indexed_db = TRY(database.prepare_statement("SELECT d.revision, d.snapshot, s.data FROM IndexedDBDatabases d LEFT JOIN IndexedDBStores s USING(storage_key, database_name) WHERE d.storage_key = ? AND d.database_name = ? ORDER BY s.name"sv));
+    statements.insert_indexed_db = TRY(database.prepare_statement("INSERT INTO IndexedDBDatabases(snapshot, last_access_time, storage_key, database_name, revision) VALUES (?, ?, ?, ?, 1) ON CONFLICT DO NOTHING RETURNING revision"sv));
+    statements.update_indexed_db = TRY(database.prepare_statement("UPDATE IndexedDBDatabases SET snapshot = ?, last_access_time = ?, revision = revision + 1 WHERE storage_key = ? AND database_name = ? AND revision = ? RETURNING revision"sv));
 
+    statements.put_indexed_db_store = TRY(database.prepare_statement("INSERT OR REPLACE INTO IndexedDBStores(storage_key, database_name, name, data) VALUES (?, ?, ?, ?)"sv));
+    statements.clear_indexed_db_stores = TRY(database.prepare_statement("DELETE FROM IndexedDBStores WHERE storage_key = ? AND database_name = ?"sv));
+    statements.store_size = TRY(database.prepare_statement("UPDATE IndexedDBDatabases SET store_bytes = (SELECT COALESCE(SUM(length(data)), 0) FROM IndexedDBStores WHERE storage_key = ?1 AND database_name = ?2) WHERE storage_key = ?1 AND database_name = ?2"sv));
+
+    statements.clear_indexed_db_origin = TRY(database.prepare_statement("UPDATE IndexedDBDatabases SET snapshot = zeroblob(0), store_bytes = 0, revision = revision + 1 WHERE storage_key = ? AND length(snapshot) > 0"sv));
+    statements.clear_indexed_db_since = TRY(database.prepare_statement("UPDATE IndexedDBDatabases SET snapshot = zeroblob(0), store_bytes = 0, revision = revision + 1 WHERE last_access_time >= ? AND length(snapshot) > 0"sv));
+    statements.indexed_db_usage = TRY(database.prepare_statement("SELECT COALESCE(SUM(length(snapshot) + store_bytes), 0) FROM IndexedDBDatabases WHERE storage_key = ?"sv));
     statements.get_item = TRY(database.prepare_statement("SELECT bottle_value FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key = ?;"sv));
     statements.set_item = TRY(database.prepare_statement("INSERT OR REPLACE INTO WebStorage (storage_endpoint, storage_key, bottle_key, bottle_value, last_access_time) VALUES (?, ?, ?, ?, ?);"sv));
     statements.delete_item = TRY(database.prepare_statement("DELETE FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key = ?;"sv));
@@ -53,9 +93,9 @@ ErrorOr<NonnullOwnPtr<StorageJar>> StorageJar::create(Database::Database& databa
     statements.get_keys = TRY(database.prepare_statement("SELECT bottle_key FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ?;"sv));
     statements.get_items = TRY(database.prepare_statement("SELECT bottle_key, bottle_value FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ?;"sv));
     statements.calculate_size_excluding_bottle_key = TRY(database.prepare_statement("SELECT COALESCE(SUM(OCTET_LENGTH(bottle_key) + OCTET_LENGTH(bottle_value)), 0) FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ? AND bottle_key != ?;"sv));
-    statements.calculate_size = TRY(database.prepare_statement("SELECT COALESCE(SUM(COALESCE(OCTET_LENGTH(bottle_key), 0) + COALESCE(OCTET_LENGTH(bottle_value), 0)), 0) FROM WebStorage WHERE storage_key = ?;"sv));
+    statements.calculate_size = TRY(database.prepare_statement("SELECT (SELECT COALESCE(SUM(OCTET_LENGTH(bottle_key) + OCTET_LENGTH(bottle_value)), 0) FROM WebStorage WHERE storage_key = ?1) + (SELECT COALESCE(SUM(length(snapshot) + store_bytes), 0) FROM IndexedDBDatabases WHERE storage_key = ?1);"sv));
     statements.calculate_bottle_size = TRY(database.prepare_statement("SELECT COALESCE(SUM(COALESCE(OCTET_LENGTH(bottle_key), 0) + COALESCE(OCTET_LENGTH(bottle_value), 0)), 0) FROM WebStorage WHERE storage_endpoint = ? AND storage_key = ?;"sv));
-    statements.estimate_storage_size_accessed_since = TRY(database.prepare_statement("SELECT COALESCE(SUM(COALESCE(OCTET_LENGTH(storage_key), 0) + COALESCE(OCTET_LENGTH(bottle_key), 0) + COALESCE(OCTET_LENGTH(bottle_value), 0)), 0) FROM WebStorage WHERE last_access_time >= ?;"sv));
+    statements.estimate_storage_size_accessed_since = TRY(database.prepare_statement("SELECT (SELECT COALESCE(SUM(OCTET_LENGTH(storage_key) + OCTET_LENGTH(bottle_key) + OCTET_LENGTH(bottle_value)), 0) FROM WebStorage WHERE last_access_time >= ?1) + (SELECT COALESCE(SUM(length(snapshot) + store_bytes), 0) FROM IndexedDBDatabases WHERE last_access_time >= ?1);"sv));
 
     return adopt_own(*new StorageJar { PersistedStorage { database, statements } });
 }
@@ -73,6 +113,83 @@ StorageJar::StorageJar(Optional<PersistedStorage> persisted_storage)
 StorageJar::~StorageJar()
 {
     StorageAreaRegistry::the().remove_areas_of({}, *this);
+}
+
+ErrorOr<Vector<ByteBuffer>> StorageJar::indexed_db_catalog(String const& storage_key)
+{
+    Vector<ByteBuffer> entries;
+    if (m_persisted_storage.has_value()) {
+        auto& storage = *m_persisted_storage;
+        TRY(storage.database->try_execute_statement(storage.statements.indexed_db_catalog, [&](auto id) -> ErrorOr<void> {
+            return entries.try_append(storage.database->result_column<ByteBuffer>(id, 0));
+        }, storage_key));
+    }
+    return entries;
+}
+
+ErrorOr<Optional<StorageJar::IndexedDBSnapshot>> StorageJar::read_indexed_db(String const& storage_key, ReadonlyBytes database_name)
+{
+    Optional<IndexedDBSnapshot> result;
+    if (!m_persisted_storage.has_value())
+        return result;
+    auto& storage = *m_persisted_storage;
+    TRY(storage.database->try_execute_statement(storage.statements.read_indexed_db, [&](auto id) -> ErrorOr<void> {
+        if (!result.has_value())
+            result = IndexedDBSnapshot { storage.database->result_column<i64>(id, 0), storage.database->result_column<ByteBuffer>(id, 1) };
+        auto store = storage.database->result_column<ByteBuffer>(id, 2);
+        TRY(result->bytes.try_append(store.bytes()));
+        return {};
+    }, storage_key, database_name));
+    return result;
+}
+
+ErrorOr<bool> StorageJar::commit_indexed_db(String const& storage_key, ReadonlyBytes database_name, i64 expected_revision, ReadonlyBytes snapshot)
+{
+    if (!m_persisted_storage.has_value())
+        return Error::from_string_literal("IndexedDB persistence requires a disk-backed storage jar");
+    auto& storage = *m_persisted_storage;
+    bool committed = false;
+    auto on_row = [&](auto) -> ErrorOr<void> {
+        committed = true;
+        return {};
+    };
+    auto now = UnixDateTime::now();
+    // Legacy snapshots and deletion tombstones have no framed stores.
+    bool framed = snapshot.size() >= 5 && snapshot.slice(0, 5) == "IDB\0\2"sv.bytes();
+    if (framed && (snapshot.size() < 18 || snapshot[17] > 1))
+        return Error::from_string_literal("Invalid IndexedDB store header");
+    auto header = framed ? snapshot.slice(0, 17) : snapshot;
+    TRY(storage.database->transaction([&]() -> ErrorOr<void> {
+        if (expected_revision == 0)
+            TRY(storage.database->try_execute_statement(storage.statements.insert_indexed_db, move(on_row), header, now, storage_key, database_name));
+        else
+            TRY(storage.database->try_execute_statement(storage.statements.update_indexed_db, move(on_row), header, now, storage_key, database_name, expected_revision));
+        if (!committed)
+            return {};
+        if (!framed || snapshot[17])
+            TRY(storage.database->try_execute_statement(storage.statements.clear_indexed_db_stores, {}, storage_key, database_name));
+        auto frames = framed ? snapshot.slice(18) : ReadonlyBytes {};
+        auto read_length = [](ReadonlyBytes bytes) -> u32 {
+            return u32(bytes[0]) | (u32(bytes[1]) << 8) | (u32(bytes[2]) << 16) | (u32(bytes[3]) << 24);
+        };
+        while (!frames.is_empty()) {
+            if (frames.size() < 4)
+                return Error::from_string_literal("Truncated IndexedDB frame");
+            auto length = read_length(frames);
+            frames = frames.slice(4);
+            if (length < 4 || length > frames.size())
+                return Error::from_string_literal("Invalid IndexedDB store size");
+            auto data = frames.slice(0, length);
+            auto units = read_length(data);
+            if (units > (length - 4) / 2)
+                return Error::from_string_literal("Invalid IndexedDB store name");
+            TRY(storage.database->try_execute_statement(storage.statements.put_indexed_db_store, {}, storage_key, database_name, data.slice(4, units * 2), data));
+            frames = frames.slice(length);
+        }
+        TRY(storage.database->try_execute_statement(storage.statements.store_size, {}, storage_key, database_name));
+        return {};
+    }));
+    return committed;
 }
 
 void StorageJar::notify(StorageChange const& change)
@@ -139,6 +256,10 @@ void StorageJar::remove_items_accessed_since(UnixDateTime since)
 
 void StorageJar::clear_storage_key(StorageEndpointType storage_endpoint, String const& storage_key)
 {
+    if (storage_endpoint == StorageEndpointType::IndexedDB && m_persisted_storage.has_value()) {
+        m_persisted_storage->database->execute_statement(m_persisted_storage->statements.clear_indexed_db_origin, {}, storage_key);
+        return;
+    }
     if (get_all_keys(storage_endpoint, storage_key).is_empty())
         return;
 
@@ -397,6 +518,7 @@ Vector<StorageBottleLocation> StorageJar::PersistedStorage::delete_items_accesse
         },
         since);
 
+    database->execute_statement(statements.clear_indexed_db_since, {}, since);
     database->execute_statement(statements.delete_items_accessed_since, {}, since);
     return affected_bottles;
 }
@@ -414,6 +536,13 @@ void StorageJar::PersistedStorage::mark_accessed(StorageEndpointType storage_end
 u64 StorageJar::PersistedStorage::bottle_usage(StorageEndpointType storage_endpoint, String const& storage_key)
 {
     u64 current_size_in_bytes = 0;
+    if (storage_endpoint == StorageEndpointType::IndexedDB) {
+        database->execute_statement(statements.indexed_db_usage, [&](auto statement_id) -> ErrorOr<void> {
+            current_size_in_bytes = database->result_column<i64>(statement_id, 0);
+            return {};
+        }, storage_key);
+        return current_size_in_bytes;
+    }
     database->execute_statement(
         statements.calculate_bottle_size,
         [&](auto statement_id) -> ErrorOr<void> {

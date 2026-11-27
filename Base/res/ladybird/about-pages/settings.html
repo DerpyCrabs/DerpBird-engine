@@ -978,14 +978,16 @@
         <main class="settings-content">
             <p id="search-empty" class="search-empty" hidden>No settings match this search.</p>
             <div class="tab-panel active" id="tab-appearance" data-title="Appearance">
+                <h2 class="panel-heading">Appearance</h2>
+                <h3 class="card-title">Browser</h3>
                 <div class="card">
                     <div class="card-body">
                         <div class="card-group inline-container">
-                            <span>Appearance</span>
-                            <div id="interface-theme" class="segmented" role="radiogroup" aria-label="Appearance">
-                                <label><input type="radio" name="interface-theme" value="system" />System</label>
-                                <label><input type="radio" name="interface-theme" value="light" />Light</label>
-                                <label><input type="radio" name="interface-theme" value="dark" />Dark</label>
+                            <span>Browser theme</span>
+                            <div id="interface-theme" class="theme-choices" role="radiogroup" aria-label="Browser theme">
+                                <label><span class="haz-theme-preview theme-system" aria-hidden="true"><i></i><i></i><i></i></span><input type="radio" name="interface-theme" value="system" />System</label>
+                                <label><span class="haz-theme-preview theme-light" aria-hidden="true"><i></i><i></i><i></i></span><input type="radio" name="interface-theme" value="light" />Light</label>
+                                <label><span class="haz-theme-preview theme-dark" aria-hidden="true"><i></i><i></i><i></i></span><input type="radio" name="interface-theme" value="dark" />Dark</label>
                             </div>
                         </div>
                         <div class="card-group inline-container">
@@ -1030,6 +1032,39 @@
                                 </label>
                             </div>
                         </div>
+                        <div id="tab-layout-group" class="card-group">
+
+                        </div>
+                        <div class="card-group inline-container hidden">
+                            <label for="vertical-tabs-expand-on-hover"
+                                >Expand vertical tabs on hover when collapsed</label
+                            >
+                            <input id="vertical-tabs-expand-on-hover" type="checkbox" switch />
+                        </div>
+                        <div class="card-group inline-container hidden">
+                            <label for="vertical-tabs-position">Sidebar position</label>
+                            <select id="vertical-tabs-position">
+                                <option value="left">Left</option>
+                                <option value="right">Right</option>
+                            </select>
+                        </div>
+                        <div class="card-group inline-container" id="show-menu-bar-group">
+                            <label for="show-menu-bar">Show system menu bar</label>
+                            <input id="show-menu-bar" type="checkbox" switch />
+                        </div>
+                        <div class="card-group inline-container">
+                            <label for="show-bookmarks-bar">Show bookmarks bar</label>
+                            <select id="show-bookmarks-bar">
+                                <option value="always">Always</option>
+                                <option value="never">Never</option>
+                                <option value="onHover">Only when hovering the navigation toolbar</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <h3 class="card-title">Web pages</h3>
+                <div class="card">
+                    <div class="card-body">
                         <div class="card-group inline-container">
                             <span>
                                 Websites
@@ -1062,47 +1097,6 @@
                                     Overrides…
                                 </button>
                             </div>
-                        </div>
-                        <div id="tab-layout-group" class="card-group">
-
-                        </div>
-                        <div class="card-group inline-container control-row hidden">
-                            <label for="vertical-tabs-expand-on-hover">
-                                Expand vertical tabs on hover when collapsed
-                            </label>
-                            <input id="vertical-tabs-expand-on-hover" type="checkbox" switch />
-                        </div>
-                        <div class="card-group inline-container control-row hidden">
-                            <label for="vertical-tabs-position">Sidebar position</label>
-                            <select id="vertical-tabs-position">
-                                <option value="left">Left</option>
-                                <option value="right">Right</option>
-                            </select>
-                        </div>
-                        <div class="card-group inline-container control-row">
-                            <label for="always-show-scrollbars">Always show scrollbars</label>
-                            <input id="always-show-scrollbars" type="checkbox" switch />
-                        </div>
-                        <div class="card-group inline-container control-row" id="show-menu-bar-group">
-                            <label for="show-menu-bar">Show system menu bar</label>
-                            <input id="show-menu-bar" type="checkbox" switch />
-                        </div>
-                        <div class="card-group inline-container control-row hidden" id="window-decorations-group">
-                            <label for="use-client-side-window-decorations">
-                                Use client-side window decorations
-                                <p class="description">
-                                    Use custom title bar and window controls instead of the system window frame.
-                                </p>
-                            </label>
-                            <input id="use-client-side-window-decorations" type="checkbox" switch />
-                        </div>
-                        <div class="card-group inline-container control-row">
-                            <label for="show-bookmarks-bar">Show bookmarks bar</label>
-                            <select id="show-bookmarks-bar">
-                                <option value="always">Always</option>
-                                <option value="never">Never</option>
-                                <option value="onHover">Only when hovering the navigation toolbar</option>
-                            </select>
                         </div>
                         <div class="card-group inline-container control-row">
                             <label for="default-zoom-level">Default page zoom</label>

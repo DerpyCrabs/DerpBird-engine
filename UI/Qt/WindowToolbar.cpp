@@ -2219,8 +2219,8 @@ void WindowToolbar::move_popover_to_button(Popover& popover, QWidget& button)
 
 void WindowToolbar::download_added(WebView::FileDownloader::Download const& download)
 {
-    // NB: A window lists the downloads of its own browsing session only.
-    if (download.is_private != m_is_private)
+    // Standalone windows present their own download notification.
+    if (browser_window().is_app_window() || download.is_private != m_is_private)
         return;
     update_downloads_button();
     if (browser_window().isActiveWindow()) {

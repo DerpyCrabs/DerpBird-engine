@@ -53,7 +53,7 @@ ConnectionFromUI::ConnectionFromUI(NonnullOwnPtr<IPC::Transport> transport)
 
     auto& browser_process = Application::the().browser_process();
     browser_process.on_new_tab = [this](auto const& urls) { async_app_open_new_tab(urls); };
-    browser_process.on_new_window = [this](auto const& urls) { async_app_open_new_window(urls); };
+    browser_process.on_new_window = [this](auto const& urls, bool app_window) { async_app_open_new_window(urls, app_window); };
 }
 
 ConnectionFromUI::~ConnectionFromUI()
@@ -189,6 +189,7 @@ static DownloadState state_of_download(WebView::FileDownloader::Download const& 
 {
     DownloadState state;
     state.id = download.id;
+    state.source_view_id = download.source_view_id;
     state.is_private = download.is_private;
     state.url = download.url;
     state.destination = download.destination.string();
@@ -201,6 +202,7 @@ static DownloadState state_of_download(WebView::FileDownloader::Download const& 
     state.bytes_per_second = download.bytes_per_second;
     state.is_waiting_to_retry = download.is_waiting_to_retry;
     state.created_time = download.created_time;
+    state.finished_time = download.finished_time;
     state.segments = Application::the().file_downloader().segment_progress(download.id);
     return state;
 }
@@ -610,6 +612,7 @@ Messages::HubServer::InitializeResponse ConnectionFromUI::initialize()
     state.downloads = downloads();
     state.urls = options.urls;
     state.raw_urls = options.raw_urls;
+    state.standalone_app = options.new_window == WebView::NewWindow::App;
     state.crash_report_directory = WebView::CrashReportStore::the().directory();
     state.devtools_port = options.devtools_port;
     auto const& profile = Application::profile();
@@ -636,6 +639,7 @@ Messages::HubServer::CreateViewResponse ConnectionFromUI::create_view(Hub::NewVi
         .owner_view_id = request.owner_view_id,
         .websites_prefer_dark = request.websites_prefer_dark,
         .is_tab = request.is_tab,
+        .app_scope = request.app_scope,
     });
     return { view.view_id(), view.current_state() };
 }

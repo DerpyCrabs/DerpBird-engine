@@ -3723,6 +3723,12 @@ void ConnectionFromClient::set_maximum_frames_per_second(Web::PageId page_id, do
         page->set_maximum_frames_per_second(maximum_frames_per_second);
 }
 
+void ConnectionFromClient::set_standalone_display(Web::PageId page_id, bool standalone)
+{
+    if (auto page = this->page(page_id); page.has_value())
+        page->set_standalone_display(standalone);
+}
+
 void ConnectionFromClient::set_screen_shows_high_dynamic_range(Web::PageId page_id, bool screen_shows_high_dynamic_range)
 {
     if (auto page = this->page(page_id); page.has_value())

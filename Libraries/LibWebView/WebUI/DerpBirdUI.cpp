@@ -50,7 +50,7 @@ void DerpBirdUI::request(JsonValue const& data)
     auto command = payload->as_object().get_object("command"sv);
     if (command.has_value() && command->get_string("type"sv) == "download.action"sv) {
         auto action = command->get_string("action"sv);
-        if (action.has_value() && action->is_one_of("open"sv, "reveal"sv) && !client().page(page_id())->consume_transient_user_activation()) {
+        if (action.has_value() && action->is_one_of("open"sv, "reveal"sv, "drag"sv) && !client().page(page_id())->consume_transient_user_activation()) {
             JsonObject response;
             response.set("requestId"sv, *request_id);
             response.set("ok"sv, false);

@@ -104,6 +104,7 @@ public:
     virtual double maximum_frames_per_second() const override { return m_maximum_frames_per_second; }
     void set_transparent_background(bool);
     void set_preferred_color_scheme(Web::CSS::PreferredColorScheme);
+    void set_standalone_display(bool);
     void set_screen_shows_high_dynamic_range(bool);
     void set_preferred_contrast(Web::CSS::PreferredContrast);
     void set_preferred_motion(Web::CSS::PreferredMotion);
@@ -260,6 +261,7 @@ private:
     virtual size_t screen_count() const override { return m_all_screen_rects.size(); }
     virtual bool has_transparent_background() const override { return m_transparent_background; }
     virtual Web::CSS::PreferredColorScheme preferred_color_scheme() const override { return m_preferred_color_scheme; }
+    virtual bool standalone_display() const override { return m_standalone_display; }
     virtual bool screen_shows_high_dynamic_range() const override { return m_screen_shows_high_dynamic_range; }
     virtual Web::CSS::PreferredContrast preferred_contrast() const override { return m_preferred_contrast; }
     virtual Web::CSS::PreferredMotion preferred_motion() const override { return m_preferred_motion; }
@@ -336,6 +338,9 @@ private:
     virtual void page_did_store_hsts_policy_for_testing(String const&, HTTP::HSTS::ParsedHSTSPolicy const&) override;
     virtual void page_did_request_clear_storage_for_testing(Web::StorageAPI::StorageEndpointType, Web::HTML::EnvironmentSettingsObject const&) override;
     virtual bool page_did_is_known_hsts_host(String const&) override;
+    virtual i64 indexed_db_catalog(Web::HTML::EnvironmentId const&, Vector<ByteBuffer>&) override;
+    virtual i64 read_indexed_db(Web::HTML::EnvironmentId const&, ByteBuffer const&, ByteBuffer&) override;
+    virtual bool commit_indexed_db(Web::HTML::EnvironmentId const&, ByteBuffer const&, i64, ByteBuffer const&) override;
     virtual u64 page_did_request_storage_usage(Web::HTML::EnvironmentId const& environment_id) override;
     virtual void page_did_update_indexed_database(String const& url, Web::IndexedDB::TransactionChanges const&) override;
     virtual void page_did_update_resource_count(i32) override;
@@ -498,6 +503,7 @@ private:
 
     bool m_transparent_background { false };
     Web::CSS::PreferredColorScheme m_preferred_color_scheme { Web::CSS::PreferredColorScheme::Auto };
+    bool m_standalone_display { false };
     bool m_screen_shows_high_dynamic_range { false };
     Web::CSS::PreferredContrast m_preferred_contrast { Web::CSS::PreferredContrast::NoPreference };
     Web::CSS::PreferredMotion m_preferred_motion { Web::CSS::PreferredMotion::NoPreference };

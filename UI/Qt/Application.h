@@ -53,6 +53,7 @@ struct WindowConfiguration {
     Optional<Web::DevicePixels> width {};
     Optional<Web::DevicePixels> height {};
     Optional<bool> maximized {};
+    QString app_id {};
 };
 
 class DerpBirdScriptStore;
@@ -105,7 +106,7 @@ public:
     ErrorOr<int> execute();
 
     Function<void(Vector<URL::URL> const&)> on_new_tab;
-    Function<void(Vector<URL::URL> const&)> on_new_window;
+    Function<void(Vector<URL::URL> const&, bool app_window)> on_new_window;
     static WebView::Settings& settings() { return *s_the->m_settings; }
     static Bookmarks& bookmarks() { return *s_the->m_bookmarks; }
     static BookmarkStore& bookmark_store() { return *s_the->m_bookmark_store; }
@@ -154,6 +155,7 @@ public:
 
     void open_new_tab();
     void open_new_window(WebView::IsPrivate);
+    void open_view_in_new_tab(u64 view_id, Optional<u64> source_view_id, WebView::IsPrivate, Web::HTML::ActivateTab);
     enum class ReopenClosedWindow {
         InNewWindow,
         InTargetWindow,
@@ -167,6 +169,7 @@ public:
     void focus_location_editor();
     void show_process_manager();
     void set_shows_compositor_layers(bool);
+    static BrowserWindow* shell_dialog_window();
     // Asks every window's pages if they may unload, one window at a time. Once all of them agree, it confirms stopping
     // the downloads and quits; if a page refuses or the downloads are kept, the quit is canceled and no window closes.
     void quit();
@@ -285,7 +288,6 @@ private:
 
     BrowserWindow* window_of_view(u64 view_id) const;
     BrowserWindow* window_for_new_tab(Optional<u64> source_view_id, WebView::IsPrivate) const;
-    void open_view_in_new_tab(u64 view_id, Optional<u64> source_view_id, WebView::IsPrivate, Web::HTML::ActivateTab);
     void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab, Optional<u64> source_view_id, WebView::IsPrivate) const;
     void open_urls_in_new_tabs(ReadonlySpan<URL::URL>) const;
     void open_url_in_new_window(URL::URL const&, WebView::IsPrivate);

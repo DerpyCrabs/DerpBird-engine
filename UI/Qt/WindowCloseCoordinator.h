@@ -17,6 +17,7 @@ public:
 
     bool start(Vector<Preflight>, Function<void()> on_approved, Function<void()> on_canceled);
     void cancel();
+    void recheck(Preflight preflight) { VERIFY(m_is_running); m_preflights.append(move(preflight)); }
 
     bool is_running() const { return m_is_running; }
 

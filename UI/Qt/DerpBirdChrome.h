@@ -19,6 +19,7 @@
 #include <QWidget>
 #include <UI/Qt/ContentSurfaceState.h>
 #include <UI/Qt/DerpBirdSecretClipboard.h>
+#include <UI/Qt/DerpBirdDialog.h>
 #include <UI/Qt/DerpBirdCredentialProposal.h>
 
 namespace Ladybird {
@@ -26,7 +27,6 @@ namespace Ladybird {
 class DerpBirdImport;
 class DerpBirdActivityOverlay;
 class DerpBirdDevTools;
-class DerpBirdFilePicker;
 class BrowserWindow;
 class DerpBirdCredentialFill;
 class DerpBirdScriptInstall;
@@ -34,6 +34,7 @@ class DerpBirdSourceDownload;
 class Tab;
 class WebContentView;
 
+class DerpBirdFilePicker;
 class DerpBirdChrome final : public QWidget
     , public WebView::SettingsObserver
     , private RemoteDownloadsObserver {
@@ -43,12 +44,14 @@ public:
     void observe_tab(Tab&);
     void unobserve_tab(Tab&);
     void queue_snapshot();
+    DerpBirdDialog& window_dialog() { return m_window_dialog; }
     void focus_address();
     void show_downloads();
 
     void cycle_workspace_tab(int direction);
     ErrorOr<void> inspect_tab(Tab&, Optional<Web::UniqueNodeID> = {});
     void update_display_metadata(double device_pixel_ratio, Optional<u64> display_id, double refresh_rate);
+    Tab* successor_for_close(Tab&) const;
     Tab* tree_parent(Tab&) const;
     void group_tab_from_view(Tab& child, Optional<u64> source_view_id);
     ErrorOr<void> detach_tree_tab(Tab&);
@@ -60,6 +63,10 @@ private:
     void download_added(RemoteDownloads::Download const& d) override { download_updated(d); }
     void download_updated(RemoteDownloads::Download const&) override;
     void download_removed(u64, WebView::IsPrivate) override;
+    DerpBirdFilePicker* m_file_picker { nullptr };
+    DerpBirdDialog m_window_dialog;
+    String m_focused_dialog;
+    QPointer<QWidget> m_dialog_previous_focus;
     QString m_automation_window_id;
     QHash<QString, QPointer<DerpBirdActivityOverlay>> m_activity_overlays;
     struct Workspace { QString id; QString name; QString icon; QString color; QPointer<Tab> last_tab; };
@@ -73,7 +80,6 @@ private:
     void workspace_tab_changed();
     ErrorOr<void> workspace_command(JsonObject const&, StringView);
     QPointer<DerpBirdImport> m_import;
-    DerpBirdFilePicker* m_file_picker { nullptr };
     bool m_password_import { false };
     ErrorOr<void> set_tree_parent(Tab&, Tab*);
     void normalize_tree_order();
@@ -139,6 +145,7 @@ private:
     QHash<Tab*, Observation> m_observed_tabs;
     u64 m_revision { 0 };
     bool m_focus_address_pending { false };
+    QHash<u64, String> m_download_thumbnails;
     bool m_snapshot_queued { false };
 };
 

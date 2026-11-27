@@ -635,8 +635,9 @@ CSS::Parser::ValueParserFFI::FfiMediaFeatureValue Window::query_media_feature(CS
     case CSS::MediaFeatureID::DeviceWidth:
         return length_media_feature_value(page().web_exposed_screen_area().width());
     case CSS::MediaFeatureID::DisplayMode:
-        // FIXME: Detect if window is fullscreen
-        return ident_media_feature_value(CSS::Keyword::Browser);
+        if (associated_document().fullscreen_element())
+            return ident_media_feature_value(CSS::Keyword::Fullscreen);
+        return ident_media_feature_value(page().client().standalone_display() ? CSS::Keyword::Standalone : CSS::Keyword::Browser);
     case CSS::MediaFeatureID::DynamicRange:
         return ident_media_feature_value(page().client().screen_shows_high_dynamic_range() ? CSS::Keyword::High : CSS::Keyword::Standard);
     case CSS::MediaFeatureID::EnvironmentBlending:

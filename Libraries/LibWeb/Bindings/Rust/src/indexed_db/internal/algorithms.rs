@@ -41,7 +41,7 @@ use crate::indexed_db::idb_record::{IDBRecord, IndexRecord, ObjectStoreRecord, S
 use crate::indexed_db::idb_request::{AnyIDBRequest, IDBRequest, IDBRequestSource};
 use crate::indexed_db::idb_transaction::{IDBTransaction, IDBTransactionMode, TransactionState};
 use crate::indexed_db::idb_version_change_event::{IDBVersionChangeEvent, IDBVersionChangeEventInit};
-use crate::indexed_db::internal::database::Database;
+use crate::indexed_db::internal::database::{Database, DatabaseRef};
 use crate::indexed_db::internal::function::{
     Function, FunctionWith, NoCells, Operation, create_function, create_operation, perform_operation,
 };
@@ -110,6 +110,30 @@ fn call_completion<A: 'static>(vm: &Vm, queue: ConnectionQueueRef, completion: F
     queue.request_list.on_request_processed(vm);
 }
 
+fn load_database(vm: &Vm, realm: Gc<Realm>, key: &StorageKey, name: &Utf16String) -> Result<DatabaseRef, DomException> {
+    if let Some(database) = Database::for_key_and_name(vm, key, name) {
+        return Ok(database);
+    }
+    let (revision, bytes) = crate::indexed_db::cpp::read_database(realm, name);
+    let database = Database::create(vm, name);
+    if revision == -2 {
+        return Ok(database);
+    }
+    if revision < 0 {
+        return Err(DomException::create("UnknownError", "Could not read the stored database"));
+    }
+    // A deleted database retains its revision so an outstanding writer cannot recreate it.
+    if !bytes.is_empty() {
+        super::snapshot::restore(vm, database, &bytes)
+            .ok_or_else(|| DomException::create("UnknownError", "Could not decode the stored database"))?;
+        if bytes.starts_with(b"IDB\0\x01") {
+            database.legacy_snapshot.replace(bytes);
+        }
+    }
+    database.disk_revision.set(Some(revision));
+    Ok(database)
+}
+
 // https://w3c.github.io/IndexedDB/#open-a-database-connection
 pub(crate) fn open_a_database_connection(
     vm: &Vm,
@@ -138,14 +162,15 @@ pub(crate) fn open_a_database_connection(
         ),
         |vm, &(realm, queue, ref storage_key, ref name, maybe_version, request, on_complete), ()| {
             // 4. Let db be the database named name in storageKey, or null otherwise.
-            let maybe_db = Database::for_key_and_name(vm, &storage_key.0, name);
-
-            // 5. If version is undefined, let version be 1 if db is null, or db’s version otherwise.
-            let version = maybe_version.unwrap_or_else(|| maybe_db.map_or(1, |db| db.version()));
-
-            // 6. If db is null, let db be a new database with name name, version 0 (zero), and with no object stores.
-            //    If this fails for any reason, return an appropriate error (e.g. a QuotaExceededError, or an "UnknownError" DOMException).
-            let db = maybe_db.unwrap_or_else(|| Database::create_for_key_and_name(vm, &storage_key.0, name));
+            let db = match load_database(vm, realm, &storage_key.0, name) {
+                Ok(database) => database,
+                Err(error) => {
+                    call_completion(vm, queue, on_complete, Err(error));
+                    return;
+                }
+            };
+            storage(vm).set_database(vm, &storage_key.0, name, db);
+            let version = maybe_version.unwrap_or_else(|| db.version().max(1));
 
             // 7. If db’s version is greater than version, return a newly created "VersionError" DOMException and abort these steps.
             if db.version() > version {
@@ -691,9 +716,16 @@ pub(crate) fn delete_a_database(
         (realm, queue, NoCells(storage_key), name, request, on_complete),
         |vm, &(realm, queue, ref storage_key, ref name, request, on_complete), ()| {
             // 4. Let db be the database named name in storageKey, if one exists. Otherwise, return 0 (zero).
-            let Some(db) = Database::for_key_and_name(vm, &storage_key.0, name) else {
-                call_completion(vm, queue, on_complete, Ok(0));
-                return;
+            let db = match load_database(vm, realm, &storage_key.0, name) {
+                Ok(database) if database.version() > 0 => database,
+                Ok(_) => {
+                    call_completion(vm, queue, on_complete, Ok(0));
+                    return;
+                }
+                Err(error) => {
+                    call_completion(vm, queue, on_complete, Err(error));
+                    return;
+                }
             };
 
             // 5. Let openConnections be the set of all connections associated with db.
@@ -766,12 +798,18 @@ pub(crate) fn delete_a_database(
                         &open_connections.0,
                         create_function(
                             vm,
-                            (queue, db, storage_key.clone(), name.clone(), on_complete),
-                            |vm, &(queue, db, ref storage_key, ref name, on_complete), ()| {
+                            (realm, queue, db, storage_key.clone(), name.clone(), on_complete),
+                            |vm, &(realm, queue, db, ref storage_key, ref name, on_complete), ()| {
                                 // 10. Let version be db’s version.
                                 let version = db.version();
 
                                 // 11. Delete db. If this fails for any reason, return an appropriate error (e.g. a QuotaExceededError, or an "UnknownError" DOMException).
+                                if let Some(revision) = db.disk_revision.get()
+                                    && !crate::indexed_db::cpp::commit_database(realm, name, revision, &[])
+                                {
+                                    call_completion(vm, queue, on_complete, Err(DomException::create("UnknownError", "Could not delete the stored database")));
+                                    return;
+                                }
                                 Database::delete_for_key_and_name(vm, &storage_key.0, name);
 
                                 // 12. Return version.
@@ -1133,6 +1171,34 @@ pub(crate) fn create_a_sorted_name_list(vm: &Vm, mut names: Vec<Utf16String>) ->
     DOMStringList::create(vm, names)
 }
 
+fn persist_transaction(vm: &Vm, transaction: Ref<IDBTransaction>) -> Option<()> {
+    let database = transaction.connection_object().associated_database();
+    let Some(revision) = database.disk_revision.get() else { return Some(()) };
+    let next_revision = revision.checked_add(1)?;
+    let changes = if transaction.is_upgrade_transaction() {
+        super::snapshot::encode_stores(vm, database, &database.object_stores(vm).values(), true)?
+    } else if !database.legacy_snapshot.borrow().is_empty() {
+        // Convert an existing profile once. Other transactions may already have
+        // uncommitted changes in stores outside this transaction's scope.
+        let committed = Database::create(vm, &database.name());
+        super::snapshot::restore(vm, committed, &database.legacy_snapshot.borrow())?;
+        for store in transaction.scope(vm).values().iter() {
+            let old = committed.object_store_with_name(&store.name())?;
+            Database::remove_object_store(committed, vm, old);
+            Database::add_object_store(committed, vm, *store);
+        }
+        super::snapshot::encode_stores(vm, committed, &committed.object_stores(vm).values(), true)?
+    } else {
+        super::snapshot::encode_stores(vm, database, &transaction.scope(vm).values(), false)?
+    };
+    if !crate::indexed_db::cpp::commit_database(transaction.realm(), &database.name(), revision, &changes) {
+        return None;
+    }
+    database.legacy_snapshot.take();
+    database.disk_revision.set(Some(next_revision));
+    Some(())
+}
+
 // https://w3c.github.io/IndexedDB/#commit-a-transaction
 pub(crate) fn commit_a_transaction(vm: &Vm, transaction: Ref<IDBTransaction>) {
     // 1. Set transaction’s state to committing.
@@ -1153,8 +1219,10 @@ pub(crate) fn commit_a_transaction(vm: &Vm, transaction: Ref<IDBTransaction>) {
                 return;
             }
 
-            // FIXME: 3. Attempt to write any outstanding changes made by transaction to the database, considering transaction’s durability hint.
-            // FIXME: 4. If an error occurs while writing the changes to the database, then run abort a transaction with transaction and an appropriate type for the error, for example a QuotaExceededError or an "UnknownError" DOMException, and terminate these steps.
+            if !transaction.is_readonly() && persist_transaction(vm, transaction).is_none() {
+                abort_a_transaction(vm, transaction, Some(DomException::create("UnknownError", "Could not commit the database transaction")));
+                return;
+            }
 
             // 5. Queue a database task to run these steps:
             queue_a_database_task(

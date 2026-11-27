@@ -247,6 +247,9 @@ private:
     virtual Messages::WebContentClient::DidRequestNotificationsStateForTestingResponse did_request_notifications_state_for_testing(Web::PageId) override;
     virtual Messages::WebContentClient::DidRequestCookieResponse did_request_cookie(Web::PageId page_id, Optional<Web::HTML::EnvironmentId>, URL::URL, HTTP::Cookie::Source) override;
     virtual void did_close_browsing_context(Web::PageId page_id) override;
+    virtual Messages::WebContentClient::IndexedDbCatalogResponse indexed_db_catalog(Web::PageId page_id, Web::HTML::EnvironmentId environment_id) override;
+    virtual Messages::WebContentClient::ReadIndexedDbResponse read_indexed_db(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, ByteBuffer name) override;
+    virtual Messages::WebContentClient::CommitIndexedDbResponse commit_indexed_db(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, ByteBuffer name, i64 revision, ByteBuffer snapshot) override;
     virtual Messages::WebContentClient::DidRequestStorageUsageResponse did_request_storage_usage(Web::PageId page_id, Web::HTML::EnvironmentId environment_id) override;
     virtual Messages::WebContentClient::ConnectToStorageAreaResponse connect_to_storage_area(Web::PageId page_id, Web::StorageAPI::StorageEndpointType, Web::HTML::EnvironmentId environment_id) override;
     virtual void disconnect_from_storage_area(Web::StorageAPI::StorageAreaId) override;

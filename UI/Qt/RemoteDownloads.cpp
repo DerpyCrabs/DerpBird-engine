@@ -20,6 +20,7 @@ static RemoteDownloads::Download download_from(Hub::DownloadState const& state)
 {
     return {
         .id = state.id,
+        .source_view_id = state.source_view_id,
         .is_private = state.is_private,
         .url = state.url,
         .destination = LexicalPath { state.destination },
@@ -32,6 +33,7 @@ static RemoteDownloads::Download download_from(Hub::DownloadState const& state)
         .bytes_per_second = state.bytes_per_second,
         .is_waiting_to_retry = state.is_waiting_to_retry,
         .created_time = state.created_time,
+        .finished_time = state.finished_time,
     };
 }
 

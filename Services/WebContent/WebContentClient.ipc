@@ -211,6 +211,9 @@ endpoint WebContentClient routed by Web::PageId page_id
     did_release_image_decoder() =|
     request_video_presentation_channel() =|
 
+    [NotRouted] indexed_db_catalog(Web::PageId page_id, Web::HTML::EnvironmentId environment_id) => (i64 status, Vector<ByteBuffer> entries)
+    [NotRouted] read_indexed_db(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, ByteBuffer name) => (i64 revision, ByteBuffer snapshot)
+    [NotRouted] commit_indexed_db(Web::PageId page_id, Web::HTML::EnvironmentId environment_id, ByteBuffer name, i64 revision, ByteBuffer snapshot) => (bool committed)
     [NotRouted] did_request_storage_usage(Web::PageId page_id, Web::HTML::EnvironmentId environment_id) => (u64 usage)
     [NotRouted] connect_to_storage_area(Web::PageId page_id, Web::StorageAPI::StorageEndpointType storage_endpoint, Web::HTML::EnvironmentId environment_id) => (Optional<Web::StorageAPI::StorageAreaId> area_id, Vector<Utf16String> keys, Vector<Utf16String> values, u64 usage)
     disconnect_from_storage_area(Web::StorageAPI::StorageAreaId area_id) =|

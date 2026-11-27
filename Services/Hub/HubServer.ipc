@@ -122,6 +122,7 @@ struct Hub::NewViewRequest {
     Optional<u64> owner_view_id;
     bool websites_prefer_dark;
     bool is_tab;
+    Optional<URL::URL> app_scope;
 }
 
 // What the UI asks of the Hub.

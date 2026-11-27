@@ -522,6 +522,14 @@ void PageClient::set_preferred_color_scheme(Web::CSS::PreferredColorScheme color
     page().invalidate_style_for_preference_change();
 }
 
+void PageClient::set_standalone_display(bool standalone)
+{
+    if (m_standalone_display == standalone)
+        return;
+    m_standalone_display = standalone;
+    page().invalidate_style_for_preference_change();
+}
+
 void PageClient::set_screen_shows_high_dynamic_range(bool screen_shows_high_dynamic_range)
 {
     if (m_screen_shows_high_dynamic_range == screen_shows_high_dynamic_range)
@@ -1833,6 +1841,30 @@ bool PageClient::page_did_is_known_hsts_host(String const& domain)
         Core::Process::terminate_immediately(0);
     }
     return response->result();
+}
+
+i64 PageClient::indexed_db_catalog(Web::HTML::EnvironmentId const& environment_id, Vector<ByteBuffer>& entries)
+{
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::IndexedDbCatalog>(m_id, environment_id);
+    if (!response)
+        return -1;
+    entries = response->take_entries();
+    return response->status();
+}
+
+i64 PageClient::read_indexed_db(Web::HTML::EnvironmentId const& environment_id, ByteBuffer const& name, ByteBuffer& snapshot)
+{
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::ReadIndexedDb>(m_id, environment_id, name);
+    if (!response)
+        return -1;
+    snapshot = response->take_snapshot();
+    return response->revision();
+}
+
+bool PageClient::commit_indexed_db(Web::HTML::EnvironmentId const& environment_id, ByteBuffer const& name, i64 revision, ByteBuffer const& snapshot)
+{
+    auto response = client().send_sync_but_allow_failure<Messages::WebContentClient::CommitIndexedDb>(m_id, environment_id, name, revision, snapshot);
+    return response && response->committed();
 }
 
 u64 PageClient::page_did_request_storage_usage(Web::HTML::EnvironmentId const& environment_id)
